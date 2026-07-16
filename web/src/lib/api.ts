@@ -98,6 +98,7 @@ export interface Meeting {
   ended_at?: string;
   status: 'active' | 'completed' | 'cancelled';
   summary?: string;
+  title?: string;
   rep_name?: string;
   customer_name?: string;
 }
@@ -130,7 +131,7 @@ export async function getMeetingSegments(id: string): Promise<{ segments: Transc
 
 export async function updateMeeting(
   id: string,
-  data: Partial<Pick<Meeting, 'status' | 'ended_at' | 'summary'>>
+  data: Partial<Pick<Meeting, 'status' | 'ended_at' | 'summary' | 'title'>>
 ): Promise<Meeting> {
   return request('PATCH', `/api/meetings/${id}`, data);
 }

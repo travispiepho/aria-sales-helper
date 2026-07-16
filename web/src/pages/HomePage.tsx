@@ -106,21 +106,13 @@ export default function HomePage() {
           <p className="text-sm text-gray-500 mb-4">
             Start a meeting to capture the conversation and intake details.
           </p>
-          <div className="flex gap-3">
-            <button
-              onClick={() => handleStartMeeting()}
-              disabled={starting}
-              className="flex-1 bg-brand-700 hover:bg-brand-800 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
-            >
-              {starting ? 'Starting…' : '▶ Start Meeting'}
-            </button>
-            <button
-              onClick={() => setShowIntake(true)}
-              className="px-4 py-3 border border-gray-300 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-colors text-sm"
-            >
-              + Customer
-            </button>
-          </div>
+          <button
+            onClick={() => setShowIntake(true)}
+            disabled={starting}
+            className="w-full bg-brand-700 hover:bg-brand-800 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
+          >
+            {starting ? 'Starting…' : '▶ Start Meeting'}
+          </button>
         </div>
 
         {/* Today's Meetings */}
@@ -149,7 +141,7 @@ export default function HomePage() {
                     <div className="flex items-start justify-between pr-8">
                       <div>
                         <p className="font-medium text-gray-900">
-                          {m.customer_name || 'No customer linked'}
+                          {m.title || m.customer_name || 'No customer linked'}
                         </p>
                         <p className="text-sm text-gray-500 mt-0.5">
                           {formatDate(m.started_at)}
@@ -193,7 +185,7 @@ export default function HomePage() {
                       <div className="flex items-start justify-between pr-8">
                         <div>
                           <p className="font-medium text-gray-900">
-                            {m.customer_name || 'No customer linked'}
+                            {m.title || m.customer_name || 'No customer linked'}
                           </p>
                           <p className="text-sm text-gray-500 mt-0.5">
                             {formatDate(m.started_at)}

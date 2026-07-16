@@ -356,7 +356,7 @@ fastify.get('/api/meetings/:id', { preHandler: [requireAuth] }, async (request, 
 
 fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request, reply) => {
   const { id } = request.params;
-  const { status, ended_at, summary } = request.body || {};
+  const { status, ended_at, summary, title } = request.body || {};
 
   // Verify meeting exists and belongs to user (or admin)
   const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
@@ -376,6 +376,7 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   if (status !== undefined) { updates.push(`status = $${idx++}`); values.push(status); }
   if (ended_at !== undefined) { updates.push(`ended_at = $${idx++}`); values.push(ended_at); }
   if (summary !== undefined) { updates.push(`summary = $${idx++}`); values.push(summary); }
+  if (title !== undefined) { updates.push(`title = $${idx++}`); values.push(title); }
 
   if (updates.length === 0) {
     return reply.code(400).send({ error: 'No fields to update' });

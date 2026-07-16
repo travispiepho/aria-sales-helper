@@ -74,6 +74,8 @@ export default function MeetingPage() {
   // Post-meeting
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [title, setTitle] = useState<string>('');
+  const [titleSaving, setTitleSaving] = useState(false);
 
   // Refs for audio pipeline
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -99,6 +101,7 @@ export default function MeetingPage() {
     ])
       .then(([m, { segments: saved }]) => {
         setMeeting(m);
+        setTitle(m.title || m.customer_name || '');
         if (saved.length > 0) {
           setSegments(saved.map(s => ({
             speaker: s.speaker,
@@ -373,6 +376,21 @@ export default function MeetingPage() {
     }
   }
 
+  // ─── Save title ───────────────────────────────────────────────────────────
+
+  async function handleSaveTitle() {
+    if (!meetingId || !title.trim()) return;
+    setTitleSaving(true);
+    try {
+      const updated = await updateMeeting(meetingId, { title: title.trim() });
+      setMeeting(prev => prev ? { ...prev, title: updated.title } : prev);
+    } catch {
+      // silent fail
+    } finally {
+      setTitleSaving(false);
+    }
+  }
+
   // ─── Generate summary ─────────────────────────────────────────────────────
 
   async function handleGenerateSummary() {
@@ -587,6 +605,31 @@ export default function MeetingPage() {
                 </div>
               </div>
             )}
+
+            {/* Editable Title */}
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">
+                Meeting Title
+              </h3>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={title}
+                  onChange={e => setTitle(e.target.value)}
+                  onBlur={handleSaveTitle}
+                  onKeyDown={e => e.key === 'Enter' && handleSaveTitle()}
+                  placeholder={meeting?.customer_name || 'Add a title…'}
+                  className="flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500"
+                />
+                <button
+                  onClick={handleSaveTitle}
+                  disabled={titleSaving}
+                  className="px-3 py-2 bg-brand-700 hover:bg-brand-800 disabled:opacity-50 text-white text-sm font-medium rounded-xl transition-colors"
+                >
+                  {titleSaving ? '…' : 'Save'}
+                </button>
+              </div>
+            </div>
 
             {/* Summary */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">

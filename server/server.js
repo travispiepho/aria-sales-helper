@@ -52,30 +52,41 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// ─── In-memory session store (Phase 1 — replace with Redis in production) ────
+// ─── Postgres-backed session store (survives restarts) ──────────────────────
 
-const sessions = new Map(); // sessionId → { userId, createdAt }
+async function ensureSessionsTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      user_id UUID NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL
+    )
+  `);
+}
 
-function createSession(userId) {
+async function createSession(userId) {
   const sessionId = randomUUID();
-  sessions.set(sessionId, { userId, createdAt: Date.now() });
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  await pool.query(
+    'INSERT INTO sessions (id, user_id, expires_at) VALUES ($1, $2, $3)',
+    [sessionId, userId, expiresAt]
+  );
   return sessionId;
 }
 
-function getSession(sessionId) {
+async function getSession(sessionId) {
   if (!sessionId) return null;
-  const session = sessions.get(sessionId);
-  if (!session) return null;
-  // 24h expiry
-  if (Date.now() - session.createdAt > 24 * 60 * 60 * 1000) {
-    sessions.delete(sessionId);
-    return null;
-  }
-  return session;
+  const result = await pool.query(
+    'SELECT user_id FROM sessions WHERE id = $1 AND expires_at > NOW()',
+    [sessionId]
+  );
+  if (result.rows.length === 0) return null;
+  return { userId: result.rows[0].user_id };
 }
 
-function deleteSession(sessionId) {
-  sessions.delete(sessionId);
+async function deleteSession(sessionId) {
+  await pool.query('DELETE FROM sessions WHERE id = $1', [sessionId]);
 }
 
 // ─── Fastify setup ────────────────────────────────────────────────────────────
@@ -110,7 +121,7 @@ fastify.decorateRequest('user', null);
 fastify.addHook('preHandler', async (request, reply) => {
   // Attach user to request if session cookie present
   const sessionId = request.cookies?.session_id;
-  const session = getSession(sessionId);
+  const session = await getSession(sessionId);
   if (session) {
     const result = await pool.query('SELECT id, name, email, role FROM users WHERE id = $1', [session.userId]);
     if (result.rows.length > 0) {
@@ -162,7 +173,7 @@ fastify.post('/api/auth/login', async (request, reply) => {
     return reply.code(401).send({ error: 'Invalid credentials' });
   }
 
-  const sessionId = createSession(user.id);
+  const sessionId = await createSession(user.id);
 
   reply
     .setCookie('session_id', sessionId, {
@@ -185,7 +196,7 @@ fastify.post('/api/auth/login', async (request, reply) => {
 fastify.post('/api/auth/logout', async (request, reply) => {
   const sessionId = request.cookies?.session_id;
   if (sessionId) {
-    deleteSession(sessionId);
+    await deleteSession(sessionId);
   }
   reply
     .clearCookie('session_id', { path: '/' })
@@ -493,7 +504,7 @@ async function authWebSocket(request) {
   });
 
   const sessionId = cookies['session_id'];
-  const session = getSession(sessionId);
+  const session = await getSession(sessionId);
   if (!session) return null;
 
   const result = await pool.query('SELECT id, name, email, role FROM users WHERE id = $1', [session.userId]);
@@ -692,8 +703,9 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 try {
+  await ensureSessionsTable();
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
-  console.log(`SorterPro server running on port ${PORT}`);
+  console.log(`ARIA server running on port ${PORT}`);
   console.log(`WebSocket audio endpoint: ws://localhost:${PORT}/meetings/:id/audio`);
 } catch (err) {
   fastify.log.error(err);

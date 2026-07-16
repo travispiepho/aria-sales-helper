@@ -1,0 +1,201 @@
+import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../lib/auth';
+import { listMeetings, createMeeting, Meeting } from '../lib/api';
+import CustomerIntakeModal from '../components/CustomerIntakeModal';
+
+function formatDate(iso: string) {
+  const d = new Date(iso);
+  const today = new Date();
+  const isToday = d.toDateString() === today.toDateString();
+
+  if (isToday) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function statusBadge(status: Meeting['status']) {
+  const map: Record<Meeting['status'], string> = {
+    active: 'bg-green-100 text-green-800',
+    completed: 'bg-gray-100 text-gray-600',
+    cancelled: 'bg-red-100 text-red-700',
+  };
+  return map[status] ?? 'bg-gray-100 text-gray-600';
+}
+
+export default function HomePage() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showIntake, setShowIntake] = useState(false);
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    loadMeetings();
+  }, []);
+
+  async function loadMeetings() {
+    try {
+      const data = await listMeetings();
+      setMeetings(data);
+    } catch {
+      // silent
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleStartMeeting(customerId?: string) {
+    setStarting(true);
+    try {
+      const meeting = await createMeeting(customerId);
+      navigate(`/meetings/${meeting.id}`);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'Failed to start meeting');
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  // Today's meetings
+  const todayStr = new Date().toDateString();
+  const todayMeetings = meetings.filter(
+    m => new Date(m.started_at).toDateString() === todayStr
+  );
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <div className="bg-brand-700 text-white px-4 pt-4 pb-6 safe-top">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold">ARIA</h1>
+            <p className="text-brand-100 text-sm">Hey {user?.name?.split(' ')[0]} 👋</p>
+          </div>
+          <button
+            onClick={logout}
+            className="text-brand-100 text-sm px-3 py-1 rounded-full border border-brand-400 hover:bg-brand-800"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="px-4 -mt-2 pb-24">
+        {/* Start Meeting CTA */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 mb-6">
+          <h2 className="font-semibold text-gray-900 mb-1">Ready to meet?</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Start a meeting to capture the conversation and intake details.
+          </p>
+          <div className="flex gap-3">
+            <button
+              onClick={() => handleStartMeeting()}
+              disabled={starting}
+              className="flex-1 bg-brand-700 hover:bg-brand-800 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
+            >
+              {starting ? 'Starting…' : '▶ Start Meeting'}
+            </button>
+            <button
+              onClick={() => setShowIntake(true)}
+              className="px-4 py-3 border border-gray-300 rounded-xl text-gray-700 font-medium hover:bg-gray-50 transition-colors text-sm"
+            >
+              + Customer
+            </button>
+          </div>
+        </div>
+
+        {/* Today's Meetings */}
+        <div>
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">
+            Today's Meetings
+          </h2>
+
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="animate-spin h-6 w-6 border-4 border-brand-600 border-t-transparent rounded-full" />
+            </div>
+          ) : todayMeetings.length === 0 ? (
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 text-center">
+              <div className="text-3xl mb-2">📋</div>
+              <p className="text-gray-500 text-sm">No meetings yet today</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {todayMeetings.map(m => (
+                <button
+                  key={m.id}
+                  onClick={() => navigate(`/meetings/${m.id}`)}
+                  className="w-full bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <p className="font-medium text-gray-900">
+                        {m.customer_name || 'No customer linked'}
+                      </p>
+                      <p className="text-sm text-gray-500 mt-0.5">
+                        {formatDate(m.started_at)}
+                      </p>
+                    </div>
+                    <span className={`text-xs font-medium px-2 py-1 rounded-full capitalize ${statusBadge(m.status)}`}>
+                      {m.status}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Recent (non-today) */}
+        {meetings.filter(m => new Date(m.started_at).toDateString() !== todayStr).length > 0 && (
+          <div className="mt-6">
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">
+              Recent
+            </h2>
+            <div className="space-y-3">
+              {meetings
+                .filter(m => new Date(m.started_at).toDateString() !== todayStr)
+                .slice(0, 5)
+                .map(m => (
+                  <button
+                    key={m.id}
+                    onClick={() => navigate(`/meetings/${m.id}`)}
+                    className="w-full bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="font-medium text-gray-900">
+                          {m.customer_name || 'No customer linked'}
+                        </p>
+                        <p className="text-sm text-gray-500 mt-0.5">
+                          {formatDate(m.started_at)}
+                        </p>
+                      </div>
+                      <span className={`text-xs font-medium px-2 py-1 rounded-full capitalize ${statusBadge(m.status)}`}>
+                        {m.status}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Customer Intake Modal */}
+      {showIntake && (
+        <CustomerIntakeModal
+          onClose={() => setShowIntake(false)}
+          onCreated={(customerId) => {
+            setShowIntake(false);
+            handleStartMeeting(customerId);
+          }}
+        />
+      )}
+    </div>
+  );
+}

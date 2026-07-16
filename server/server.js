@@ -604,7 +604,7 @@ fastify.post('/api/meetings/:id/consent', { preHandler: [requireAuth] }, async (
 // ─── Phase 2: Summary endpoint ────────────────────────────────────────────────
 // POST /api/meetings/:id/summary — generate + store AI summary
 
-fastify.post('/api/meetings/:id/summary', { preHandler: [requireAuth] }, async (request, reply) => {
+fastify.post('/api/meetings/:id/summary', { preHandler: [requireAuth], config: { rawBody: false } }, async (request, reply) => {
   const { id } = request.params;
 
   // Verify meeting

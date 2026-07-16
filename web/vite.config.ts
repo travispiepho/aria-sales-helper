@@ -11,7 +11,7 @@ export default defineConfig({
       manifest: {
         name: 'ARIA',
         short_name: 'ARIA',
-        description: 'CertaPro Sales Helper — live transcription and coaching for in-home meetings',
+        description: 'CertaPro Sales Helper — live transcription and coaching for in-home meetings v2',
         theme_color: '#1d4ed8',
         background_color: '#ffffff',
         display: 'standalone',
@@ -35,16 +35,9 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        runtimeCaching: [
-          {
-            urlPattern: /^\/api\//,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              networkTimeoutSeconds: 10,
-            },
-          },
-        ],
+        // Never cache API calls — always go to network
+        navigateFallback: 'index.html',
+        runtimeCaching: [],
       },
     }),
   ],

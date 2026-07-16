@@ -128,7 +128,10 @@ export default function MeetingPage() {
 
   useEffect(() => {
     if (userScrolledUpRef.current) return;
-    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = transcriptContainerRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
   }, [segments, interimText]);
 
   // ─── Cleanup on unmount ────────────────────────────────────────────────────

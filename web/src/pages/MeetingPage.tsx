@@ -410,6 +410,7 @@ export default function MeetingPage() {
     try {
       const res = await apiFetch(`/api/meetings/${meetingId}/summary`, {
         method: 'POST',
+        body: JSON.stringify({}),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));

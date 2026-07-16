@@ -666,6 +666,10 @@ fastify.post('/api/meetings/:id/summary', { preHandler: [requireAuth] }, async (
         })
       });
       const orData = await orRes.json();
+      if (!orRes.ok) {
+        fastify.log.error('OpenRouter summary error:', JSON.stringify(orData));
+        return reply.code(502).send({ error: `Summary failed: ${orData.error?.message || orRes.status}` });
+      }
       summaryText = orData.choices?.[0]?.message?.content || 'Summary unavailable';
     } catch (err) {
       summaryText = `Summary generation failed: ${err.message}`;

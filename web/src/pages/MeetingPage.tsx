@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getMeeting, updateMeeting, Meeting } from '../lib/api';
+import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,9 @@ export default function MeetingPage() {
 
   // Speaker labels (editable)
   const [speakerLabels, setSpeakerLabels] = useState<Record<string, string>>({});
+
+  // Coaching state (Phase 3)
+  const [coachingData, setCoachingData] = useState<CoachingData | null>(null);
 
   // Post-meeting
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -179,6 +183,9 @@ export default function MeetingPage() {
               },
             ]);
           }
+        } else if (msg.type === 'coaching' && msg.data) {
+          // Phase 3: real-time coaching update
+          setCoachingData(msg.data as CoachingData);
         }
       } catch {
         // ignore malformed messages
@@ -481,6 +488,9 @@ export default function MeetingPage() {
                 </p>
               )}
             </div>
+
+            {/* Phase 3: Coaching Panel */}
+            <CoachingPanel coaching={coachingData} defaultCollapsed={false} />
 
             {/* Live transcript */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">

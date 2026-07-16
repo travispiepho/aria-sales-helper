@@ -2,6 +2,7 @@
  * server.js — SorterPro Sales Helper API
  * Phase 1: Auth, meetings, customers
  * Phase 2: WebSocket audio → Deepgram live transcription, consent, summary
+ * Phase 3: Real-time coaching engine (DISC, stage, checklist, nudges)
  */
 
 import Fastify from 'fastify';
@@ -11,6 +12,9 @@ import websocketPlugin from '@fastify/websocket';
 import pg from 'pg';
 import bcrypt from 'bcrypt';
 import { randomUUID } from 'crypto';
+import { readFile } from 'fs/promises';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import WebSocket from 'ws';
 
@@ -21,7 +25,8 @@ const { Pool } = pg;
 const DATABASE_URL = process.env.DATABASE_URL;
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+// Support both OPENROUTER_API_KEY (canonical) and OPENROUTER_KEY (legacy .env.secrets)
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_KEY;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -32,6 +37,71 @@ if (!DATABASE_URL) {
 
 if (!DEEPGRAM_API_KEY) {
   console.warn('WARN: DEEPGRAM_API_KEY not set — WebSocket audio endpoint will reject connections.');
+}
+
+if (!OPENROUTER_API_KEY) {
+  console.warn('WARN: OPENROUTER_API_KEY (or OPENROUTER_KEY) not set — coaching endpoint will be unavailable.');
+}
+
+// ─── Knowledge base (loaded at startup) ─────────────────────────────────────
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+let kbDiscFramework = '';
+let kbFirstGoAround = '';
+let kb10Plus1Process = '';
+
+async function loadKnowledgeBase() {
+  const kbDir = join(__dirname, 'knowledge');
+  try {
+    kbDiscFramework = await readFile(join(kbDir, 'disc-framework.md'), 'utf-8');
+    console.log('✓ Loaded disc-framework.md');
+  } catch (e) {
+    console.warn('WARN: Could not load disc-framework.md:', e.message);
+  }
+  try {
+    kbFirstGoAround = await readFile(join(kbDir, 'certapro-1st-go-around.md'), 'utf-8');
+    console.log('✓ Loaded certapro-1st-go-around.md');
+  } catch (e) {
+    console.warn('WARN: Could not load certapro-1st-go-around.md:', e.message);
+  }
+  try {
+    kb10Plus1Process = await readFile(join(kbDir, 'certapro-10plus1-sales-process.md'), 'utf-8');
+    console.log('✓ Loaded certapro-10plus1-sales-process.md');
+  } catch (e) {
+    console.warn('WARN: Could not load certapro-10plus1-sales-process.md:', e.message);
+  }
+}
+
+// ─── Active WebSocket connections (meetingId → Set<WebSocket>) ───────────────
+// Used to push coaching updates to clients without polling
+
+const activeMeetingSockets = new Map();
+
+function registerMeetingSocket(meetingId, socket) {
+  if (!activeMeetingSockets.has(meetingId)) {
+    activeMeetingSockets.set(meetingId, new Set());
+  }
+  activeMeetingSockets.get(meetingId).add(socket);
+}
+
+function unregisterMeetingSocket(meetingId, socket) {
+  const sockets = activeMeetingSockets.get(meetingId);
+  if (sockets) {
+    sockets.delete(socket);
+    if (sockets.size === 0) activeMeetingSockets.delete(meetingId);
+  }
+}
+
+function broadcastToMeeting(meetingId, payload) {
+  const sockets = activeMeetingSockets.get(meetingId);
+  if (!sockets) return;
+  const msg = JSON.stringify(payload);
+  for (const ws of sockets) {
+    if (ws.readyState === 1 /* OPEN */) {
+      ws.send(msg);
+    }
+  }
 }
 
 // Anthropic client (optional — summary will stub if key missing)
@@ -45,7 +115,7 @@ const anthropic = ANTHROPIC_API_KEY
       })
     : null;
 
-// ─── DB Pool ──────────────────────────────────────────────────────────────────
+// ─── DB Pool ─────────────────────────────────────────────────────────────────
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -61,6 +131,15 @@ async function ensureSessionsTable() {
       user_id UUID NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       expires_at TIMESTAMPTZ NOT NULL
+    )
+  `);
+  // Phase 3: coaching snapshots table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS coaching_snapshots (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      meeting_id UUID NOT NULL REFERENCES meetings(id),
+      snapshot JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
 }
@@ -311,6 +390,160 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   return result.rows[0];
 });
 
+// ─── Phase 3: Coaching analysis ──────────────────────────────────────────────
+
+const COACHING_SYSTEM_PROMPT = `You are ARIA, a real-time sales coaching assistant for CertaPro Painters field reps.
+
+You have deep knowledge of:
+1. The CertaPro 10+1 Sales Process (Setup Call → Follow Up)
+2. The 1st Go Around checklist (13 required items)
+3. The DISC buyer personality framework (D/Eagle, I/Parrot, S/Dove, C/Owl)
+
+Analyze the transcript and return a JSON coaching object ONLY — no prose, no markdown, just raw JSON.
+
+Detect:
+- The prospect's DISC style from their speech patterns, pace, word choices, and intonation descriptions
+- Which sales stage the rep is currently in
+- Which checklist items have been covered vs missed
+
+Return the exact JSON shape specified. Keep nudges short (under 10 words each). Keep tips under 15 words.`;
+
+async function runCoachingAnalysis(meetingId) {
+  if (!OPENROUTER_API_KEY) {
+    return null;
+  }
+
+  // Fetch last 20 final transcript segments
+  let segments;
+  try {
+    const segResult = await pool.query(
+      `SELECT speaker, text FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts DESC LIMIT 20`,
+      [meetingId]
+    );
+    segments = segResult.rows.reverse();
+  } catch (err) {
+    console.error('coaching: DB error fetching segments:', err.message);
+    return null;
+  }
+
+  if (segments.length < 3) return null;
+
+  const transcriptText = segments.map(s => `${s.speaker}: ${s.text}`).join('\n');
+
+  const systemWithKB = `${COACHING_SYSTEM_PROMPT}\n\n=== DISC FRAMEWORK ===\n${kbDiscFramework}\n\n=== 10+1 SALES PROCESS ===\n${kb10Plus1Process}\n\n=== 1ST GO AROUND CHECKLIST ===\n${kbFirstGoAround}`;
+
+  const userPrompt = `Meeting transcript (last ${segments.length} segments):\n\n${transcriptText}\n\nReturn ONLY raw JSON with this exact shape:\n{
+  "disc": {
+    "detected": "D",
+    "confidence": "medium",
+    "emoji": "🦅",
+    "label": "Dominant (Eagle)",
+    "tip": "Be direct, lead with outcomes"
+  },
+  "stage": {
+    "current": "first_go_around",
+    "label": "1st Go Around"
+  },
+  "checklist": [
+    { "id": "scope", "label": "Confirm scope", "done": false },
+    { "id": "why_now", "label": "Why now / motivation", "done": false },
+    { "id": "colors", "label": "Color per area", "done": false },
+    { "id": "primer_coats", "label": "Primer & coats", "done": false },
+    { "id": "setup_prep", "label": "Setup & prep costs", "done": false },
+    { "id": "carpentry", "label": "Carpentry / repairs", "done": false },
+    { "id": "four_stages", "label": "4 stages of paint job", "done": false },
+    { "id": "certainty_pledge", "label": "Certainty Pledge®", "done": false },
+    { "id": "price_range", "label": "Price range", "done": false },
+    { "id": "options", "label": "Options discussed", "done": false },
+    { "id": "photos", "label": "Photo permission", "done": false }
+  ],
+  "nudges": ["Ask: why now?"],
+  "urgent": null
+}`;
+
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://aria.certaprograndhaven.com',
+        'X-Title': 'ARIA Sales Helper',
+      },
+      body: JSON.stringify({
+        model: 'anthropic/claude-haiku-4-5',
+        max_tokens: 512,
+        messages: [
+          { role: 'system', content: systemWithKB },
+          { role: 'user', content: userPrompt },
+        ],
+      }),
+    });
+
+    const data = await res.json();
+    const rawContent = data.choices?.[0]?.message?.content;
+    if (!rawContent) {
+      console.error('coaching: empty response from Claude');
+      return null;
+    }
+
+    // Parse JSON — Claude may wrap in ```json fences
+    let coaching;
+    try {
+      coaching = JSON.parse(rawContent);
+    } catch {
+      const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        coaching = JSON.parse(jsonMatch[0]);
+      } else {
+        console.error('coaching: could not parse JSON from Claude response');
+        return null;
+      }
+    }
+
+    // Normalize: urgent must be string | null (Claude sometimes returns an object)
+    if (coaching.urgent && typeof coaching.urgent === 'object') {
+      coaching.urgent = coaching.urgent.message || coaching.urgent.flag || JSON.stringify(coaching.urgent);
+    }
+
+    // Persist snapshot
+    try {
+      await pool.query(
+        `INSERT INTO coaching_snapshots (meeting_id, snapshot) VALUES ($1, $2)`,
+        [meetingId, JSON.stringify(coaching)]
+      );
+    } catch (dbErr) {
+      console.error('coaching: failed to save snapshot:', dbErr.message);
+    }
+
+    return coaching;
+  } catch (err) {
+    console.error('coaching: fetch/parse error:', err.message);
+    return null;
+  }
+}
+
+// POST /api/meetings/:id/coaching — manual trigger
+fastify.post('/api/meetings/:id/coaching', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+
+  const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
+  if (existing.rows.length === 0) {
+    return reply.code(404).send({ error: 'Meeting not found' });
+  }
+  const meeting = existing.rows[0];
+  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+
+  const coaching = await runCoachingAnalysis(id);
+  if (!coaching) {
+    return reply.code(503).send({ error: 'Coaching unavailable — not enough transcript or missing API key' });
+  }
+
+  return coaching;
+});
+
 // ─── Phase 2: Consent endpoint ────────────────────────────────────────────────
 // POST /api/meetings/:id/consent — log consent confirmation
 
@@ -551,6 +784,9 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
   fastify.log.info(`WS audio: meeting ${meetingId} user ${user.id} connected`);
 
+  // Register socket for coaching push
+  registerMeetingSocket(meetingId, socket);
+
   // ── Open Deepgram streaming connection ────────────────────────────────────
 
   const dgUrl = 'wss://api.deepgram.com/v1/listen?' + new URLSearchParams({
@@ -619,12 +855,19 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
       if (isFinal) {
         // Persist to DB
+        let segmentCount = 0;
         try {
           await pool.query(
             `INSERT INTO transcript_segments (meeting_id, ts, speaker, text)
              VALUES ($1, NOW(), $2, $3)`,
             [meetingId, speaker, text]
           );
+          // Count total segments for coaching trigger threshold
+          const countRes = await pool.query(
+            `SELECT COUNT(*) FROM transcript_segments WHERE meeting_id = $1`,
+            [meetingId]
+          );
+          segmentCount = parseInt(countRes.rows[0].count, 10);
         } catch (dbErr) {
           fastify.log.error('transcript_segments insert error:', dbErr);
         }
@@ -632,6 +875,20 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
         // Broadcast final result to client
         if (socket.readyState === 1 /* OPEN */) {
           socket.send(JSON.stringify({ type: 'final', text, speaker }));
+        }
+
+        // Phase 3: Auto-trigger coaching after every final segment (≥3 segments)
+        if (segmentCount >= 3 && OPENROUTER_API_KEY) {
+          // Fire-and-forget: run analysis async, push result via WS
+          runCoachingAnalysis(meetingId)
+            .then(coaching => {
+              if (coaching) {
+                broadcastToMeeting(meetingId, { type: 'coaching', data: coaching });
+              }
+            })
+            .catch(err => {
+              fastify.log.error('Auto-coaching error:', err.message);
+            });
         }
       } else {
         // Broadcast interim result to client
@@ -680,6 +937,9 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     fastify.log.info(`WS client disconnected: meeting ${meetingId}`);
     closed = true;
 
+    // Unregister from coaching push
+    unregisterMeetingSocket(meetingId, socket);
+
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
@@ -703,10 +963,12 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 try {
+  await loadKnowledgeBase();
   await ensureSessionsTable();
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
   console.log(`ARIA server running on port ${PORT}`);
   console.log(`WebSocket audio endpoint: ws://localhost:${PORT}/meetings/:id/audio`);
+  console.log(`Coaching endpoint: POST /api/meetings/:id/coaching`);
 } catch (err) {
   fastify.log.error(err);
   process.exit(1);

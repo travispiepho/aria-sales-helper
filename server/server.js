@@ -545,6 +545,22 @@ fastify.post('/api/meetings/:id/coaching', { preHandler: [requireAuth] }, async 
 });
 
 // ─── Phase 2: Consent endpoint ────────────────────────────────────────────────
+// GET /api/meetings/:id/segments — fetch saved transcript segments
+fastify.get('/api/meetings/:id/segments', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const existing = await pool.query('SELECT rep_id FROM meetings WHERE id = $1', [id]);
+  if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
+  const meeting = existing.rows[0];
+  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+  const result = await pool.query(
+    `SELECT speaker, text, ts FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
+    [id]
+  );
+  return { segments: result.rows };
+});
+
 // POST /api/meetings/:id/consent — log consent confirmation
 
 fastify.post('/api/meetings/:id/consent', { preHandler: [requireAuth] }, async (request, reply) => {

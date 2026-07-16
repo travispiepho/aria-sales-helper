@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getMeeting, updateMeeting, Meeting, apiFetch } from '../lib/api';
+import { getMeeting, updateMeeting, getMeetingSegments, Meeting, apiFetch } from '../lib/api';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -93,8 +93,21 @@ export default function MeetingPage() {
 
   useEffect(() => {
     if (!meetingId) return;
-    getMeeting(meetingId)
-      .then(m => setMeeting(m))
+    Promise.all([
+      getMeeting(meetingId),
+      getMeetingSegments(meetingId),
+    ])
+      .then(([m, { segments: saved }]) => {
+        setMeeting(m);
+        if (saved.length > 0) {
+          setSegments(saved.map(s => ({
+            speaker: s.speaker,
+            text: s.text,
+            isFinal: true,
+            ts: new Date(s.ts).getTime(),
+          })));
+        }
+      })
       .catch(() => navigate('/'))
       .finally(() => setLoading(false));
   }, [meetingId, navigate]);

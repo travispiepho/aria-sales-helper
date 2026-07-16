@@ -114,6 +114,16 @@ export async function getMeeting(id: string): Promise<Meeting> {
   return request('GET', `/api/meetings/${id}`);
 }
 
+export interface TranscriptSegment {
+  speaker: string;
+  text: string;
+  ts: string;
+}
+
+export async function getMeetingSegments(id: string): Promise<{ segments: TranscriptSegment[] }> {
+  return request('GET', `/api/meetings/${id}/segments`);
+}
+
 export async function updateMeeting(
   id: string,
   data: Partial<Pick<Meeting, 'status' | 'ended_at' | 'summary'>>

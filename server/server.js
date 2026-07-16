@@ -90,7 +90,14 @@ await fastify.register(cookie, {
 });
 
 await fastify.register(cors, {
-  origin: process.env.CORS_ORIGIN || true,
+  origin: (origin, cb) => {
+    const allowed = (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!origin || allowed.length === 0 || allowed.includes(origin)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Not allowed by CORS'), false);
+    }
+  },
   credentials: true,
 });
 
@@ -161,7 +168,7 @@ fastify.post('/api/auth/login', async (request, reply) => {
     .setCookie('session_id', sessionId, {
       httpOnly: true,
       path: '/',
-      sameSite: 'lax',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       secure: process.env.NODE_ENV === 'production',
       maxAge: 86400, // 24h
     })

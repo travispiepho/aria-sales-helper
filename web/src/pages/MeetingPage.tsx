@@ -88,6 +88,8 @@ export default function MeetingPage() {
   const isRecordingRef = useRef(false);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
+  const userScrolledUpRef = useRef(false);
   const elapsedIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recordingStartRef = useRef<number>(0);
 
@@ -115,9 +117,17 @@ export default function MeetingPage() {
       .finally(() => setLoading(false));
   }, [meetingId, navigate]);
 
-  // ─── Scroll transcript to bottom ──────────────────────────────────────────
+  // ─── Smart auto-scroll: only scroll if user hasn't scrolled up ─────────────
+
+  function handleTranscriptScroll() {
+    const el = transcriptContainerRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    userScrolledUpRef.current = distFromBottom > 80;
+  }
 
   useEffect(() => {
+    if (userScrolledUpRef.current) return;
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [segments, interimText]);
 
@@ -297,6 +307,7 @@ export default function MeetingPage() {
 
   function stopRecording() {
     isRecordingRef.current = false;
+    userScrolledUpRef.current = false; // re-enable auto-scroll after recording
 
     // Clear reconnect timer
     if (reconnectTimerRef.current) {
@@ -530,7 +541,11 @@ export default function MeetingPage() {
                   {isRecording ? 'Listening…' : 'Start recording to see live transcript'}
                 </p>
               ) : (
-                <div className="space-y-2 max-h-64 overflow-y-auto">
+                <div
+                  ref={transcriptContainerRef}
+                  onScroll={handleTranscriptScroll}
+                  className="space-y-2 max-h-64 overflow-y-auto"
+                >
                   {segments.map((seg, i) => (
                     <div key={i} className="text-sm">
                       <span className="font-semibold text-blue-700">

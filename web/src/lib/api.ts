@@ -5,6 +5,15 @@
 
 const BASE = import.meta.env.VITE_API_URL || '';
 
+// Raw fetch with credentials + BASE URL — use when you need the full Response
+export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${BASE}${path}`, {
+    ...init,
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+  });
+}
+
 async function request<T>(
   method: string,
   path: string,

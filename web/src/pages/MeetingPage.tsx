@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getMeeting, updateMeeting, Meeting } from '../lib/api';
+import { getMeeting, updateMeeting, Meeting, apiFetch } from '../lib/api';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -335,10 +335,7 @@ export default function MeetingPage() {
     // Log consent to server
     if (meetingId) {
       try {
-        await fetch(`/api/meetings/${meetingId}/consent`, {
-          method: 'POST',
-          credentials: 'include',
-        });
+        await apiFetch(`/api/meetings/${meetingId}/consent`, { method: 'POST' });
       } catch {
         // Non-fatal
       }
@@ -369,9 +366,8 @@ export default function MeetingPage() {
     if (!meetingId) return;
     setSummaryLoading(true);
     try {
-      const res = await fetch(`/api/meetings/${meetingId}/summary`, {
+      const res = await apiFetch(`/api/meetings/${meetingId}/summary`, {
         method: 'POST',
-        credentials: 'include',
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Unknown error' }));

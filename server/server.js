@@ -848,7 +848,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       let speaker = 'Speaker';
       const words = alt.words || [];
       if (words.length > 0 && words[0].speaker !== undefined) {
-        speaker = `Speaker ${words[0].speaker}`;
+        speaker = `Speaker ${words[0].speaker + 1}`; // 1-indexed for display
       }
 
       const isFinal = msg.is_final === true;

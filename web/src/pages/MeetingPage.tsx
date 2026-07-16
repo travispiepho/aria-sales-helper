@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getMeeting, updateMeeting, getMeetingSegments, Meeting, apiFetch } from '../lib/api';
+import { getMeeting, updateMeeting, getMeetingSegments, getLatestCoaching, Meeting, apiFetch } from '../lib/api';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -100,10 +100,12 @@ export default function MeetingPage() {
     Promise.all([
       getMeeting(meetingId),
       getMeetingSegments(meetingId),
+      getLatestCoaching(meetingId),
     ])
-      .then(([m, { segments: saved }]) => {
+      .then(([m, { segments: saved }, { coaching }]) => {
         setMeeting(m);
         setTitle(m.title || m.customer_name || '');
+        if (coaching) setCoachingData(coaching as CoachingData);
         if (saved.length > 0) {
           setSegments(saved.map(s => ({
             speaker: s.speaker,
@@ -214,7 +216,16 @@ export default function MeetingPage() {
           }
         } else if (msg.type === 'coaching' && msg.data) {
           // Phase 3: real-time coaching update
-          setCoachingData(msg.data as CoachingData);
+          // Merge checklist — once an item is checked it stays checked
+          setCoachingData(prev => {
+            const incoming = msg.data as CoachingData;
+            if (!prev || !prev.checklist) return incoming;
+            const merged = incoming.checklist.map(item => ({
+              ...item,
+              done: item.done || prev.checklist.find(p => p.id === item.id)?.done || false,
+            }));
+            return { ...incoming, checklist: merged };
+          });
         }
       } catch {
         // ignore malformed messages

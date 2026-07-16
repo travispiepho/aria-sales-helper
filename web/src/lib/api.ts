@@ -121,6 +121,10 @@ export interface TranscriptSegment {
   ts: string;
 }
 
+export async function getLatestCoaching(id: string): Promise<{ coaching: unknown | null }> {
+  return request('GET', `/api/meetings/${id}/coaching/latest`);
+}
+
 export async function deleteMeeting(id: string): Promise<void> {
   return request('DELETE', `/api/meetings/${id}`);
 }

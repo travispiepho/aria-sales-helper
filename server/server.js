@@ -524,6 +524,36 @@ async function runCoachingAnalysis(meetingId) {
   }
 }
 
+// GET /api/meetings/:id/coaching/latest — fetch latest coaching snapshot with merged sticky checklist
+fastify.get('/api/meetings/:id/coaching/latest', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const existing = await pool.query('SELECT rep_id FROM meetings WHERE id = $1', [id]);
+  if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
+  if (request.user.role !== 'admin' && existing.rows[0].rep_id !== request.user.id) {
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+  // Get all snapshots and merge checklist — once done always done
+  const result = await pool.query(
+    `SELECT snapshot FROM coaching_snapshots WHERE meeting_id = $1 ORDER BY created_at ASC`,
+    [id]
+  );
+  if (result.rows.length === 0) return { coaching: null };
+
+  // Start from latest snapshot, then OR in all previously-checked items
+  const latest = result.rows[result.rows.length - 1].snapshot;
+  const checkedIds = new Set();
+  for (const row of result.rows) {
+    for (const item of row.snapshot.checklist || []) {
+      if (item.done) checkedIds.add(item.id);
+    }
+  }
+  const merged = (latest.checklist || []).map(item => ({
+    ...item,
+    done: item.done || checkedIds.has(item.id),
+  }));
+  return { coaching: { ...latest, checklist: merged } };
+});
+
 // POST /api/meetings/:id/coaching — manual trigger
 fastify.post('/api/meetings/:id/coaching', { preHandler: [requireAuth] }, async (request, reply) => {
   const { id } = request.params;

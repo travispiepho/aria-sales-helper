@@ -120,6 +120,10 @@ export interface TranscriptSegment {
   ts: string;
 }
 
+export async function deleteMeeting(id: string): Promise<void> {
+  return request('DELETE', `/api/meetings/${id}`);
+}
+
 export async function getMeetingSegments(id: string): Promise<{ segments: TranscriptSegment[] }> {
   return request('GET', `/api/meetings/${id}/segments`);
 }

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
-import { listMeetings, createMeeting, Meeting } from '../lib/api';
+import { listMeetings, createMeeting, deleteMeeting, Meeting } from '../lib/api';
 import CustomerIntakeModal from '../components/CustomerIntakeModal';
 
 function formatDate(iso: string) {
@@ -31,6 +31,21 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [showIntake, setShowIntake] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  async function handleDelete(e: React.MouseEvent, id: string) {
+    e.stopPropagation();
+    if (!confirm('Delete this meeting and its transcript? This cannot be undone.')) return;
+    setDeletingId(id);
+    try {
+      await deleteMeeting(id);
+      setMeetings(prev => prev.filter(m => m.id !== id));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to delete meeting');
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   useEffect(() => {
     loadMeetings();
@@ -126,25 +141,34 @@ export default function HomePage() {
           ) : (
             <div className="space-y-3">
               {todayMeetings.map(m => (
-                <button
-                  key={m.id}
-                  onClick={() => navigate(`/meetings/${m.id}`)}
-                  className="w-full bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <p className="font-medium text-gray-900">
-                        {m.customer_name || 'No customer linked'}
-                      </p>
-                      <p className="text-sm text-gray-500 mt-0.5">
-                        {formatDate(m.started_at)}
-                      </p>
+                <div key={m.id} className="relative group">
+                  <button
+                    onClick={() => navigate(`/meetings/${m.id}`)}
+                    className="w-full bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
+                  >
+                    <div className="flex items-start justify-between pr-8">
+                      <div>
+                        <p className="font-medium text-gray-900">
+                          {m.customer_name || 'No customer linked'}
+                        </p>
+                        <p className="text-sm text-gray-500 mt-0.5">
+                          {formatDate(m.started_at)}
+                        </p>
+                      </div>
+                      <span className={`text-xs font-medium px-2 py-1 rounded-full capitalize ${statusBadge(m.status)}`}>
+                        {m.status}
+                      </span>
                     </div>
-                    <span className={`text-xs font-medium px-2 py-1 rounded-full capitalize ${statusBadge(m.status)}`}>
-                      {m.status}
-                    </span>
-                  </div>
-                </button>
+                  </button>
+                  <button
+                    onClick={(e) => handleDelete(e, m.id)}
+                    disabled={deletingId === m.id}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 hover:text-red-500 transition-colors p-1 rounded-lg hover:bg-red-50 disabled:opacity-40"
+                    title="Delete meeting"
+                  >
+                    {deletingId === m.id ? '…' : '🗑'}
+                  </button>
+                </div>
               ))}
             </div>
           )}
@@ -161,25 +185,34 @@ export default function HomePage() {
                 .filter(m => new Date(m.started_at).toDateString() !== todayStr)
                 .slice(0, 5)
                 .map(m => (
-                  <button
-                    key={m.id}
-                    onClick={() => navigate(`/meetings/${m.id}`)}
-                    className="w-full bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
-                  >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <p className="font-medium text-gray-900">
-                          {m.customer_name || 'No customer linked'}
-                        </p>
-                        <p className="text-sm text-gray-500 mt-0.5">
-                          {formatDate(m.started_at)}
-                        </p>
+                  <div key={m.id} className="relative group">
+                    <button
+                      onClick={() => navigate(`/meetings/${m.id}`)}
+                      className="w-full bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
+                    >
+                      <div className="flex items-start justify-between pr-8">
+                        <div>
+                          <p className="font-medium text-gray-900">
+                            {m.customer_name || 'No customer linked'}
+                          </p>
+                          <p className="text-sm text-gray-500 mt-0.5">
+                            {formatDate(m.started_at)}
+                          </p>
+                        </div>
+                        <span className={`text-xs font-medium px-2 py-1 rounded-full capitalize ${statusBadge(m.status)}`}>
+                          {m.status}
+                        </span>
                       </div>
-                      <span className={`text-xs font-medium px-2 py-1 rounded-full capitalize ${statusBadge(m.status)}`}>
-                        {m.status}
-                      </span>
-                    </div>
-                  </button>
+                    </button>
+                    <button
+                      onClick={(e) => handleDelete(e, m.id)}
+                      disabled={deletingId === m.id}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 hover:text-red-500 transition-colors p-1 rounded-lg hover:bg-red-50 disabled:opacity-40"
+                      title="Delete meeting"
+                    >
+                      {deletingId === m.id ? '…' : '🗑'}
+                    </button>
+                  </div>
                 ))}
             </div>
           </div>

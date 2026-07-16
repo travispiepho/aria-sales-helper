@@ -28,16 +28,16 @@ function formatDuration(startIso: string, endIso?: string): string {
   return formatElapsed(Math.floor((end - start) / 1000));
 }
 
-// Derive a WS URL from the current page location
+// Derive a WS URL from VITE_API_URL (production) or current location (dev)
 function getWsBase(): string {
+  const apiUrl = import.meta.env.VITE_API_URL;
+  if (apiUrl) {
+    // Convert https://host to wss://host, http://host to ws://host
+    return apiUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
+  }
+  // Dev fallback: Vite proxies HTTP but WS hits backend directly on :3000
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const host = location.hostname;
-  // In dev, Vite proxies /api to :3000. WS needs to hit the backend directly.
-  // Detect dev by port 5173 (Vite default)
-  const isDev = location.port === '5173';
-  const port = isDev ? '3000' : location.port;
-  const portStr = port ? `:${port}` : '';
-  return `${proto}://${host}${portStr}`;
+  return `${proto}://localhost:3000`;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────

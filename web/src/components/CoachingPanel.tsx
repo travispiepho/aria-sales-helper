@@ -4,7 +4,7 @@
  * Mobile-first, collapsible, Tailwind-only.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,6 +68,42 @@ const CONFIDENCE_STYLES: Record<string, string> = {
 
 export default function CoachingPanel({ coaching, defaultCollapsed = false }: CoachingPanelProps) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const [nudgeIndex, setNudgeIndex] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const allNudges = [
+    ...(coaching?.nudges || []),
+    ...(coaching?.urgent ? [`🚨 ${coaching.urgent}`] : []),
+  ];
+
+  // Cycle nudges every 10 seconds unless paused
+  useEffect(() => {
+    if (allNudges.length <= 1 || paused) return;
+    const timer = setInterval(() => {
+      setNudgeIndex(i => (i + 1) % allNudges.length);
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [allNudges.length, paused]);
+
+  // Reset index when nudges change (new coaching pass)
+  useEffect(() => {
+    setNudgeIndex(0);
+  }, [coaching]);
+
+  function handleNudgeTap() {
+    // Tap to pause for 20s, then resume
+    setPaused(true);
+    if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
+    pauseTimerRef.current = setTimeout(() => setPaused(false), 20000);
+  }
+
+  function goToNudge(i: number) {
+    setNudgeIndex(i);
+    setPaused(true);
+    if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
+    pauseTimerRef.current = setTimeout(() => setPaused(false), 20000);
+  }
 
   if (!coaching) {
     return (
@@ -115,13 +151,6 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
       {!collapsed && (
         <div className="px-4 py-3 space-y-4">
 
-          {/* ── Urgent alert ── */}
-          {urgent && (
-            <div className="bg-red-50 border border-red-300 rounded-xl px-3 py-2 flex items-start gap-2">
-              <span className="text-red-600 text-lg flex-shrink-0 mt-0.5">⚡</span>
-              <p className="text-sm font-semibold text-red-700">{urgent}</p>
-            </div>
-          )}
 
           {/* ── DISC card ── */}
           <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-3">
@@ -187,22 +216,51 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
             </div>
           </div>
 
-          {/* ── Nudges ── */}
-          {nudges && nudges.length > 0 && (
+          {/* ── Nudges ── (cycling, one at a time) */}
+          {allNudges.length > 0 && (
             <div>
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">
-                Next Moves
-              </span>
-              <div className="space-y-1.5">
-                {nudges.map((nudge, i) => (
-                  <div
-                    key={i}
-                    className="bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2 text-sm text-yellow-900"
-                  >
-                    {nudge}
-                  </div>
-                ))}
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                  Next Move
+                </span>
+                {allNudges.length > 1 && (
+                  <span className="text-xs text-gray-400">
+                    {nudgeIndex + 1}/{allNudges.length}
+                  </span>
+                )}
               </div>
+
+              {/* Current nudge */}
+              <div
+                onClick={handleNudgeTap}
+                className={`rounded-xl px-4 py-3 text-sm font-medium cursor-pointer select-none transition-colors ${
+                  allNudges[nudgeIndex]?.startsWith('🚨')
+                    ? 'bg-red-50 border border-red-200 text-red-900'
+                    : 'bg-yellow-50 border border-yellow-200 text-yellow-900'
+                }`}
+              >
+                {allNudges[nudgeIndex]}
+                {paused && (
+                  <span className="ml-2 text-xs opacity-50">⏸</span>
+                )}
+              </div>
+
+              {/* Dot navigation */}
+              {allNudges.length > 1 && (
+                <div className="flex justify-center gap-1.5 mt-2">
+                  {allNudges.map((_, i) => (
+                    <button
+                      key={i}
+                      onClick={() => goToNudge(i)}
+                      className={`rounded-full transition-all ${
+                        i === nudgeIndex
+                          ? 'w-4 h-2 bg-yellow-500'
+                          : 'w-2 h-2 bg-gray-300 hover:bg-gray-400'
+                      }`}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

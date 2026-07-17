@@ -10,7 +10,7 @@ import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import websocketPlugin from '@fastify/websocket';
 import pg from 'pg';
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
 import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';

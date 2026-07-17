@@ -756,7 +756,7 @@ export default function MeetingPage() {
               {summary || meeting.summary ? (
                 <>
                   <p className="text-sm text-gray-800 whitespace-pre-wrap mb-4">
-                    {summary || meeting.summary}
+                    {(summary || meeting.summary || '').replace(/\*/g, '')}
                   </p>
                   <button
                     onClick={handleDownloadTranscript}

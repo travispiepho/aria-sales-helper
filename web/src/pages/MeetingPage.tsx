@@ -70,6 +70,8 @@ export default function MeetingPage() {
 
   // Coaching state (Phase 3)
   const [coachingData, setCoachingData] = useState<CoachingData | null>(null);
+  // Locked checked IDs — once an item is checked it NEVER unchecks, regardless of what Claude returns
+  const [lockedChecked, setLockedChecked] = useState<Set<string>>(new Set());
 
   // Post-meeting
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -105,7 +107,14 @@ export default function MeetingPage() {
       .then(([m, { segments: saved }, { coaching }]) => {
         setMeeting(m);
         setTitle(m.title || m.customer_name || '');
-        if (coaching) setCoachingData(coaching as CoachingData);
+        if (coaching) {
+          const c = coaching as CoachingData;
+          setCoachingData(c);
+          // Seed locked set from DB snapshot so page-reload state is sticky too
+          if (c.checklist) {
+            setLockedChecked(new Set(c.checklist.filter(i => i.done).map(i => i.id)));
+          }
+        }
         if (saved.length > 0) {
           setSegments(saved.map(s => ({
             speaker: s.speaker,
@@ -216,16 +225,17 @@ export default function MeetingPage() {
           }
         } else if (msg.type === 'coaching' && msg.data) {
           // Phase 3: real-time coaching update
-          // Merge checklist — once an item is checked it stays checked
-          setCoachingData(prev => {
-            const incoming = msg.data as CoachingData;
-            if (!prev || !prev.checklist) return incoming;
-            const merged = incoming.checklist.map(item => ({
-              ...item,
-              done: item.done || prev.checklist.find(p => p.id === item.id)?.done || false,
-            }));
-            return { ...incoming, checklist: merged };
-          });
+          const incoming = msg.data as CoachingData;
+          // Grow the locked set — never shrink it
+          if (incoming.checklist) {
+            setLockedChecked(prev => {
+              const next = new Set(prev);
+              incoming.checklist.filter(i => i.done).forEach(i => next.add(i.id));
+              return next;
+            });
+          }
+          // Store raw coaching data (lockedChecked handles sticky state at render time)
+          setCoachingData(incoming);
         }
       } catch {
         // ignore malformed messages
@@ -543,7 +553,16 @@ export default function MeetingPage() {
             </div>
 
             {/* Phase 3: Coaching Panel */}
-            <CoachingPanel coaching={coachingData} defaultCollapsed={false} />
+            <CoachingPanel
+              coaching={coachingData ? {
+                ...coachingData,
+                checklist: coachingData.checklist?.map(item => ({
+                  ...item,
+                  done: item.done || lockedChecked.has(item.id),
+                })) ?? [],
+              } : null}
+              defaultCollapsed={false}
+            />
 
             {/* Live transcript */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">

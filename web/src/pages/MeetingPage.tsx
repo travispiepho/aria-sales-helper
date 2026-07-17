@@ -107,6 +107,10 @@ export default function MeetingPage() {
       .then(([m, { segments: saved }, { coaching }]) => {
         setMeeting(m);
         setTitle(m.title || m.customer_name || '');
+        // Restore persisted speaker labels
+        if (m.speaker_labels && Object.keys(m.speaker_labels).length > 0) {
+          setSpeakerLabels(m.speaker_labels);
+        }
         if (coaching) {
           const c = coaching as CoachingData;
           setCoachingData(c);
@@ -464,10 +468,11 @@ export default function MeetingPage() {
     } else {
       let lastSpeaker = '';
       segments.forEach(seg => {
-        if (seg.speaker !== lastSpeaker) {
+        const label = getDisplayLabel(seg.speaker);
+        if (label !== lastSpeaker) {
           if (lastSpeaker) lines.push('');
-          lines.push(`[${seg.speaker}]`);
-          lastSpeaker = seg.speaker;
+          lines.push(`[${label}]`);
+          lastSpeaker = label;
         }
         lines.push(seg.text);
       });
@@ -514,7 +519,12 @@ export default function MeetingPage() {
   }
 
   function handleSpeakerLabelChange(rawSpeaker: string, label: string) {
-    setSpeakerLabels(prev => ({ ...prev, [rawSpeaker]: label }));
+    const next = { ...speakerLabels, [rawSpeaker]: label };
+    setSpeakerLabels(next);
+    // Persist to DB so labels survive navigation and appear in downloads
+    if (meetingId) {
+      updateMeeting(meetingId, { speaker_labels: next }).catch(() => {});
+    }
   }
 
   // Collect unique speaker keys from segments

@@ -133,6 +133,10 @@ async function ensureSessionsTable() {
       expires_at TIMESTAMPTZ NOT NULL
     )
   `);
+  // speaker_labels column on meetings (added 2026-07-17)
+  await pool.query(`
+    ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speaker_labels JSONB DEFAULT '{}'
+  `);
   // Phase 3: coaching snapshots table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS coaching_snapshots (
@@ -361,7 +365,7 @@ fastify.get('/api/meetings/:id', { preHandler: [requireAuth] }, async (request, 
 
 fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request, reply) => {
   const { id } = request.params;
-  const { status, ended_at, summary, title } = request.body || {};
+  const { status, ended_at, summary, title, speaker_labels } = request.body || {};
 
   // Verify meeting exists and belongs to user (or admin)
   const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
@@ -382,6 +386,7 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   if (ended_at !== undefined) { updates.push(`ended_at = $${idx++}`); values.push(ended_at); }
   if (summary !== undefined) { updates.push(`summary = $${idx++}`); values.push(summary); }
   if (title !== undefined) { updates.push(`title = $${idx++}`); values.push(title); }
+  if (speaker_labels !== undefined) { updates.push(`speaker_labels = $${idx++}`); values.push(JSON.stringify(speaker_labels)); }
 
   if (updates.length === 0) {
     return reply.code(400).send({ error: 'No fields to update' });

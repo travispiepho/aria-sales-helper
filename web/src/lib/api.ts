@@ -101,6 +101,7 @@ export interface Meeting {
   title?: string;
   rep_name?: string;
   customer_name?: string;
+  speaker_labels?: Record<string, string>;
 }
 
 export async function createMeeting(customerId?: string): Promise<Meeting> {
@@ -135,7 +136,7 @@ export async function getMeetingSegments(id: string): Promise<{ segments: Transc
 
 export async function updateMeeting(
   id: string,
-  data: Partial<Pick<Meeting, 'status' | 'ended_at' | 'summary' | 'title'>>
+  data: Partial<Pick<Meeting, 'status' | 'ended_at' | 'summary' | 'title' | 'speaker_labels'>>
 ): Promise<Meeting> {
   return request('PATCH', `/api/meetings/${id}`, data);
 }

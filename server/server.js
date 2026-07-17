@@ -1068,33 +1068,50 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
         }
       }
 
-      // Re-apply lock after matching
-      if (speakerLocks[String(rawSpeakerIdx)]) {
-        speaker = speakerLocks[String(rawSpeakerIdx)];
-      }
-
       const isFinal = msg.is_final === true;
 
       if (isFinal) {
+        // Split segment by speaker changes within the word list
+        const speakerGroups = [];
+        let curSpeakerIdx = null;
+        let curWords = [];
+        for (const w of words) {
+          const si = w.speaker ?? rawSpeakerIdx;
+          if (si !== curSpeakerIdx) {
+            if (curWords.length > 0) speakerGroups.push({ si: curSpeakerIdx, words: curWords });
+            curSpeakerIdx = si;
+            curWords = [];
+          }
+          curWords.push(w.punctuated_word || w.word || '');
+        }
+        if (curWords.length > 0) speakerGroups.push({ si: curSpeakerIdx, words: curWords });
+        // Fallback: if no word-level data, use the full text as one group
+        if (speakerGroups.length === 0) speakerGroups.push({ si: rawSpeakerIdx, words: [text] });
+
         let segmentCount = 0;
+        for (const group of speakerGroups) {
+          const groupText = group.words.join(' ').trim();
+          if (!groupText) continue;
+          const groupLabel = speakerLocks[String(group.si)] || `Speaker ${group.si + 1}`;
+          try {
+            await pool.query(
+              `INSERT INTO transcript_segments (meeting_id, ts, speaker, text) VALUES ($1, NOW(), $2, $3)`,
+              [meetingId, groupLabel, groupText]
+            );
+          } catch (dbErr) {
+            fastify.log.error('transcript_segments insert error:', dbErr);
+          }
+          if (socket.readyState === 1) {
+            socket.send(JSON.stringify({ type: 'final', text: groupText, speaker: groupLabel }));
+          }
+        }
+        // Get updated segment count for coaching trigger
         try {
-          await pool.query(
-            `INSERT INTO transcript_segments (meeting_id, ts, speaker, text) VALUES ($1, NOW(), $2, $3)`,
-            [meetingId, speaker, text]
-          );
           const countRes = await pool.query(
-            `SELECT COUNT(*) FROM transcript_segments WHERE meeting_id = $1`,
-            [meetingId]
+            `SELECT COUNT(*) FROM transcript_segments WHERE meeting_id = $1`, [meetingId]
           );
           segmentCount = parseInt(countRes.rows[0].count, 10);
-        } catch (dbErr) {
-          fastify.log.error('transcript_segments insert error:', dbErr);
-        }
-
-        if (socket.readyState === 1) {
-          socket.send(JSON.stringify({ type: 'final', text, speaker }));
-        }
-
+        } catch { /* ignore */ }
         if (segmentCount >= 3 && OPENROUTER_API_KEY) {
           runCoachingAnalysis(meetingId)
             .then(coaching => {
@@ -1103,8 +1120,10 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
             .catch(err => fastify.log.error('Auto-coaching error:', err.message));
         }
       } else {
+        // Interim: use first speaker (splitting interims is too noisy)
+        const interimLabel = speakerLocks[String(rawSpeakerIdx)] || `Speaker ${rawSpeakerIdx + 1}`;
         if (socket.readyState === 1) {
-          socket.send(JSON.stringify({ type: 'interim', text, speaker }));
+          socket.send(JSON.stringify({ type: 'interim', text, speaker: interimLabel }));
         }
       }
     });

@@ -76,6 +76,7 @@ export default function MeetingPage() {
   // Post-meeting
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [voiceToast, setVoiceToast] = useState<string | null>(null);
   const [title, setTitle] = useState<string>('');
   const [titleSaving, setTitleSaving] = useState(false);
 
@@ -227,6 +228,12 @@ export default function MeetingPage() {
               },
             ]);
           }
+        } else if (msg.type === 'speaker_lock') {
+          // Voice fingerprint matched — auto-label the rep's speaker ID
+          const { speakerId, name } = msg as { type: string; speakerId: string; name: string };
+          handleSpeakerLabelChange(speakerId, name);
+          setVoiceToast(`🎙️ ${name} identified`);
+          setTimeout(() => setVoiceToast(null), 4000);
         } else if (msg.type === 'coaching' && msg.data) {
           // Phase 3: real-time coaching update
           const incoming = msg.data as CoachingData;
@@ -550,6 +557,13 @@ export default function MeetingPage() {
       {isRecording && (
         <div className="bg-red-600 text-white text-center py-2 px-4 text-sm font-semibold animate-pulse sticky top-0 z-50">
           🔴 RECORDING — keep screen on
+        </div>
+      )}
+
+      {/* Voice identification toast */}
+      {voiceToast && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white text-sm font-medium px-4 py-2.5 rounded-full shadow-lg">
+          {voiceToast}
         </div>
       )}
 

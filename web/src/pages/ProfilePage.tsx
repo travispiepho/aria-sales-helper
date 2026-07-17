@@ -45,8 +45,9 @@ export default function ProfilePage() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       streamRef.current = stream;
 
-      // Use AnalyserNode — no AudioWorklet needed, works on all Safari versions
-      const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      // Use AnalyserNode at 16kHz to match meeting audio sample rate for consistent features
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioCtx({ sampleRate: 16000 });
       audioCtxRef.current = ctx;
 
       const source = ctx.createMediaStreamSource(stream);

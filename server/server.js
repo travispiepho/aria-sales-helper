@@ -17,6 +17,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import WebSocket from 'ws';
+import { extractVoiceFeatures, similarityScore } from './voiceFeatures.js';
 
 const { Pool } = pg;
 
@@ -950,6 +951,27 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   // Register socket for coaching push
   registerMeetingSocket(meetingId, socket);
 
+  // ── Voice fingerprint matching setup ──────────────────────────────────────
+  let enrolledFeatures = null;
+  let repName = user.name || 'Rep';
+  const vpResult = await pool.query(
+    'SELECT features FROM voice_prints WHERE user_id = $1', [user.id]
+  );
+  if (vpResult.rows.length > 0) {
+    enrolledFeatures = vpResult.rows[0].features;
+    fastify.log.info(`Voice print loaded for ${repName}`);
+  }
+
+  // Timed audio buffer: Float32Array + sample count (16kHz)
+  const MAX_VOICE_SAMPLES = 16000 * 90; // 90s max buffer
+  const voiceBuf = new Float32Array(MAX_VOICE_SAMPLES);
+  let voiceBufLen = 0;
+  const speakerChunks = {}; // speakerIdx -> Float32Array[]
+  const speakerLocks = {};  // speakerIdx -> displayName
+  let voiceMatchDone = false;
+  const MIN_MATCH_SAMPLES = 16000 * 5; // 5s per speaker before attempting match
+  const MATCH_THRESHOLD = 0.58;
+
   // ── Open Deepgram streaming connection (nova-3 + latest diarization model) ────
 
   const dgUrl = 'wss://api.deepgram.com/v1/listen?' + new URLSearchParams({
@@ -1000,10 +1022,55 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       if (!text) return;
 
       // Extract speaker from word-level diarization (1-indexed for display)
-      let speaker = 'Speaker 1';
       const words = alt.words || [];
-      if (words.length > 0 && words[0].speaker !== undefined) {
-        speaker = `Speaker ${words[0].speaker + 1}`;
+      let rawSpeakerIdx = words.length > 0 && words[0].speaker !== undefined ? words[0].speaker : 0;
+      let speaker = speakerLocks[String(rawSpeakerIdx)] || `Speaker ${rawSpeakerIdx + 1}`;
+
+      // Accumulate per-speaker audio using word timestamps for voice matching
+      if (enrolledFeatures && !voiceMatchDone && words.length > 0) {
+        for (const word of words) {
+          const si = String(word.speaker ?? 0);
+          if (word.start !== undefined && word.end !== undefined) {
+            const from = Math.min(Math.floor(word.start * 16000), voiceBufLen - 1);
+            const to = Math.min(Math.ceil(word.end * 16000), voiceBufLen);
+            if (to > from + 100) {
+              if (!speakerChunks[si]) speakerChunks[si] = [];
+              speakerChunks[si].push(voiceBuf.slice(from, to));
+            }
+          }
+        }
+        // Try to match once we have enough per-speaker audio
+        for (const [si, chunks] of Object.entries(speakerChunks)) {
+          if (speakerLocks[si]) continue;
+          const total = chunks.reduce((s, c) => s + c.length, 0);
+          if (total < MIN_MATCH_SAMPLES) continue;
+          // Flatten
+          const combined = new Float32Array(total);
+          let off = 0;
+          for (const c of chunks) { combined.set(c, off); off += c.length; }
+          const features = extractVoiceFeatures(combined);
+          const score = similarityScore(features, enrolledFeatures);
+          fastify.log.info(`Voice match Speaker ${si}: score=${score.toFixed(3)} (threshold=${MATCH_THRESHOLD})`);
+          if (score >= MATCH_THRESHOLD) {
+            speakerLocks[si] = repName;
+            voiceMatchDone = true;
+            fastify.log.info(`Voice match: Speaker ${si} → ${repName}`);
+            // Notify client to update labels
+            if (socket.readyState === 1) {
+              socket.send(JSON.stringify({
+                type: 'speaker_lock',
+                speakerId: `Speaker ${parseInt(si) + 1}`,
+                name: repName,
+              }));
+            }
+            break;
+          }
+        }
+      }
+
+      // Re-apply lock after matching
+      if (speakerLocks[String(rawSpeakerIdx)]) {
+        speaker = speakerLocks[String(rawSpeakerIdx)];
       }
 
       const isFinal = msg.is_final === true;
@@ -1067,6 +1134,13 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     } else {
       const totalBuffered = audioQueue.reduce((s, b) => s + b.byteLength, 0);
       if (totalBuffered < 960_000) audioQueue.push(Buffer.from(data));
+    }
+    // Buffer audio for voice fingerprint matching (int16 → float32)
+    if (enrolledFeatures && !voiceMatchDone && voiceBufLen < MAX_VOICE_SAMPLES) {
+      const int16 = new Int16Array(data.buffer ?? data, data.byteOffset ?? 0, (data.byteLength ?? data.length) / 2);
+      for (let i = 0; i < int16.length && voiceBufLen < MAX_VOICE_SAMPLES; i++) {
+        voiceBuf[voiceBufLen++] = int16[i] / 32768;
+      }
     }
   });
 

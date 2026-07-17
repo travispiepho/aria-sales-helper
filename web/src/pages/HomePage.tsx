@@ -109,7 +109,7 @@ export default function HomePage() {
           <button
             onClick={() => setShowIntake(true)}
             disabled={starting}
-            className="w-full bg-brand-700 hover:bg-brand-800 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
+            className="w-full bg-orange-500 hover:bg-orange-600 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
           >
             {starting ? 'Starting…' : '▶ Start Meeting'}
           </button>

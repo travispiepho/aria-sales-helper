@@ -75,10 +75,8 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
   // Never show blank — holds the last nudge that was actually rendered
   const lastValidNudgeRef = useRef<string>('');
 
-  const allNudges = [
-    ...(coaching?.nudges || []),
-    ...(coaching?.urgent ? [`🚨 ${coaching.urgent}`] : []),
-  ];
+  // Nudges only — urgent has its own dedicated section near the DISC card
+  const allNudges = coaching?.nudges || [];
 
   // Clamp index so it's never out of bounds even mid-render
   const safeIndex = allNudges.length > 0 ? nudgeIndex % allNudges.length : 0;
@@ -149,8 +147,8 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
           <span>🧭</span>
           <span>ARIA Coaching</span>
           {!collapsed && urgent && (
-            <span className="ml-1 bg-red-500 text-white text-xs px-2 py-0.5 rounded-full animate-pulse">
-              ⚡ Urgent
+            <span className="ml-1 bg-orange-500 text-white text-xs px-2 py-0.5 rounded-full animate-pulse">
+              💡 Tip
             </span>
           )}
           {!collapsed && !urgent && (
@@ -192,6 +190,14 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
               </div>
             </div>
           </div>
+
+          {/* ── Situational DISC coaching (urgent) ── */}
+          {urgent && (
+            <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-3 flex gap-2">
+              <span className="text-lg leading-none flex-shrink-0 mt-0.5">💡</span>
+              <p className="text-sm text-orange-900 leading-snug">{urgent}</p>
+            </div>
+          )}
 
           {/* ── Sales stage ── */}
           <div>

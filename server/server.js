@@ -407,7 +407,12 @@ Detect:
 - Which sales stage the rep is currently in
 - Which checklist items have been covered vs missed
 
-Return the exact JSON shape specified. Keep nudges short (under 10 words each). Keep tips under 15 words.`;
+FIELD GUIDANCE:
+- disc.tip: Static one-liner on how to sell to this style (under 15 words). Example: "Lead with ROI, skip the story."
+- nudges: 1-4 short action items for what the rep should do next (under 10 words each).
+- urgent: DISC-based situational coaching — if you detect the rep made a misstep, missed a read on the prospect's style, or the conversation is drifting off track, write a brief recovery tip here (1-2 sentences max). Base it on what you know about this prospect's DISC style. Examples: "This Dove is pulling back — slow down and reassure before asking for price range." / "You over-explained to an Eagle — pivot to options and let them choose." / "The Owl asked for specifics you didn't answer — loop back and give the exact detail." Set to null if the conversation is on track and no correction is needed.
+
+Return the exact JSON shape specified.`;
 
 async function runCoachingAnalysis(meetingId) {
   if (!OPENROUTER_API_KEY) {

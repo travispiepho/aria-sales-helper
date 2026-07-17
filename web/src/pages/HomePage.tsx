@@ -204,7 +204,7 @@ export default function HomePage() {
                     onClick={() => navigate(`/meetings/${m.id}`)}
                     className="w-full bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
                   >
-                    <div className="flex items-start justify-between pr-16">
+                    <div className="flex items-center justify-between pr-16">
                       <div>
                         <p className="font-medium text-gray-900">
                           {m.title || m.customer_name || 'No customer linked'}
@@ -258,7 +258,7 @@ export default function HomePage() {
                       onClick={() => navigate(`/meetings/${m.id}`)}
                       className="w-full bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
                     >
-                      <div className="flex items-start justify-between pr-16">
+                      <div className="flex items-center justify-between pr-16">
                         <div>
                           <p className="font-medium text-gray-900">
                             {m.title || m.customer_name || 'No customer linked'}

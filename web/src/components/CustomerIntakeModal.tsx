@@ -3,7 +3,7 @@ import { createCustomer } from '../lib/api';
 
 interface Props {
   onClose: () => void;
-  onCreated: (customerId: string) => void;
+  onCreated: (customerId: string, title: string) => void;
 }
 
 export default function CustomerIntakeModal({ onClose, onCreated }: Props) {
@@ -23,23 +23,27 @@ export default function CustomerIntakeModal({ onClose, onCreated }: Props) {
     };
   }
 
+  function generateTitle(): string {
+    const address = form.address.trim();
+    const name = form.name.trim();
+    if (address) return address;
+    if (name) return `Conversation with ${name}`;
+    return 'Unnamed conversation';
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.name.trim()) {
-      setError('Customer name is required.');
-      return;
-    }
     setError('');
     setLoading(true);
     try {
       const customer = await createCustomer({
-        name: form.name.trim(),
+        name: form.name.trim() || 'Unknown',
         address: form.address.trim() || undefined,
         phone: form.phone.trim() || undefined,
         email: form.email.trim() || undefined,
         source: form.source.trim() || undefined,
       });
-      onCreated(customer.id);
+      onCreated(customer.id, generateTitle());
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create customer');
     } finally {
@@ -76,11 +80,10 @@ export default function CustomerIntakeModal({ onClose, onCreated }: Props) {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Full Name <span className="text-red-500">*</span>
+              Full Name
             </label>
             <input
               type="text"
-              required
               value={form.name}
               onChange={set('name')}
               placeholder="Jane Smith"

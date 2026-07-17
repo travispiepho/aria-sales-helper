@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
-import { listMeetings, createMeeting, deleteMeeting, getMeeting, getMeetingSegments, Meeting } from '../lib/api';
+import { listMeetings, createMeeting, deleteMeeting, getMeeting, getMeetingSegments, updateMeeting, Meeting } from '../lib/api';
 import CustomerIntakeModal from '../components/CustomerIntakeModal';
 
 function formatDate(iso: string) {
@@ -126,10 +126,11 @@ export default function HomePage() {
     }
   }
 
-  async function handleStartMeeting(customerId?: string) {
+  async function handleStartMeeting(customerId?: string, title?: string) {
     setStarting(true);
     try {
       const meeting = await createMeeting(customerId);
+      if (title) await updateMeeting(meeting.id, { title }).catch(() => {});
       navigate(`/meetings/${meeting.id}`);
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : 'Failed to start meeting');
@@ -299,9 +300,9 @@ export default function HomePage() {
       {showIntake && (
         <CustomerIntakeModal
           onClose={() => setShowIntake(false)}
-          onCreated={(customerId) => {
+          onCreated={(customerId, title) => {
             setShowIntake(false);
-            handleStartMeeting(customerId);
+            handleStartMeeting(customerId, title);
           }}
         />
       )}

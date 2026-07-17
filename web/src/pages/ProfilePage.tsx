@@ -45,22 +45,29 @@ export default function ProfilePage() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       streamRef.current = stream;
 
-      const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      // Use AnalyserNode — no AudioWorklet needed, works on all Safari versions
+      const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
       audioCtxRef.current = ctx;
 
-      await ctx.audioWorklet.addModule('/audio-processor.js');
       const source = ctx.createMediaStreamSource(stream);
-      const worklet = new AudioWorkletNode(ctx, 'audio-processor');
-      workletRef.current = worklet;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
 
-      worklet.port.onmessage = (e) => {
-        if (e.data?.pcm) {
-          samplesRef.current.push(new Float32Array(e.data.pcm));
-        }
+      const bufferLength = analyser.fftSize;
+      const buffer = new Float32Array(bufferLength);
+
+      // Poll the analyser at ~60fps and collect time-domain samples
+      let rafId: number;
+      const collect = () => {
+        analyser.getFloatTimeDomainData(buffer);
+        samplesRef.current.push(new Float32Array(buffer));
+        rafId = requestAnimationFrame(collect);
       };
-
-      source.connect(worklet);
-      worklet.connect(ctx.destination);
+      collect();
+      (analyser as unknown as { _rafId: number })._rafId = rafId!;
+      (analyser as unknown as { _stopCollect: () => void })._stopCollect = () => cancelAnimationFrame(rafId);
+      workletRef.current = analyser as unknown as AudioWorkletNode;
 
       startTimeRef.current = Date.now();
       setElapsed(0);
@@ -73,14 +80,18 @@ export default function ProfilePage() {
           stopAndSave();
         }
       }, 200);
-    } catch {
-      setVpMsg('❌ Microphone access denied.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setVpMsg(`❌ Could not access microphone: ${msg}`);
     }
   }
 
   function stopRecording() {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    workletRef.current?.disconnect();
+    // Stop the analyser RAF loop
+    const node = workletRef.current as unknown as { _stopCollect?: () => void };
+    if (node?._stopCollect) node._stopCollect();
+    (workletRef.current as unknown as AudioNode | null)?.disconnect?.();
     audioCtxRef.current?.close().catch(() => {});
     streamRef.current?.getTracks().forEach(t => t.stop());
     workletRef.current = null;

@@ -137,6 +137,17 @@ async function ensureSessionsTable() {
   await pool.query(`
     ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speaker_labels JSONB DEFAULT '{}'
   `);
+  // Voice fingerprints table (Phase 5)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS voice_prints (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      features JSONB NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(user_id)
+    )
+  `);
   // Phase 3: coaching snapshots table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS coaching_snapshots (
@@ -293,6 +304,40 @@ fastify.post('/api/auth/logout', async (request, reply) => {
 
 fastify.get('/api/auth/me', { preHandler: [requireAuth] }, async (request, reply) => {
   return { user: request.user };
+});
+
+// ─── Voice print routes ─────────────────────────────────────────────────────────
+
+// GET /api/profile/voice-print — check enrollment status
+fastify.get('/api/profile/voice-print', { preHandler: [requireAuth] }, async (request, reply) => {
+  const result = await pool.query(
+    'SELECT id, duration_ms, created_at FROM voice_prints WHERE user_id = $1',
+    [request.user.id]
+  );
+  if (result.rows.length === 0) return { enrolled: false };
+  const vp = result.rows[0];
+  return { enrolled: true, duration_ms: vp.duration_ms, created_at: vp.created_at };
+});
+
+// POST /api/profile/voice-print — enroll or re-enroll
+// Body: { features: {...}, duration_ms: number }
+fastify.post('/api/profile/voice-print', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { features, duration_ms } = request.body || {};
+  if (!features || !duration_ms) return reply.code(400).send({ error: 'features and duration_ms required' });
+  // Upsert — one print per user
+  await pool.query(
+    `INSERT INTO voice_prints (user_id, features, duration_ms)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id) DO UPDATE SET features = $2, duration_ms = $3, created_at = NOW()`,
+    [request.user.id, JSON.stringify(features), duration_ms]
+  );
+  return { ok: true };
+});
+
+// DELETE /api/profile/voice-print — remove enrollment
+fastify.delete('/api/profile/voice-print', { preHandler: [requireAuth] }, async (request, reply) => {
+  await pool.query('DELETE FROM voice_prints WHERE user_id = $1', [request.user.id]);
+  return { ok: true };
 });
 
 // ─── Meeting routes ───────────────────────────────────────────────────────────

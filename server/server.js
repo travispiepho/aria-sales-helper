@@ -747,11 +747,38 @@ fastify.post('/api/meetings/:id/summary', { preHandler: [requireAuth], config: {
     ? 'https://api.anthropic.com/v1/messages'
     : 'https://openrouter.ai/api/v1/chat/completions';
 
+  // Also pull the latest coaching snapshot to know which checklist items were hit
+  const coachingResult = await pool.query(
+    `SELECT snapshot FROM coaching_snapshots WHERE meeting_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [id]
+  );
+  const lastCoaching = coachingResult.rows[0]?.snapshot || null;
+  const checklist = lastCoaching?.checklist || [];
+  const hitItems = checklist.filter(i => i.done).map(i => i.label);
+  const missedItems = checklist.filter(i => !i.done).map(i => i.label);
+  const detectedStage = lastCoaching?.stage?.label || 'Unknown';
+
+  const SUMMARY_SYSTEM = `You are ARIA, a sales coach for CertaPro Painters field reps.
+You have deep knowledge of:
+1. The CertaPro 10+1 Sales Process (11 stages: Setup Call, Arrival, Upfront 4, 1st Go Around, Client Manual, 2nd Go Around, Rough Estimate, Prepare Proposal, Proposal Presentation, Ask for the Order, Follow Up)
+2. The 1st Go Around checklist (11 required items the rep must cover)
+
+=== 10+1 SALES PROCESS ===
+${kb10Plus1Process}
+
+=== 1ST GO AROUND CHECKLIST ===
+${kbFirstGoAround}`;
+
+  const checklistContext = checklist.length > 0
+    ? `\n\nChecklist items COVERED during this meeting: ${hitItems.length > 0 ? hitItems.join(', ') : 'None detected'}\nChecklist items MISSED: ${missedItems.length > 0 ? missedItems.join(', ') : 'None — all covered'}\nLast detected sales stage: ${detectedStage}`
+    : '';
+
+  const SUMMARY_USER = `Meeting transcript:\n\n${transcriptText}${checklistContext}\n\nWrite a structured meeting summary with these sections (plain text, no markdown asterisks or symbols):\n\n1. MEETING OVERVIEW\nBrief 2-3 sentence summary of what was discussed.\n\n2. SALES STAGE\nWhich of the 11 sales stages was reached and how far the rep got through the process.\n\n3. CHECKLIST COVERAGE\nList each 1st Go Around checklist item and whether it was covered or missed. Be specific about what was said or skipped.\n\n4. WHAT WAS MISSED\nClearly call out any checklist items or required sales stages the rep did not complete, and why it matters.\n\n5. ACTION ITEMS\n3-5 concrete next steps for the rep to follow up on.`;
+
   if (!summaryApiKey) {
     summaryText = '⚠️ Summary generation requires ANTHROPIC_API_KEY or OPENROUTER_API_KEY. Please provision a key and try again.\n\n' +
       `Transcript preview (first 500 chars):\n${transcriptText.slice(0, 500)}`;
   } else if (OPENROUTER_API_KEY && !ANTHROPIC_API_KEY) {
-    // Use OpenRouter via fetch (Anthropic SDK baseURL incompatibility)
     try {
       const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
@@ -763,10 +790,10 @@ fastify.post('/api/meetings/:id/summary', { preHandler: [requireAuth], config: {
         },
         body: JSON.stringify({
           model: 'anthropic/claude-haiku-4-5',
-          max_tokens: 1024,
+          max_tokens: 1500,
           messages: [
-            { role: 'system', content: 'You are a sales meeting assistant for a painting company. Summarize the meeting transcript and list 3-5 concrete action items for the sales rep.' },
-            { role: 'user', content: `Transcript:\n${transcriptText}` }
+            { role: 'system', content: SUMMARY_SYSTEM },
+            { role: 'user', content: SUMMARY_USER }
           ]
         })
       });
@@ -783,14 +810,9 @@ fastify.post('/api/meetings/:id/summary', { preHandler: [requireAuth], config: {
     try {
       const response = await anthropic.messages.create({
         model: 'claude-haiku-4-5',
-        max_tokens: 1024,
-        system: 'You are a sales meeting assistant for a painting company. Summarize the meeting transcript and list 3-5 concrete action items for the sales rep.',
-        messages: [
-          {
-            role: 'user',
-            content: `Here is the meeting transcript:\n\n${transcriptText}\n\nPlease provide a summary and 3-5 action items.`,
-          },
-        ],
+        max_tokens: 1500,
+        system: SUMMARY_SYSTEM,
+        messages: [{ role: 'user', content: SUMMARY_USER }],
       });
       summaryText = response.content[0].type === 'text' ? response.content[0].text : '(No summary generated)';
     } catch (err) {

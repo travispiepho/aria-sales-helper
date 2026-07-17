@@ -23,7 +23,7 @@ const { Pool } = pg;
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const DATABASE_URL = process.env.DATABASE_URL;
-const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+const GLADIA_API_KEY = process.env.GLADIA_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Support both OPENROUTER_API_KEY (canonical) and OPENROUTER_KEY (legacy .env.secrets)
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_KEY;
@@ -35,8 +35,8 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
-if (!DEEPGRAM_API_KEY) {
-  console.warn('WARN: DEEPGRAM_API_KEY not set — WebSocket audio endpoint will reject connections.');
+if (!GLADIA_API_KEY) {
+  console.warn('WARN: GLADIA_API_KEY not set — WebSocket audio endpoint will reject connections.');
 }
 
 if (!OPENROUTER_API_KEY) {
@@ -224,7 +224,7 @@ fastify.get('/health', async (request, reply) => {
       status: 'ok',
       db: 'connected',
       ts: new Date().toISOString(),
-      deepgram: DEEPGRAM_API_KEY ? 'configured' : 'missing',
+      gladia: GLADIA_API_KEY ? 'configured' : 'missing',
       anthropic: ANTHROPIC_API_KEY ? 'configured' : 'missing (summary will stub)',
     };
   } catch (err) {
@@ -792,7 +792,7 @@ fastify.get('/api/customers/:id', { preHandler: [requireAuth] }, async (request,
 // ─── Phase 2: WebSocket audio endpoint ───────────────────────────────────────
 // GET /meetings/:id/audio → upgraded to WebSocket
 // Accepts binary PCM audio (16 kHz linear16) from client
-// Streams to Deepgram, broadcasts transcript events back
+// Streams to Gladia, broadcasts transcript events back
 
 /**
  * Authenticate a WebSocket request via session cookie.
@@ -847,9 +847,9 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     return;
   }
 
-  if (!DEEPGRAM_API_KEY) {
-    socket.send(JSON.stringify({ type: 'error', error: 'Deepgram not configured on server' }));
-    socket.close(1011, 'Deepgram not configured');
+  if (!GLADIA_API_KEY) {
+    socket.send(JSON.stringify({ type: 'error', error: 'Gladia not configured on server' }));
+    socket.close(1011, 'Gladia not configured');
     return;
   }
 
@@ -858,47 +858,79 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   // Register socket for coaching push
   registerMeetingSocket(meetingId, socket);
 
-  // ── Open Deepgram streaming connection ────────────────────────────────────
+  // ── Init Gladia session then open streaming connection ────────────────────
 
-  const dgUrl = 'wss://api.deepgram.com/v1/listen?' + new URLSearchParams({
-    model: 'nova-3',
-    smart_format: 'true',
-    diarize: 'true',
-    interim_results: 'true',
-    encoding: 'linear16',
-    sample_rate: '16000',
-    channels: '1',
-  }).toString();
-
-  let dgSocket = null;
-  let dgReady = false;
-  const audioQueue = []; // buffer while Deepgram reconnects
+  let gladiaSocket = null;
+  let gladiaReady = false;
+  let gladiaSessionUrl = null;
+  const audioQueue = []; // buffer while Gladia reconnects
   let closed = false;
   let reconnectTimer = null;
   let reconnectAttempts = 0;
 
-  function connectDeepgram() {
+  // Init HTTP call to get session WebSocket URL
+  let initRes;
+  try {
+    const initResp = await fetch('https://api.gladia.io/v2/live', {
+      method: 'POST',
+      headers: {
+        'x-gladia-key': GLADIA_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        encoding: 'wav/pcm',
+        sample_rate: 16000,
+        bit_depth: 16,
+        channels: 1,
+        model: 'solaria-1',
+        language_config: { languages: ['en'], code_switching: false },
+        messages_config: {
+          receive_partial_transcripts: true,
+          receive_final_transcripts: true,
+          receive_acknowledgments: false,
+          receive_lifecycle_events: false,
+          receive_errors: true,
+        },
+      }),
+    });
+    initRes = await initResp.json();
+  } catch (err) {
+    fastify.log.error('Gladia session init error:', err.message);
+    socket.send(JSON.stringify({ type: 'error', error: 'Failed to init Gladia session' }));
+    socket.close(1011, 'Gladia init failed');
+    return;
+  }
+
+  if (!initRes.url) {
+    fastify.log.error('Gladia init returned no URL:', JSON.stringify(initRes));
+    socket.send(JSON.stringify({ type: 'error', error: 'Gladia session init failed' }));
+    socket.close(1011, 'Gladia init failed');
+    return;
+  }
+
+  gladiaSessionUrl = initRes.url;
+  fastify.log.info(`Gladia session ${initRes.id} created for meeting ${meetingId}`);
+
+  function connectGladia() {
     if (closed) return;
 
-    dgSocket = new WebSocket(dgUrl, {
-      headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
-    });
+    gladiaSocket = new WebSocket(gladiaSessionUrl);
 
-    dgSocket.on('open', () => {
-      dgReady = true;
+    gladiaSocket.on('open', () => {
+      gladiaReady = true;
       reconnectAttempts = 0;
-      fastify.log.info(`Deepgram connected for meeting ${meetingId}`);
+      fastify.log.info(`Gladia connected for meeting ${meetingId}`);
 
       // Flush queued audio
       const queued = audioQueue.splice(0);
       queued.forEach(buf => {
-        if (dgSocket.readyState === WebSocket.OPEN) {
-          dgSocket.send(buf);
+        if (gladiaSocket.readyState === WebSocket.OPEN) {
+          gladiaSocket.send(buf);
         }
       });
     });
 
-    dgSocket.on('message', async (data) => {
+    gladiaSocket.on('message', async (data) => {
       let msg;
       try {
         msg = JSON.parse(data.toString());
@@ -906,23 +938,25 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
         return;
       }
 
-      // Deepgram results event
-      if (msg.type !== 'Results') return;
+      // Only handle transcript events
+      if (msg.type !== 'transcript') return;
 
-      const alt = msg?.channel?.alternatives?.[0];
-      if (!alt) return;
+      const msgData = msg.data;
+      if (!msgData) return;
 
-      const text = alt.transcript || '';
-      if (!text.trim()) return;
+      const utterance = msgData.utterance;
+      if (!utterance) return;
 
-      // Extract speaker from first word's speaker field (diarize)
-      let speaker = 'Speaker';
-      const words = alt.words || [];
-      if (words.length > 0 && words[0].speaker !== undefined) {
-        speaker = `Speaker ${words[0].speaker + 1}`; // 1-indexed for display
+      const text = (utterance.text || '').trim();
+      if (!text) return;
+
+      // Speaker diarization: speaker field is 0-indexed, display 1-indexed
+      let speaker = 'Speaker 1';
+      if (utterance.speaker !== undefined && utterance.speaker !== null) {
+        speaker = `Speaker ${utterance.speaker + 1}`;
       }
 
-      const isFinal = msg.is_final === true;
+      const isFinal = msgData.is_final === true;
 
       if (isFinal) {
         // Persist to DB
@@ -950,7 +984,6 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
         // Phase 3: Auto-trigger coaching after every final segment (≥3 segments)
         if (segmentCount >= 3 && OPENROUTER_API_KEY) {
-          // Fire-and-forget: run analysis async, push result via WS
           runCoachingAnalysis(meetingId)
             .then(coaching => {
               if (coaching) {
@@ -969,30 +1002,29 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       }
     });
 
-    dgSocket.on('close', (code) => {
-      dgReady = false;
-      fastify.log.warn(`Deepgram closed (code=${code}) for meeting ${meetingId}`);
-
+    gladiaSocket.on('close', (code) => {
+      gladiaReady = false;
+      fastify.log.warn(`Gladia closed (code=${code}) for meeting ${meetingId}`);
       if (!closed) {
-        // Reconnect with backoff
+        // Reconnect to same session URL (Gladia preserves session context)
         const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
         reconnectAttempts += 1;
-        reconnectTimer = setTimeout(connectDeepgram, delay);
+        reconnectTimer = setTimeout(connectGladia, delay);
       }
     });
 
-    dgSocket.on('error', (err) => {
-      fastify.log.error('Deepgram WS error:', err.message);
+    gladiaSocket.on('error', (err) => {
+      fastify.log.error('Gladia WS error:', err.message);
     });
   }
 
-  connectDeepgram();
+  connectGladia();
 
   // ── Handle audio from client ──────────────────────────────────────────────
 
   socket.on('message', (data) => {
-    if (dgReady && dgSocket && dgSocket.readyState === WebSocket.OPEN) {
-      dgSocket.send(data);
+    if (gladiaReady && gladiaSocket && gladiaSocket.readyState === WebSocket.OPEN) {
+      gladiaSocket.send(data);
     } else {
       // Buffer up to ~30s (16kHz, 16-bit mono = 32 bytes/ms → 960,000 bytes)
       const totalBuffered = audioQueue.reduce((s, b) => s + b.byteLength, 0);
@@ -1015,13 +1047,13 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       clearTimeout(reconnectTimer);
     }
 
-    // Send CloseStream to Deepgram for a clean finish
-    if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+    // Send stop_recording to Gladia for a clean finish
+    if (gladiaSocket && gladiaSocket.readyState === WebSocket.OPEN) {
       try {
-        dgSocket.send(JSON.stringify({ type: 'CloseStream' }));
-        setTimeout(() => dgSocket.terminate(), 2000);
+        gladiaSocket.send(JSON.stringify({ type: 'stop_recording' }));
+        setTimeout(() => gladiaSocket.terminate(), 2000);
       } catch {
-        dgSocket.terminate();
+        gladiaSocket.terminate();
       }
     }
   });

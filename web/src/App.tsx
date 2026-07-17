@@ -5,6 +5,7 @@ import { isIOSTooOld } from './lib/iosCheck';
 import LoginPage from './pages/LoginPage';
 import HomePage from './pages/HomePage';
 import MeetingPage from './pages/MeetingPage';
+import ProfilePage from './pages/ProfilePage';
 
 function IOSWarning() {
   return (
@@ -72,6 +73,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <MeetingPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/profile"
+            element={
+              <RequireAuth>
+                <ProfilePage />
               </RequireAuth>
             }
           />

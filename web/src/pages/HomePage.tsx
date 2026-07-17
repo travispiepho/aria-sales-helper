@@ -25,7 +25,7 @@ function statusBadge(status: Meeting['status']) {
 }
 
 export default function HomePage() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const navigate = useNavigate();
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [loading, setLoading] = useState(true);
@@ -155,10 +155,11 @@ export default function HomePage() {
             <p className="text-brand-100 text-sm">Hey {user?.name?.split(' ')[0]} 👋</p>
           </div>
           <button
-            onClick={logout}
-            className="text-brand-100 text-sm px-3 py-1 rounded-full border border-brand-400 hover:bg-brand-800"
+            onClick={() => navigate('/profile')}
+            className="w-9 h-9 rounded-full bg-brand-600 border-2 border-brand-400 hover:bg-brand-500 flex items-center justify-center text-white font-bold text-sm transition-colors"
+            aria-label="Profile"
           >
-            Sign out
+            {user?.name?.charAt(0)?.toUpperCase() || '?'}
           </button>
         </div>
       </div>

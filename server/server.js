@@ -217,6 +217,11 @@ async function requireAuth(request, reply) {
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
+// Root route for Railway health check
+fastify.get('/', async (request, reply) => {
+  return reply.code(200).send({ ok: true });
+});
+
 fastify.get('/health', async (request, reply) => {
   try {
     await pool.query('SELECT 1');
@@ -498,12 +503,27 @@ async function runCoachingAnalysis(meetingId) {
     try {
       coaching = JSON.parse(rawContent);
     } catch {
-      const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        coaching = JSON.parse(jsonMatch[0]);
-      } else {
-        console.error('coaching: could not parse JSON from Claude response');
-        return null;
+      // Strip markdown fences and try again
+      const stripped = rawContent.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+      try {
+        coaching = JSON.parse(stripped);
+      } catch {
+        // Extract first {...} block and repair common issues (trailing commas)
+        const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            const repaired = jsonMatch[0]
+              .replace(/,\s*([}\]])/g, '$1')  // trailing commas
+              .replace(/([{,]\s*)(\w+):/g, '$1"$2":'); // unquoted keys
+            coaching = JSON.parse(repaired);
+          } catch {
+            console.error('coaching: could not parse JSON from Claude response');
+            return null;
+          }
+        } else {
+          console.error('coaching: no JSON object found in Claude response');
+          return null;
+        }
       }
     }
 

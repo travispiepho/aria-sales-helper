@@ -70,26 +70,39 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const [nudgeIndex, setNudgeIndex] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [visible, setVisible] = useState(true);
   const pauseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Never show blank — holds the last nudge that was actually rendered
+  const lastValidNudgeRef = useRef<string>('');
 
   const allNudges = [
     ...(coaching?.nudges || []),
     ...(coaching?.urgent ? [`🚨 ${coaching.urgent}`] : []),
   ];
 
+  // Clamp index so it's never out of bounds even mid-render
+  const safeIndex = allNudges.length > 0 ? nudgeIndex % allNudges.length : 0;
+  const currentNudge = allNudges[safeIndex];
+  // Keep last valid nudge alive so we never flash blank
+  if (currentNudge) lastValidNudgeRef.current = currentNudge;
+  const displayNudge = currentNudge || lastValidNudgeRef.current;
+
   // Cycle nudges every 10 seconds unless paused
   useEffect(() => {
     if (allNudges.length <= 1 || paused) return;
     const timer = setInterval(() => {
-      setNudgeIndex(i => (i + 1) % allNudges.length);
+      // Fade out → update → fade in
+      setVisible(false);
+      setTimeout(() => {
+        setNudgeIndex(i => (i + 1) % allNudges.length);
+        setVisible(true);
+      }, 300);
     }, 10000);
     return () => clearInterval(timer);
   }, [allNudges.length, paused]);
 
-  // Reset index when nudges change (new coaching pass)
-  useEffect(() => {
-    setNudgeIndex(0);
-  }, [coaching]);
+  // When a new coaching pass arrives, keep current nudge showing — don't reset index
+  // (safeIndex clamping handles any out-of-bounds; avoid jarring jumps mid-cycle)
 
   function handleNudgeTap() {
     // Tap to pause for 20s, then resume
@@ -99,7 +112,11 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
   }
 
   function goToNudge(i: number) {
-    setNudgeIndex(i);
+    setVisible(false);
+    setTimeout(() => {
+      setNudgeIndex(i);
+      setVisible(true);
+    }, 200);
     setPaused(true);
     if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
     pauseTimerRef.current = setTimeout(() => setPaused(false), 20000);
@@ -225,21 +242,22 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
                 </span>
                 {allNudges.length > 1 && (
                   <span className="text-xs text-gray-400">
-                    {nudgeIndex + 1}/{allNudges.length}
+                    {safeIndex + 1}/{allNudges.length}
                   </span>
                 )}
               </div>
 
-              {/* Current nudge */}
+              {/* Current nudge — fades between transitions, never goes blank */}
               <div
                 onClick={handleNudgeTap}
-                className={`rounded-xl px-4 py-3 text-sm font-medium cursor-pointer select-none transition-colors ${
-                  allNudges[nudgeIndex]?.startsWith('🚨')
+                style={{ transition: 'opacity 0.3s ease', opacity: visible ? 1 : 0 }}
+                className={`rounded-xl px-4 py-3 text-sm font-medium cursor-pointer select-none ${
+                  displayNudge?.startsWith('🚨')
                     ? 'bg-red-50 border border-red-200 text-red-900'
                     : 'bg-yellow-50 border border-yellow-200 text-yellow-900'
                 }`}
               >
-                {allNudges[nudgeIndex]}
+                {displayNudge}
                 {paused && (
                   <span className="ml-2 text-xs opacity-50">⏸</span>
                 )}
@@ -253,7 +271,7 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
                       key={i}
                       onClick={() => goToNudge(i)}
                       className={`rounded-full transition-all ${
-                        i === nudgeIndex
+                        i === safeIndex
                           ? 'w-4 h-2 bg-yellow-500'
                           : 'w-2 h-2 bg-gray-300 hover:bg-gray-400'
                       }`}

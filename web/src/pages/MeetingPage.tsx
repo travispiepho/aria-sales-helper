@@ -234,6 +234,28 @@ export default function MeetingPage() {
           handleSpeakerLabelChange(speakerId, name);
           setVoiceToast(`🎙️ ${name} identified`);
           setTimeout(() => setVoiceToast(null), 4000);
+        } else if (msg.type === 'speaker_unlock') {
+          // Server detected the rep-voiceprint lock drifted (likely a wrong
+          // initial match) and released it. No relabeling here — leave
+          // already-rendered segments as-is; a fresh speaker_lock will
+          // arrive once re-verification finds the right speaker again.
+          const { speakerId } = msg as { type: string; speakerId: string };
+          setVoiceToast(`⚠️ Re-checking speaker match…`);
+          setTimeout(() => setVoiceToast(null), 3000);
+        } else if (msg.type === 'speaker_merge') {
+          // Server detected Deepgram over-segmented one person into two
+          // speaker indices and merged them. Rewrite already-rendered
+          // segments in place and carry forward any manual label the user
+          // had set on the stale speaker id.
+          const { from, to } = msg as { type: string; from: string; to: string };
+          setSegments(prev => prev.map(seg => (seg.speaker === from ? { ...seg, speaker: to } : seg)));
+          setSpeakerLabels(prev => {
+            if (prev[from] === undefined) return prev;
+            const next = { ...prev };
+            if (next[to] === undefined) next[to] = next[from];
+            delete next[from];
+            return next;
+          });
         } else if (msg.type === 'coaching' && msg.data) {
           // Phase 3: real-time coaching update
           const incoming = msg.data as CoachingData;
@@ -493,6 +515,49 @@ export default function MeetingPage() {
     const a = document.createElement('a');
     a.href = url;
     a.download = `${displayTitle.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-transcript.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Extract just the "ACTION ITEMS" section out of the generated summary text
+  // so Troy can drop it straight into the CRM without the full write-up.
+  function extractActionItems(summaryText: string): string | null {
+    if (!summaryText) return null;
+    const lines = summaryText.split('\n');
+    const startIdx = lines.findIndex(l => /action items/i.test(l));
+    if (startIdx === -1) return null;
+    const rest = lines.slice(startIdx + 1);
+    // Stop at the next numbered section heading (e.g. "6. NEXT STEPS") or a
+    // blank-line-delimited end of section — whichever comes first.
+    const endIdx = rest.findIndex(l => /^\s*\d+\.\s+[A-Z]/.test(l));
+    const body = (endIdx === -1 ? rest : rest.slice(0, endIdx)).join('\n').trim();
+    return body || null;
+  }
+
+  function handleDownloadActionItems() {
+    if (!meeting) return;
+    const activeSummary = summary || meeting.summary || '';
+    const actionItems = extractActionItems(activeSummary);
+    if (!actionItems) {
+      alert('No action items found in the summary yet.');
+      return;
+    }
+    const displayTitle = title || meeting.customer_name || 'Meeting';
+    const meetingDate = new Date(meeting.started_at).toLocaleDateString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric',
+    });
+
+    const lines: string[] = [];
+    lines.push(`ACTION ITEMS — ${displayTitle}`);
+    lines.push(`${meeting.customer_name} · ${meetingDate}`);
+    lines.push('');
+    lines.push(actionItems);
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${displayTitle.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-action-items.txt`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -772,12 +837,22 @@ export default function MeetingPage() {
                   <p className="text-sm text-gray-800 whitespace-pre-wrap mb-4">
                     {(summary || meeting.summary || '').replace(/\*/g, '')}
                   </p>
-                  <button
-                    onClick={handleDownloadTranscript}
-                    className="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
-                  >
-                    <span>⬇️</span> Download Transcript
-                  </button>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      onClick={handleDownloadTranscript}
+                      className="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
+                    >
+                      <span>⬇️</span> Download Transcript
+                    </button>
+                    {extractActionItems(summary || meeting.summary || '') && (
+                      <button
+                        onClick={handleDownloadActionItems}
+                        className="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
+                      >
+                        <span>✅</span> Download Action Items
+                      </button>
+                    )}
+                  </div>
                 </>
               ) : (
                 <>

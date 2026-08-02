@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { getMeeting, updateMeeting, getMeetingSegments, getLatestCoaching, Meeting, apiFetch } from '../lib/api';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
+import MeetingScoreCard from '../components/MeetingScoreCard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -825,6 +826,9 @@ export default function MeetingPage() {
                 </button>
               </div>
             </div>
+
+            {/* Post-meeting analytics: WPM, checklist timing, Meeting Score */}
+            {!isActive && meetingId && <MeetingScoreCard meetingId={meetingId} />}
 
             {/* Summary */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">

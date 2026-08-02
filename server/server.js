@@ -138,6 +138,13 @@ async function ensureSessionsTable() {
   await pool.query(`
     ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speaker_labels JSONB DEFAULT '{}'
   `);
+  // Word cadence / sequencing analytics (added 2026-08-02)
+  await pool.query(`
+    ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS word_count INTEGER
+  `);
+  await pool.query(`
+    ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS duration_ms INTEGER
+  `);
   // Voice fingerprints table (Phase 5)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS voice_prints (
@@ -649,6 +656,191 @@ fastify.post('/api/meetings/:id/coaching', { preHandler: [requireAuth] }, async 
   }
 
   return coaching;
+});
+
+// ─── Post-meeting analytics: WPM, checklist sequencing/timing, Meeting Score ──
+// GET /api/meetings/:id/analytics
+// Computed entirely from data already captured (Deepgram word timestamps
+// stored per transcript_segment + the coaching_snapshots history) — no new
+// vendor/infra required.
+
+const CHECKLIST_IDEAL_ORDER = [
+  'scope', 'why_now', 'colors', 'primer_coats', 'setup_prep', 'carpentry',
+  'four_stages', 'certainty_pledge', 'price_range', 'options', 'photos',
+];
+const WPM_IDEAL_MIN = 120;
+const WPM_IDEAL_MAX = 160;
+const CRITICAL_CHECKLIST_ITEMS = ['scope', 'price_range'];
+const LATE_CRITICAL_THRESHOLD = 0.7; // flag if hit past 70% of meeting duration
+
+// Longest-increasing-subsequence ratio: what fraction of the rep's actually-
+// hit checklist items appear in an order consistent with the ideal sequence.
+// 1.0 = perfectly ordered, lower = more items covered out of sequence.
+function sequenceMatchRatio(actualOrderIds, idealOrderIds) {
+  if (actualOrderIds.length === 0) return 1;
+  const idealIndex = new Map(idealOrderIds.map((id, i) => [id, i]));
+  const indices = actualOrderIds.map(id => idealIndex.get(id)).filter(i => i !== undefined);
+  if (indices.length === 0) return 0;
+  const tails = [];
+  for (const num of indices) {
+    let lo = 0, hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tails[mid] < num) lo = mid + 1; else hi = mid;
+    }
+    if (lo === tails.length) tails.push(num); else tails[lo] = num;
+  }
+  return tails.length / indices.length;
+}
+
+fastify.get('/api/meetings/:id/analytics', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+
+  const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
+  if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
+  const meeting = existing.rows[0];
+  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+
+  const repResult = await pool.query('SELECT name FROM users WHERE id = $1', [meeting.rep_id]);
+  const repName = repResult.rows[0]?.name || null;
+
+  const segResult = await pool.query(
+    `SELECT speaker, text, ts, word_count, duration_ms FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
+    [id]
+  );
+  const segments = segResult.rows;
+
+  const meetingStart = meeting.started_at
+    ? new Date(meeting.started_at).getTime()
+    : (segments[0] ? new Date(segments[0].ts).getTime() : Date.now());
+  const meetingEnd = meeting.ended_at
+    ? new Date(meeting.ended_at).getTime()
+    : (segments.length ? new Date(segments[segments.length - 1].ts).getTime() : Date.now());
+  const meetingDurationMin = Math.max(1, (meetingEnd - meetingStart) / 60000);
+
+  // ── Word cadence / WPM ────────────────────────────────────────────────────
+  // Only counts segments attributed to the rep's resolved display name, and
+  // only segments with real Deepgram word timing (duration_ms populated) —
+  // the pre-migration/fallback rows without timing are silently excluded
+  // rather than skewing the average.
+  const repSegments = segments.filter(s => repName && s.speaker === repName);
+  let totalRepWords = 0;
+  let totalRepDurationMs = 0;
+  const wpmBuckets = new Map(); // minute-of-call -> { words, durationMs }
+  for (const seg of repSegments) {
+    if (!seg.word_count || !seg.duration_ms || seg.duration_ms <= 0) continue;
+    totalRepWords += seg.word_count;
+    totalRepDurationMs += seg.duration_ms;
+    const minuteBucket = Math.max(0, Math.floor((new Date(seg.ts).getTime() - meetingStart) / 60000));
+    const bucket = wpmBuckets.get(minuteBucket) || { words: 0, durationMs: 0 };
+    bucket.words += seg.word_count;
+    bucket.durationMs += seg.duration_ms;
+    wpmBuckets.set(minuteBucket, bucket);
+  }
+  const avgWpm = totalRepDurationMs > 0
+    ? Math.round((totalRepWords / (totalRepDurationMs / 1000)) * 60)
+    : null;
+  const wpmOverTime = Array.from(wpmBuckets.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([minute, b]) => ({
+      minute,
+      wpm: b.durationMs > 0 ? Math.round((b.words / (b.durationMs / 1000)) * 60) : null,
+    }))
+    .filter(p => p.wpm !== null);
+
+  let paceFlag = null;
+  if (avgWpm !== null) {
+    paceFlag = avgWpm < WPM_IDEAL_MIN ? 'slow' : avgWpm > WPM_IDEAL_MAX ? 'fast' : 'good';
+  }
+
+  // ── Checklist sequencing / timing ─────────────────────────────────────────
+  // "When", not just "if": walk the full coaching-snapshot history (already
+  // persisted every ~3 segments during the live call) and find the earliest
+  // snapshot where each item flipped to done.
+  const snapResult = await pool.query(
+    `SELECT snapshot, created_at FROM coaching_snapshots WHERE meeting_id = $1 ORDER BY created_at ASC`,
+    [id]
+  );
+  const snapshots = snapResult.rows;
+
+  const firstHitAt = {}; // item id -> Date it first showed done=true
+  for (const row of snapshots) {
+    for (const item of row.snapshot?.checklist || []) {
+      if (item.done && firstHitAt[item.id] === undefined) firstHitAt[item.id] = row.created_at;
+    }
+  }
+
+  const latestChecklist = snapshots.length > 0 ? (snapshots[snapshots.length - 1].snapshot?.checklist || []) : [];
+  const checklistTiming = CHECKLIST_IDEAL_ORDER.map(itemId => {
+    const hitAt = firstHitAt[itemId];
+    const labelRow = latestChecklist.find(i => i.id === itemId);
+    return {
+      id: itemId,
+      label: labelRow?.label || itemId,
+      hit: hitAt !== undefined,
+      minutesIn: hitAt !== undefined ? Math.round((new Date(hitAt).getTime() - meetingStart) / 60000) : null,
+    };
+  });
+
+  const actualOrderIds = checklistTiming
+    .filter(c => c.hit)
+    .sort((a, b) => (a.minutesIn ?? 0) - (b.minutesIn ?? 0))
+    .map(c => c.id);
+  const sequenceScoreRatio = sequenceMatchRatio(actualOrderIds, CHECKLIST_IDEAL_ORDER);
+
+  const lateCriticalItems = checklistTiming
+    .filter(c => CRITICAL_CHECKLIST_ITEMS.includes(c.id) && c.hit && c.minutesIn !== null)
+    .filter(c => (c.minutesIn / meetingDurationMin) > LATE_CRITICAL_THRESHOLD)
+    .map(c => ({ id: c.id, label: c.label, minutesIn: c.minutesIn }));
+
+  const coveredCount = checklistTiming.filter(c => c.hit).length;
+  const coveragePct = Math.round((coveredCount / CHECKLIST_IDEAL_ORDER.length) * 100);
+
+  // ── DISC adaptation quality ────────────────────────────────────────────────
+  // Approximated from how often the coaching engine had to raise an "urgent"
+  // situational correction — fewer corrections needed across the call implies
+  // better real-time adaptation to the prospect's detected style.
+  const urgentCount = snapshots.filter(row => row.snapshot?.urgent).length;
+  const discAdaptationScore = snapshots.length > 0
+    ? Math.round(Math.max(0, 1 - (urgentCount / snapshots.length)) * 100)
+    : null;
+
+  // ── Composite Meeting Score card ──────────────────────────────────────────
+  const paceScore = paceFlag === null ? null : (paceFlag === 'good' ? 100 : 60);
+  const scoreComponents = [
+    { key: 'coverage', label: 'Checklist Coverage', value: coveragePct, weight: 0.35 },
+    { key: 'sequencing', label: 'Sequence Order', value: Math.round(sequenceScoreRatio * 100), weight: 0.25 },
+    { key: 'pacing', label: 'Speaking Pace', value: paceScore, weight: 0.20 },
+    { key: 'disc_adaptation', label: 'DISC Adaptation', value: discAdaptationScore, weight: 0.20 },
+  ].filter(c => c.value !== null);
+
+  const totalWeight = scoreComponents.reduce((s, c) => s + c.weight, 0);
+  const meetingScore = totalWeight > 0
+    ? Math.round(scoreComponents.reduce((s, c) => s + c.value * c.weight, 0) / totalWeight)
+    : null;
+
+  return {
+    wpm: {
+      avg: avgWpm,
+      idealMin: WPM_IDEAL_MIN,
+      idealMax: WPM_IDEAL_MAX,
+      paceFlag,
+      overTime: wpmOverTime,
+    },
+    checklistTiming,
+    sequencing: {
+      score: Math.round(sequenceScoreRatio * 100),
+      actualOrder: actualOrderIds,
+      idealOrder: CHECKLIST_IDEAL_ORDER,
+      lateCriticalItems,
+    },
+    coveragePct,
+    discAdaptationScore,
+    meetingScore,
+    scoreComponents,
+  };
 });
 
 // ─── Phase 2: Consent endpoint ────────────────────────────────────────────────
@@ -1284,7 +1476,9 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       const isFinal = msg.is_final === true;
 
       if (isFinal) {
-        // Split segment by speaker changes within the word list
+        // Split segment by speaker changes within the word list. Keep full
+        // word objects (not just text) so we can compute word_count/duration_ms
+        // per group for WPM analytics.
         const speakerGroups = [];
         let curSpeakerIdx = null;
         let curWords = [];
@@ -1295,17 +1489,36 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
             curSpeakerIdx = si;
             curWords = [];
           }
-          curWords.push(w.punctuated_word || w.word || '');
+          curWords.push(w);
         }
         if (curWords.length > 0) speakerGroups.push({ si: curSpeakerIdx, words: curWords });
-        // Fallback: if no word-level data, use the full text as one group
-        if (speakerGroups.length === 0) speakerGroups.push({ si: rawSpeakerIdx, words: [text] });
+        // Fallback: if no word-level data, use the full text as one group with
+        // no timing info (word_count approximated, duration unknown).
+        if (speakerGroups.length === 0) speakerGroups.push({ si: rawSpeakerIdx, words: null, fallbackText: text });
 
         let segmentCount = 0;
         for (const group of speakerGroups) {
-          const groupText = group.words.join(' ').trim();
+          const groupText = group.words
+            ? group.words.map(w => w.punctuated_word || w.word || '').join(' ').trim()
+            : (group.fallbackText || '').trim();
           if (!groupText) continue;
           const si = String(group.si);
+
+          // Word cadence data for WPM scoring — null duration when we don't
+          // have real word timestamps (fallback path).
+          let groupWordCount = null;
+          let groupDurationMs = null;
+          if (group.words && group.words.length > 0) {
+            groupWordCount = group.words.length;
+            const timedWords = group.words.filter(w => w.start !== undefined && w.end !== undefined);
+            if (timedWords.length > 0) {
+              const firstStart = timedWords[0].start;
+              const lastEnd = timedWords[timedWords.length - 1].end;
+              if (lastEnd > firstStart) groupDurationMs = Math.round((lastEnd - firstStart) * 1000);
+            }
+          } else {
+            groupWordCount = groupText.split(/\s+/).filter(Boolean).length;
+          }
 
           // Mid-call name introduction detection: lock an unlocked speaker to a
           // spoken name (e.g. "Hi, I'm John" / "This is Sarah"). Never overrides
@@ -1339,8 +1552,8 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           const groupLabel = speakerLocks[si] || `Speaker ${group.si + 1}`;
           try {
             await pool.query(
-              `INSERT INTO transcript_segments (meeting_id, ts, speaker, text) VALUES ($1, NOW(), $2, $3)`,
-              [meetingId, groupLabel, groupText]
+              `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5)`,
+              [meetingId, groupLabel, groupText, groupWordCount, groupDurationMs]
             );
           } catch (dbErr) {
             fastify.log.error('transcript_segments insert error:', dbErr);

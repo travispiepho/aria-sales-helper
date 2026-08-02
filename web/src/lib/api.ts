@@ -140,3 +140,42 @@ export async function updateMeeting(
 ): Promise<Meeting> {
   return request('PATCH', `/api/meetings/${id}`, data);
 }
+
+// Post-meeting analytics: WPM, checklist sequencing/timing, Meeting Score
+
+export interface ChecklistTimingItem {
+  id: string;
+  label: string;
+  hit: boolean;
+  minutesIn: number | null;
+}
+
+export interface WpmPoint {
+  minute: number;
+  wpm: number | null;
+}
+
+export interface MeetingAnalytics {
+  wpm: {
+    avg: number | null;
+    idealMin: number;
+    idealMax: number;
+    paceFlag: 'slow' | 'fast' | 'good' | null;
+    overTime: WpmPoint[];
+  };
+  checklistTiming: ChecklistTimingItem[];
+  sequencing: {
+    score: number;
+    actualOrder: string[];
+    idealOrder: string[];
+    lateCriticalItems: { id: string; label: string; minutesIn: number }[];
+  };
+  coveragePct: number;
+  discAdaptationScore: number | null;
+  meetingScore: number | null;
+  scoreComponents: { key: string; label: string; value: number; weight: number }[];
+}
+
+export async function getMeetingAnalytics(id: string): Promise<MeetingAnalytics> {
+  return request('GET', `/api/meetings/${id}/analytics`);
+}

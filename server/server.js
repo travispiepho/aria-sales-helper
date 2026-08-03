@@ -297,6 +297,13 @@ fastify.post('/api/auth/login', async (request, reply) => {
         email: user.email,
         role: user.role,
       },
+      // Mobile-only fallback (see authWebSocket note above) — the web PWA's
+      // fetch client never reads this field and continues to rely solely on
+      // the httpOnly cookie, so this is not a new client-readable-cookie
+      // security regression for the web app. It IS a new client-visible
+      // credential for the mobile app specifically; mobile stores it in
+      // expo-secure-store (OS-level encrypted storage), not plain state.
+      sessionId,
     });
 });
 
@@ -1092,7 +1099,17 @@ async function authWebSocket(request) {
     if (k) cookies[k.trim()] = decodeURIComponent(v.join('='));
   });
 
-  const sessionId = cookies['session_id'];
+  // Native-client fallback (2026-08-03): React Native's WebSocket upgrade
+  // request does not reliably carry the httpOnly session_id cookie the way
+  // a browser's does (this was flagged as an open risk when the mobile app
+  // was scaffolded, now confirmed in practice on a real device). Since the
+  // cookie is httpOnly, the mobile client can't read and resend it manually
+  // either — so the login response now also returns the raw session id in
+  // the JSON body (mobile-only; the web PWA ignores that field and keeps
+  // using the cookie as before), and the mobile WS client passes it as a
+  // `?session=` query param on the upgrade request. Cookie auth remains the
+  // primary/preferred path for the web app; this is strictly additive.
+  const sessionId = cookies['session_id'] || request.query?.session;
   const session = await getSession(sessionId);
   if (!session) return null;
 

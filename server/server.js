@@ -1234,7 +1234,15 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   const speakerRefFeatures = {};  // canonical Si -> reference voice features
   const speakerRefChunks = {};    // rawSi -> Float32Array[] (pending, pre-resolution)
   const DEDUP_MIN_SAMPLES = 16000 * 3; // 3s before attempting a merge check
-  const DEDUP_MERGE_THRESHOLD = 0.80;  // stricter bar than rep-match (0.58)
+  // Raised 0.80 -> 0.92 (2026-08-03): the underlying spectral-feature matcher
+  // (centroid/rolloff/zcr/energy/spread) is too coarse to reliably discriminate
+  // between two DIFFERENT real people on the same mic/room, especially over
+  // short clips — was causing distinct customer voices to be falsely merged
+  // into whichever speaker slot became canonical first (frequently the rep).
+  // This is a stopgap; the real fix is replacing this matcher with a proper
+  // voice-embedding model (pyannoteAI), planned for the Aria Phone Channel
+  // work and worth extending to this in-person pipeline too.
+  const DEDUP_MERGE_THRESHOLD = 0.92;  // stricter bar than rep-match (0.58)
 
   function resolveSpeaker(rawSi) {
     let cur = rawSi;
@@ -1263,6 +1271,14 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     let bestScore = 0;
     for (const [canonicalSi, refFeatures] of Object.entries(speakerRefFeatures)) {
       if (Number(canonicalSi) === rawSi) continue;
+      // Never merge a new/unresolved speaker into the currently-locked rep slot.
+      // Previously any voice scoring high enough against the rep's fingerprint
+      // (even a different real person, given the matcher's weak discrimination)
+      // would get silently relabeled as the rep. The rep's identity is already
+      // established via the dedicated voiceprint-lock flow above — this merge
+      // step should only ever consolidate customer-side over-segmentation, not
+      // reassign someone else's voice onto the rep.
+      if (lockedSpeakerId !== null && Number(canonicalSi) === Number(lockedSpeakerId)) continue;
       const score = similarityScore(features, refFeatures);
       if (score > bestScore) { bestScore = score; bestMatch = Number(canonicalSi); }
     }

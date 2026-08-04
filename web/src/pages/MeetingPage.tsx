@@ -77,6 +77,7 @@ export default function MeetingPage() {
   // Post-meeting
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [exportingDoc, setExportingDoc] = useState(false);
   const [voiceToast, setVoiceToast] = useState<string | null>(null);
   const [title, setTitle] = useState<string>('');
   const [titleSaving, setTitleSaving] = useState(false);
@@ -563,6 +564,29 @@ export default function MeetingPage() {
     URL.revokeObjectURL(url);
   }
 
+  async function handleExportToDocs() {
+    if (!meetingId) return;
+    setExportingDoc(true);
+    try {
+      const res = await apiFetch(`/api/meetings/${meetingId}/export-to-docs`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(err.error);
+      }
+      const data = await res.json();
+      if (data.webViewLink) {
+        window.open(data.webViewLink, '_blank');
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to export to Google Docs');
+    } finally {
+      setExportingDoc(false);
+    }
+  }
+
   async function handleGenerateSummary() {
     if (!meetingId) return;
     setSummaryLoading(true);
@@ -856,6 +880,13 @@ export default function MeetingPage() {
                         <span>✅</span> Download Action Items
                       </button>
                     )}
+                    <button
+                      onClick={handleExportToDocs}
+                      disabled={exportingDoc}
+                      className="w-full bg-gray-100 hover:bg-gray-200 disabled:opacity-50 text-gray-700 font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
+                    >
+                      <span>📄</span> {exportingDoc ? 'Exporting…' : 'Export to Google Doc'}
+                    </button>
                   </div>
                 </>
               ) : (

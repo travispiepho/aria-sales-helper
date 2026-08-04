@@ -285,7 +285,31 @@ export default function MeetingScreen() {
             )}
           </ThemedView>
 
-          {(stage === 'connected' || segments.length > 0) && (
+          {stage === 'idle' || stage === 'mic-denied' || stage === 'ws-error' || stage === 'ended' ? (
+            <Pressable onPress={handleStart} style={[styles.button, styles.startButton]}>
+              <ThemedText style={styles.buttonText}>🎙️ Start Meeting</ThemedText>
+            </Pressable>
+          ) : stage === 'connected' ? (
+            <Pressable onPress={handleEnd} style={[styles.button, styles.endButton]}>
+              <ThemedText style={styles.buttonText}>⏹ End Meeting</ThemedText>
+            </Pressable>
+          ) : (
+            <ThemedView style={styles.loadingRow}>
+              <ActivityIndicator />
+              <ThemedText type="small" themeColor="textSecondary">
+                {stageLabel(stage)}
+              </ThemedText>
+            </ThemedView>
+          )}
+
+          {/* 2026-08-04: moved below the Start/End button per Gabe's request —
+              always rendered once a meeting exists for this screen session
+              (not gated on stage === 'connected' alone), so the panel itself
+              is visibly present — including its "Listening…" placeholder —
+              even before any interim/final message has arrived. This makes
+              it possible to see at a glance whether the UI is rendering vs.
+              whether transcript data specifically isn't arriving over the WS. */}
+          {meeting && (
             <ThemedView style={styles.transcriptCard}>
               <ThemedText type="small" themeColor="textSecondary" style={styles.transcriptLabel}>
                 LIVE TRANSCRIPT
@@ -293,7 +317,7 @@ export default function MeetingScreen() {
               <ScrollView style={styles.transcriptScroll}>
                 {segments.length === 0 && !interim && (
                   <ThemedText type="small" themeColor="textSecondary">
-                    Listening…
+                    {stage === 'connected' ? 'Listening…' : 'No transcript yet.'}
                   </ThemedText>
                 )}
                 {segments.map((seg) => (
@@ -311,23 +335,6 @@ export default function MeetingScreen() {
                   </ThemedText>
                 )}
               </ScrollView>
-            </ThemedView>
-          )}
-
-          {stage === 'idle' || stage === 'mic-denied' || stage === 'ws-error' || stage === 'ended' ? (
-            <Pressable onPress={handleStart} style={[styles.button, styles.startButton]}>
-              <ThemedText style={styles.buttonText}>🎙️ Start Meeting</ThemedText>
-            </Pressable>
-          ) : stage === 'connected' ? (
-            <Pressable onPress={handleEnd} style={[styles.button, styles.endButton]}>
-              <ThemedText style={styles.buttonText}>⏹ End Meeting</ThemedText>
-            </Pressable>
-          ) : (
-            <ThemedView style={styles.loadingRow}>
-              <ActivityIndicator />
-              <ThemedText type="small" themeColor="textSecondary">
-                {stageLabel(stage)}
-              </ThemedText>
             </ThemedView>
           )}
 

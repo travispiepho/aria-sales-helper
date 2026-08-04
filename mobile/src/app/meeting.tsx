@@ -99,20 +99,45 @@ export default function MeetingScreen() {
     // accepts as a fallback auth path (see authWebSocket() in server.js).
     setStage('connecting-ws');
     const sessionId = await getStoredSessionId();
-    const wsUrl = `${getWsBase()}/meetings/${created.id}/audio${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`;
+    const wsBase = getWsBase();
+    const wsUrl = `${wsBase}/meetings/${created.id}/audio${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`;
+    // Diagnostic (2026-08-04, part 2): log the resolved base + auth-path used
+    // (never the raw session id) BEFORE attempting the connection, so a
+    // "WebSocket connection failed" report can be cross-checked against the
+    // actual backend URL/auth mode without needing a sandbox repro. See
+    // memory/aria-mobile-websocket-fix-2026-08-04-part2.md — every layer of
+    // URL resolution and the backend auth/WS path were independently verified
+    // working; this app previously had no way to surface *why* onerror fired
+    // on a real device, which is the actual gap this closes.
+    console.log('[meeting ws] resolved wsBase =', wsBase, '| auth =', sessionId ? 'session-query-param' : 'cookie-only (no stored sessionId!)');
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
       setStage('connected');
     };
-    ws.onerror = () => {
+    ws.onerror = (evt: unknown) => {
+      // RN's native WebSocket Event carries no message on 'error' itself —
+      // the real failure reason (if any) arrives on the subsequent 'close'
+      // event as `code`/`reason` (see react-native/Libraries/WebSocket/WebSocket.js
+      // websocketFailed handler). Log the raw event defensively in case a
+      // future RN/Expo version does attach detail here.
+      console.log('[meeting ws] onerror event:', evt);
       setStage('ws-error');
-      setErrorMsg('WebSocket connection failed. Check network/backend URL.');
+      setErrorMsg(`WebSocket connection failed (base: ${wsBase}). Check network/backend URL.`);
     };
-    ws.onclose = () => {
+    ws.onclose = (evt: { code?: number; reason?: string }) => {
+      // Surface the real close code/reason for diagnosis — this was
+      // previously discarded entirely, which is why a prior "connection
+      // failed" report couldn't be distinguished from a wrong URL vs. a real
+      // network drop vs. an auth rejection (backend sends codes 4001/4003/4004
+      // for auth failures, see authWebSocket()/server.js).
+      console.log('[meeting ws] onclose code:', evt?.code, 'reason:', evt?.reason);
       // Only treat as an error if we hadn't already ended intentionally.
       setStage((prev) => (prev === 'ended' ? prev : 'ws-error'));
+      setErrorMsg((prev) =>
+        prev ?? `Connection closed (code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
+      );
     };
     ws.onmessage = (evt) => {
       // Stage 1: not rendering transcript yet — just log for now so the

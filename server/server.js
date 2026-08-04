@@ -318,7 +318,17 @@ fastify.post('/api/auth/logout', async (request, reply) => {
 });
 
 fastify.get('/api/auth/me', { preHandler: [requireAuth] }, async (request, reply) => {
-  return { user: request.user };
+  // Mobile-only session-id backfill (2026-08-04): the native-client WS auth
+  // fallback (see authWebSocket()) requires the raw session id, which is
+  // only ever handed to the client in the /api/auth/login response body.
+  // Any mobile session established BEFORE that fallback shipped (or any
+  // future case where secure-store gets cleared without a fresh login) has
+  // no sessionId cached, silently falling back to cookie-only WS auth --
+  // the exact bug this was meant to fix. Returning it here too lets the
+  // mobile client backfill it on every authenticated app-open, without
+  // forcing a log-out/log-in cycle. The web PWA's api.ts ignores unknown
+  // response fields, so this is additive and does not change its behavior.
+  return { user: request.user, sessionId: request.cookies?.session_id };
 });
 
 // ─── Voice print routes ─────────────────────────────────────────────────────────

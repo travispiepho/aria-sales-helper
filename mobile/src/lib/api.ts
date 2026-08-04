@@ -140,9 +140,23 @@ export async function getStoredSessionId(): Promise<string | null> {
 // Cross-checks the cached profile against a live /api/auth/me call — the
 // cache is only ever used to paint the UI instantly; the network call is the
 // source of truth for whether the session cookie is actually still valid.
-export async function getMe(): Promise<{ user: User }> {
-  const result = await request<{ user: User }>('GET', '/api/auth/me');
+//
+// Root cause fixed here (2026-08-04): `sessionId` was previously only ever
+// written to secure storage inside login() — any app session that started
+// BEFORE the `?session=` WS fallback shipped (or any secure-store clear
+// without a fresh login) had no cached session id, so getStoredSessionId()
+// returned null, the WS URL had no `?session=` param, and the connection
+// silently fell back to the (broken for native WebSocket) cookie-only path.
+// This is why the meeting screen's WS handshake was "still failing" even
+// after the backend fallback + login-time fix were both live. Backfilling
+// it on every getMe() call (which auth.tsx runs on every app open) closes
+// that gap without requiring an explicit log-out/log-in cycle.
+export async function getMe(): Promise<{ user: User; sessionId?: string }> {
+  const result = await request<{ user: User; sessionId?: string }>('GET', '/api/auth/me');
   await secureStore.setItemAsync(CACHED_USER_KEY, JSON.stringify(result.user));
+  if (result.sessionId) {
+    await secureStore.setItemAsync(SESSION_ID_KEY, result.sessionId);
+  }
   return result;
 }
 

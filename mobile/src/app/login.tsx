@@ -1,4 +1,14 @@
-import { useRouter } from 'expo-router';
+/**
+ * login.tsx — Sign-in screen.
+ *
+ * Extracted verbatim (logic unchanged) from the old src/app/index.tsx's
+ * `LoginScreen` component as part of the 2026-08-04 bottom-nav restructure.
+ * Only reached when the root layout's `Stack.Protected guard={!user}` is
+ * active — see src/app/_layout.tsx. Calls the EXISTING backend contract:
+ * POST /api/auth/login { email, password } (see app/server/server.js and
+ * src/lib/api.ts for the full auth notes).
+ */
+
 import { useState } from 'react';
 import {
   ActivityIndicator,
@@ -15,33 +25,8 @@ import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
 
-export default function HomeScreen() {
-  const { user, loading, login, logout } = useAuth();
-
-  if (loading) {
-    return (
-      <ThemedView style={styles.centerFill}>
-        <ActivityIndicator size="large" />
-      </ThemedView>
-    );
-  }
-
-  if (!user) {
-    return <LoginScreen onLogin={login} />;
-  }
-
-  return <HomeDashboard userName={user.name} onLogout={logout} />;
-}
-
-// ─── Login screen ───────────────────────────────────────────────────────────
-// Calls the EXISTING backend contract: POST /api/auth/login { email, password }
-// (see app/server/server.js and src/lib/api.ts for the full auth notes).
-
-function LoginScreen({
-  onLogin,
-}: {
-  onLogin: (email: string, password: string) => Promise<void>;
-}) {
+export default function LoginScreen() {
+  const { login } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +40,7 @@ function LoginScreen({
     }
     setSubmitting(true);
     try {
-      await onLogin(email.trim(), password);
+      await login(email.trim(), password);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed.');
     } finally {
@@ -128,42 +113,8 @@ function LoginScreen({
   );
 }
 
-// ─── Home / dashboard (post-login) ─────────────────────────────────────────
-
-function HomeDashboard({ userName, onLogout }: { userName: string; onLogout: () => void }) {
-  const router = useRouter();
-
-  return (
-    <ThemedView style={styles.fill}>
-      <SafeAreaView style={styles.fill}>
-        <ThemedView style={styles.dashboard}>
-          <ThemedText type="title" style={styles.loginTitle}>
-            ARIA
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary">
-            Signed in as {userName}
-          </ThemedText>
-
-          <Pressable
-            onPress={() => router.push('/meeting')}
-            style={({ pressed }) => [styles.button, styles.meetingButton, pressed && styles.buttonPressed]}>
-            <ThemedText style={styles.buttonText}>🎙️ Start In-Person Meeting</ThemedText>
-          </Pressable>
-
-          <Pressable onPress={onLogout} style={styles.logoutButton}>
-            <ThemedText type="small" themeColor="textSecondary">
-              Sign out
-            </ThemedText>
-          </Pressable>
-        </ThemedView>
-      </SafeAreaView>
-    </ThemedView>
-  );
-}
-
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  centerFill: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   loginContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -192,12 +143,4 @@ const styles = StyleSheet.create({
   buttonPressed: { opacity: 0.8 },
   buttonDisabled: { opacity: 0.6 },
   buttonText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  dashboard: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
-  },
-  meetingButton: { marginTop: Spacing.five, backgroundColor: '#16A34A' },
-  logoutButton: { alignItems: 'center', paddingVertical: Spacing.three },
 });

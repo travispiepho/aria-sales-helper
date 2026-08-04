@@ -204,3 +204,18 @@ export async function updateMeeting(
 ): Promise<Meeting> {
   return request('PATCH', `/api/meetings/${id}`, data);
 }
+
+// ─── Transcript segments (2026-08-04, bottom-nav / meeting history) ────────
+// Mirrors app/web/src/lib/api.ts's getMeetingSegments() — same existing
+// backend contract (GET /api/meetings/:id/segments), not a new endpoint.
+// Used by the new Home-tab "previous transcripts" history/detail screens.
+
+export interface TranscriptSegment {
+  speaker: string;
+  text: string;
+  ts: string;
+}
+
+export async function getMeetingSegments(id: string): Promise<{ segments: TranscriptSegment[] }> {
+  return request('GET', `/api/meetings/${id}/segments`);
+}

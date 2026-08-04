@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-REPO_DIR="/root/.openclaw/workspace/projects/siro-sales-helper/app"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SECRETS_FILE="/root/.openclaw/workspace/projects/siro-sales-helper/.env.secrets"
 LOG_FILE="/root/.openclaw/workspace/memory/deploy-drift-log.md"
 
@@ -48,8 +48,12 @@ if [ -z "$RAILWAY_TOKEN" ]; then
   exit 1
 fi
 
-# ── Step 1: what commit does `main` actually point to right now? ───────────
-EXPECTED_SHA="$(git -C "$REPO_DIR" ls-remote origin main | awk '{print $1}')"
+# ── Step 1: what commit does `main` actually point to for files that ─────────
+#     actually affect the deployed backend? Railway's rootDirectory is
+#     `server/`, so a commit touching only mobile/scripts/docs is real,
+#     harmless drift, not the incident this script exists to catch. Resolve
+#     against the last commit that touched server/, not main's raw tip.
+EXPECTED_SHA="$(git -C "$REPO_DIR" log -1 --format=%H origin/main -- server/)"
 if [ -z "$EXPECTED_SHA" ]; then
   log "❌ ERROR: could not resolve origin/main HEAD via git ls-remote"
   exit 1

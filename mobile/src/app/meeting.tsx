@@ -124,6 +124,15 @@ export default function MeetingScreen() {
       // future RN/Expo version does attach detail here.
       console.log('[meeting ws] onerror event:', evt);
       setStage('ws-error');
+      // Set a fallback message only — RN's WebSocket always fires 'close'
+      // immediately after 'error' (see react-native/Libraries/WebSocket/
+      // WebSocket.js websocketFailed), and 'close' carries the real code/
+      // reason. Do NOT treat this as final: onclose below unconditionally
+      // overwrites it. (2026-08-04 part 3 fix: the prior version used
+      // `prev ?? ...` in onclose, which meant this generic onerror message
+      // was set first and then PERMANENTLY WON, silently discarding the
+      // actual close code/reason on every single failure — that's why the
+      // "part 2" diagnostic fix never actually showed anything useful.)
       setErrorMsg(`WebSocket connection failed (base: ${wsBase}). Check network/backend URL.`);
     };
     ws.onclose = (evt: { code?: number; reason?: string }) => {
@@ -135,8 +144,12 @@ export default function MeetingScreen() {
       console.log('[meeting ws] onclose code:', evt?.code, 'reason:', evt?.reason);
       // Only treat as an error if we hadn't already ended intentionally.
       setStage((prev) => (prev === 'ended' ? prev : 'ws-error'));
-      setErrorMsg((prev) =>
-        prev ?? `Connection closed (code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
+      // 2026-08-04 part 3 fix: ALWAYS overwrite (no `prev ??` fallback).
+      // onclose fires after onerror and has the real diagnostic code/reason;
+      // letting onerror's generic message "win" defeated the whole point of
+      // the part-2 diagnostic fix.
+      setErrorMsg(
+        `Connection closed (code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
       );
     };
     ws.onmessage = (evt) => {

@@ -203,13 +203,44 @@ await fastify.register(cookie, {
   hook: 'onRequest',
 });
 
+// 2026-08-04 (part 3-gpt fix): root cause of the mobile WS "connection
+// failed" report that survived three prior fixes. React Native's WebSocket
+// module ALWAYS sends an Origin header on the upgrade request, even though
+// the app code sets no Origin explicitly:
+//   - Android (WebSocketModule.kt getDefaultOrigin()): auto-derives
+//     `https://<ws-host>` (i.e. the backend's OWN host) when no origin header
+//     is set by the caller.
+//   - Neither platform ever sends a browser-style Origin matching the Expo
+//     tunnel/dev-server host that CORS_ORIGIN was configured to whitelist.
+// The callback below used to reject with `cb(new Error(...), false)`.
+// @fastify/cors treats an error from the origin resolver as a request-level
+// failure and Fastify's default error handler returns a full HTTP 500
+// response INSTEAD OF a normal CORS-rejected-but-still-200/101 response.
+// For a WebSocket upgrade specifically, that 500 arrives instead of the 101
+// Switching Protocols handshake, and RN's native WebSocket surfaces this as
+// close code 1006, reason "Received bad response code from server: 500" —
+// which is EXACTLY what Gabe's on-device logs showed after fix #3 correctly
+// surfaced the real close code (see meeting.tsx onclose fix). Reproduced with
+// 100% fidelity via a Node `ws` client sending Origin: https://<backend-host>
+// (Android's auto-derived value) and Origin: null / file:// (other native
+// clients) — all three hit this exact 500/"Not allowed by CORS" body.
+// Fix: use `cb(null, false)` for a disallowed origin. @fastify/cors then
+// completes the request normally (simply omitting the
+// Access-Control-Allow-Origin header) instead of throwing a 500. This does
+// NOT relax the CORS policy — disallowed origins still don't get the CORS
+// header — it only stops turning a routine CORS mismatch into a hard 500
+// that breaks WS upgrades for native clients whose Origin was never going to
+// match the web-app whitelist in the first place. The WS route's own
+// authWebSocket()/session check remains the actual auth gate; CORS here was
+// never meant to be (and per fastify/cors's own contract, isn't) an auth
+// mechanism for a non-browser client with no same-origin policy to enforce.
 await fastify.register(cors, {
   origin: (origin, cb) => {
     const allowed = (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
     if (!origin || allowed.length === 0 || allowed.includes(origin)) {
       cb(null, true);
     } else {
-      cb(new Error('Not allowed by CORS'), false);
+      cb(null, false);
     }
   },
   credentials: true,

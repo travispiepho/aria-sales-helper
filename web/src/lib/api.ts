@@ -179,3 +179,120 @@ export interface MeetingAnalytics {
 export async function getMeetingAnalytics(id: string): Promise<MeetingAnalytics> {
   return request('GET', `/api/meetings/${id}/analytics`);
 }
+
+// ARIA Priority 1 roadmap (2026-08-05): BANT + closing certainty (#1),
+// insider-language flagger (#3), question-listening gaps (#4), coaching
+// report aggregation (#6). Item #2 (TEPIT) intentionally not implemented.
+
+export interface BantFactor {
+  score: number;
+  rationale: string;
+}
+
+export interface BantScore {
+  id: string;
+  meeting_id: string;
+  budget_score: number;
+  authority_score: number;
+  need_score: number;
+  timeline_score: number;
+  closing_certainty_pct: number;
+  rationale: {
+    budget?: string;
+    authority?: string;
+    need?: string;
+    timeline?: string;
+    overall?: string;
+  };
+  model?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function runBantAnalysis(id: string): Promise<BantScore> {
+  return request('POST', `/api/meetings/${id}/bant`);
+}
+
+export async function getBantAnalysis(id: string): Promise<{ bant: BantScore | null }> {
+  return request('GET', `/api/meetings/${id}/bant`);
+}
+
+export interface InsiderLanguageFlag {
+  id: string;
+  meeting_id: string;
+  segment_index: number | null;
+  ts: string | null;
+  minutes_in: number | null;
+  phrase: string;
+  explanation: string;
+}
+
+export async function runInsiderLanguageAnalysis(id: string): Promise<{ flags: InsiderLanguageFlag[] }> {
+  return request('POST', `/api/meetings/${id}/insider-language`);
+}
+
+export async function getInsiderLanguageFlags(id: string): Promise<{ flags: InsiderLanguageFlag[] }> {
+  return request('GET', `/api/meetings/${id}/insider-language`);
+}
+
+export interface QuestionGap {
+  id: string;
+  meeting_id: string;
+  question_segment_index: number | null;
+  question_text: string;
+  question_ts: string | null;
+  question_minutes_in: number | null;
+  rep_response_excerpt: string;
+  explanation: string;
+}
+
+export async function runQuestionGapAnalysis(id: string): Promise<{ gaps: QuestionGap[] }> {
+  return request('POST', `/api/meetings/${id}/question-gaps`);
+}
+
+export async function getQuestionGaps(id: string): Promise<{ gaps: QuestionGap[] }> {
+  return request('GET', `/api/meetings/${id}/question-gaps`);
+}
+
+export interface CoachingReport {
+  meeting: {
+    id: string;
+    title?: string;
+    customer_name?: string;
+    rep_name?: string;
+    started_at: string;
+    ended_at?: string;
+    status: string;
+  };
+  bant: BantScore | null;
+  insiderLanguageFlags: InsiderLanguageFlag[];
+  questionGaps: QuestionGap[];
+  meetingScore: number | null;
+  scoreComponents: { key: string; label: string; value: number; weight: number }[];
+  coveragePct: number;
+  wpm: MeetingAnalytics['wpm'];
+  discAdaptationScore: number | null;
+}
+
+export async function getCoachingReport(id: string): Promise<CoachingReport> {
+  return request('GET', `/api/meetings/${id}/coaching-report`);
+}
+
+// ─── Live meeting sync (mobile → web), 2026-08-05 ──────────────────────────
+// v1, mobile-origin only. See server.js's "Live meeting sync" comment block
+// and useMeetingSync.ts for the full design. This REST call is the polling
+// fallback / initial-load check; the real-time path is the GET /api/sync
+// WebSocket (opened directly by useMeetingSync.ts, not through this typed
+// request() helper since it's a raw WS, not a fetch).
+
+export interface ActiveSyncMeeting {
+  id: string;
+  customer_id?: string;
+  started_at: string;
+  title?: string | null;
+  customer_name?: string | null;
+}
+
+export async function getActiveSyncMeeting(): Promise<{ active: ActiveSyncMeeting | null }> {
+  return request('GET', '/api/meetings/active-sync');
+}

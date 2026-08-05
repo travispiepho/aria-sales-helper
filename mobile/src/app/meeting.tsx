@@ -29,11 +29,61 @@
  *
  * No reconnect/backoff logic yet (present in the web app, not ported here —
  * out of scope for this pass; flagged as a known gap, see report).
+ *
+ * ── (2026-08-05) Leave-app-while-recording guard ───────────────────────────
+ * Unlike the web PWA (which holds a Screen Wake Lock — see
+ * app/web/src/pages/MeetingPage.tsx's `acquireWakeLock()` — so the browser
+ * tab itself can't be screen-locked away mid-recording), the mobile chunked
+ * recorder (`audioStream.ts`) has no equivalent: `expo-audio`'s
+ * `AudioRecorder` is explicitly configured `shouldPlayInBackground: false`
+ * (see `armRecordingSession()`), so iOS/Android WILL suspend/throttle mic
+ * capture the moment the app backgrounds (screen lock, app switch, incoming
+ * call, etc.) — the in-flight chunk is simply lost and no more chunks can
+ * be recorded until the app is foregrounded again, silently truncating the
+ * transcript with no user-visible signal. Two mitigations added here:
+ *   1. A persistent warning banner, visible for the entire time a meeting
+ *      is actively recording (`stage === 'connected'`), telling the user not
+ *      to leave the app.
+ *   2. An `AppState` listener that detects the app leaving the foreground
+ *      while recording is active and auto-stops client-side + finalizes the
+ *      meeting server-side via the SAME `handleEnd()` path the manual
+ *      "End Meeting" button uses (`PATCH /api/meetings/:id` with
+ *      `status: 'completed'`) — no second finalize code path.
+ *
+ * Platform reliability notes (see report for full detail):
+ *   - iOS: `AppState` reliably fires `background` when the app is put in
+ *     the background (home/app-switch/screen lock) and `inactive` for
+ *     transient interruptions (control center, incoming call banner,
+ *     system alert) that do NOT necessarily mean the user "left". This
+ *     listener only auto-stops on a transition INTO `background` (not
+ *     `inactive`), to avoid false-positive stops on brief system overlays.
+ *     Reliable in practice on iOS.
+ *   - Android: `AppState` also fires `background` on home/recents/app-
+ *     switch and screen lock, but Android's task-lifecycle model has more
+ *     edge cases (e.g. some OEM "recent apps" previews, split-screen/
+ *     picture-in-picture, or certain permission dialogs) where the event
+ *     ordering/timing relative to actual process suspension is less
+ *     consistent than iOS. Streaming itself is also iOS-only right now
+ *     (see audioStream.ts header) so this is a lower-stakes gap on Android
+ *     today, but the detection logic itself is NOT guaranteed airtight on
+ *     every Android OEM skin — flagged as a known limitation, not silently
+ *     assumed reliable.
+ *   - Neither platform can guarantee the JS AppState callback finishes
+ *     firing our async `handleEnd()` (which does a network PATCH) before
+ *     the OS fully suspends the process — there's no way to make this 100%
+ *     reliable purely from JS/Expo without a native background task
+ *     (e.g. `expo-background-task`) to extend execution time. In practice
+ *     `PATCH /api/meetings/:id` is small and fast and RN/iOS grant a short
+ *     background execution grace window after backgrounding, so this
+ *     should usually complete — but it is not provably guaranteed, and the
+ *     Objective 2 server-side fix (WS `close` handler finalizing the
+ *     meeting even if this client-side PATCH never lands) is the actual
+ *     safety net for this.
  */
 
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet } from 'react-native';
+import { ActivityIndicator, AppState, type AppStateStatus, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { requestRecordingPermissionsAsync, useAudioRecorder } from 'expo-audio';
@@ -98,6 +148,42 @@ export default function MeetingScreen() {
   }, []);
 
   useEffect(() => cleanup, [cleanup]);
+
+  // Always-current reference to handleEnd's latest closure (captures the
+  // current `meeting` state) so the mount-once AppState listener below
+  // never calls a stale version. `handleEnd` is a hoisted function
+  // declaration further down in this component — assigning it here on
+  // every render (not inside a useEffect) is intentional: it's a pure ref
+  // write with no rendering side effects, and it must be up to date the
+  // instant a background transition can fire, not one effect-cycle later.
+  const handleEndRef = useRef<() => Promise<void>>(async () => {});
+  handleEndRef.current = handleEnd;
+
+  // Track the current stage in a ref for the same reason — the AppState
+  // listener is subscribed once on mount and must always check the LATEST
+  // stage, not the one from whatever render happened to be active when the
+  // listener was attached.
+  const stageRef = useRef<Stage>(stage);
+  stageRef.current = stage;
+
+  // ── Leave-app-while-recording guard (2026-08-05) ──────────────────────
+  // See file header "Leave-app-while-recording guard" section for the full
+  // iOS/Android reliability writeup. Only auto-stops on a transition INTO
+  // 'background' (home button, app switcher, screen lock, task-kill) — NOT
+  // on 'inactive', which on iOS also covers brief, non-departing system
+  // overlays (control center, incoming call banner) that should not kill an
+  // in-progress recording.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'background' && stageRef.current === 'connected') {
+        console.log('[meeting] App backgrounded while recording was active — auto-stopping and finalizing meeting.');
+        handleEndRef.current().catch((err) => {
+          console.log('[meeting] auto-stop on backgrounding failed:', err);
+        });
+      }
+    });
+    return () => subscription.remove();
+  }, []);
 
   async function handleStart() {
     endedIntentionallyRef.current = false;
@@ -259,12 +345,26 @@ export default function MeetingScreen() {
     // rendering only). See report for what remains.
   }
 
+  // Single finalize path for BOTH the manual "End Meeting" button and the
+  // (2026-08-05) auto-stop-on-backgrounding guard above — intentionally not
+  // duplicated: whichever caller reaches this first wins, and the
+  // `endedIntentionallyRef` guard makes this idempotent against being
+  // invoked twice (e.g. user taps "End Meeting" right as the app is also
+  // being backgrounded).
   async function handleEnd() {
+    if (endedIntentionallyRef.current) return; // already ending/ended — no-op
     endedIntentionallyRef.current = true;
     setStage('ended');
     cleanup();
     if (meeting) {
       try {
+        // Same backend contract as the manual "End Meeting" button always
+        // used (PATCH /api/meetings/:id, status: 'completed') — no second
+        // finalize code path for the auto-stop-on-backgrounding case. This
+        // is a best-effort client-side finalize only: if the OS suspends
+        // the process before this network call completes (see file header
+        // reliability notes), the Objective 2 server-side WS-close fix is
+        // the actual guarantee that the meeting still leaves 'active'.
         await updateMeeting(meeting.id, { status: 'completed', ended_at: new Date().toISOString() });
       } catch {
         // non-fatal for this pass
@@ -296,6 +396,20 @@ export default function MeetingScreen() {
           <ThemedText type="title" style={styles.title}>
             In-Person Meeting
           </ThemedText>
+
+          {/* 2026-08-05: persistent "don't leave the app" banner, visible
+              for the entire duration a meeting is actively recording. This
+              is the up-front half of the leave-app guard (see file header
+              + the AppState listener above for the auto-stop half) — warn
+              BEFORE the user backgrounds the app, not just react after. */}
+          {stage === 'connected' && (
+            <ThemedView style={styles.leaveWarningBanner}>
+              <ThemedText type="smallBold" style={styles.leaveWarningText}>
+                ⚠️ Stay in this app while recording. Locking the screen or
+                switching apps will stop the meeting.
+              </ThemedText>
+            </ThemedView>
+          )}
 
           <ThemedView style={styles.statusCard}>
             <StatusRow stage={stage} />
@@ -440,6 +554,14 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: Spacing.four, gap: Spacing.four },
   backButton: { alignSelf: 'flex-start' },
   title: { fontSize: 28, lineHeight: 34 },
+  leaveWarningBanner: {
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+    borderRadius: Spacing.three,
+    padding: Spacing.three,
+  },
+  leaveWarningText: { color: '#92400E' },
   statusCard: {
     borderWidth: 1,
     borderColor: '#E5E7EB',

@@ -6,6 +6,14 @@ import LoginPage from './pages/LoginPage';
 import HomePage from './pages/HomePage';
 import MeetingPage from './pages/MeetingPage';
 import ProfilePage from './pages/ProfilePage';
+// 2026-08-05 (live meeting sync, mobile → web): mounted once at the
+// authenticated-app root (inside RequireAuth-gated routes only, via
+// AuthedSyncGate below) so the "meeting in progress" dialog can appear
+// regardless of which page the user is currently on — not just while a
+// MeetingPage happens to be open — satisfying requirement 1's "pull up a
+// meeting dialog on all instances" (i.e. it must surface proactively, not
+// only if the user happens to already be looking at that specific meeting).
+import MeetingSyncDialog from './components/MeetingSyncDialog';
 
 function IOSWarning() {
   return (
@@ -42,6 +50,19 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// 2026-08-05 (live meeting sync, mobile → web): mounted ONCE, alongside
+// (not inside) the route tree below, so it survives navigation between
+// HomePage/MeetingPage/ProfilePage without re-mounting its WebSocket
+// connections (see useMeetingSync.ts) on every route change. Only rendered
+// once `user` is resolved — no point opening an authenticated /api/sync
+// socket before we know a session exists, and it must not render (or open
+// any socket) on /login.
+function AuthedSyncGate() {
+  const { user, loading } = useAuth();
+  if (loading || !user) return null;
+  return <MeetingSyncDialog />;
+}
+
 export default function App() {
   const [showIOSWarning, setShowIOSWarning] = useState(false);
 
@@ -58,6 +79,7 @@ export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
+        <AuthedSyncGate />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route

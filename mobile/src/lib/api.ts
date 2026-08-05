@@ -186,8 +186,19 @@ export interface Meeting {
   speaker_labels?: Record<string, string>;
 }
 
+// 2026-08-05 (live meeting sync, mobile → web): tags every mobile-created
+// meeting with `origin_client: 'mobile'` so the backend's sync feature
+// (see server.js's "Live meeting sync" comment block) knows to notify any
+// OTHER logged-in session for this same account that a meeting just
+// started. This is the ONLY mobile-side change this feature requires —
+// mobile itself does not open any new sync socket and is otherwise
+// unaffected (it remains the sole session with the "End Meeting" control,
+// enforced server-side via owner_session_id, not by anything client-side
+// here). Web's createMeeting() (app/web/src/lib/api.ts) intentionally does
+// NOT send this field, so it defaults server-side to 'web' — v1 scope is
+// mobile-origin sync only, per this task's explicit instructions.
 export async function createMeeting(customerId?: string): Promise<Meeting> {
-  return request('POST', '/api/meetings', { customer_id: customerId });
+  return request('POST', '/api/meetings', { customer_id: customerId, origin_client: 'mobile' });
 }
 
 export async function listMeetings(): Promise<Meeting[]> {

@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { getMeeting, updateMeeting, getMeetingSegments, getLatestCoaching, Meeting, apiFetch } from '../lib/api';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 import MeetingScoreCard from '../components/MeetingScoreCard';
+import CoachingReportCard from '../components/CoachingReportCard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,10 @@ export default function MeetingPage() {
   const [showConsentPrompt, setShowConsentPrompt] = useState(false);
   const [consentConfirmed, setConsentConfirmed] = useState(false);
 
+  // End Meeting confirmation state — see handleEndMeetingButtonClick() below
+  // for why this only gates the flow while actively recording.
+  const [showEndMeetingConfirm, setShowEndMeetingConfirm] = useState(false);
+
   // Transcript state
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [interimText, setInterimText] = useState('');
@@ -79,6 +84,13 @@ export default function MeetingPage() {
   const [summary, setSummary] = useState<string | null>(null);
   const [exportingDoc, setExportingDoc] = useState(false);
   const [voiceToast, setVoiceToast] = useState<string | null>(null);
+  // ARIA Priority 1 roadmap, item 5: Live rebuttal teleprompter. Handles the
+  // "suggested_rebuttal" WS message pushed by server.js's STUB objection
+  // detector + REAL Claude-generated rebuttal (see objectionDetection.js /
+  // coachingAnalysis.js's generateRebuttal() for the real-vs-stubbed
+  // breakdown). This is a first-pass UI: a dismissible banner, not yet a
+  // polished "teleprompter" UX — intentionally minimal per task scope.
+  const [suggestedRebuttal, setSuggestedRebuttal] = useState<{ objectionCategory: string; rebuttal: string } | null>(null);
   const [title, setTitle] = useState<string>('');
   const [titleSaving, setTitleSaving] = useState(false);
 
@@ -258,6 +270,10 @@ export default function MeetingPage() {
             delete next[from];
             return next;
           });
+        } else if (msg.type === 'suggested_rebuttal') {
+          // Live rebuttal teleprompter (item 5) — first-pass scaffolding.
+          const { objectionCategory, rebuttal } = msg as { type: string; objectionCategory: string; rebuttal: string };
+          setSuggestedRebuttal({ objectionCategory, rebuttal });
         } else if (msg.type === 'coaching' && msg.data) {
           // Phase 3: real-time coaching update
           const incoming = msg.data as CoachingData;
@@ -430,8 +446,29 @@ export default function MeetingPage() {
     await startRecording();
   }
 
-  // ─── End meeting ──────────────────────────────────────────────────────────
+  // ─── End meeting ───────────────────────────────────────────────────────────────
 
+  // 2026-08-05: single consolidated handler for the ONE "End Meeting" action.
+  // Previously the big Record circle also acted as a separate "stop
+  // recording" control while active, calling stopRecording() on its own with
+  // no meeting finalization — a rep could stop the mic and leave the meeting
+  // stuck 'active' forever. That control is now a status indicator only (see
+  // render section below). This is the single remaining flow, in order:
+  //   1. stopRecording() — tears down the whole client-side audio pipeline:
+  //      closes the WebSocket, disconnects/stops the AudioWorklet node,
+  //      closes the AudioContext, stops all mic MediaStream tracks, clears
+  //      the elapsed-time interval, releases the wake lock, resets
+  //      isRecording/connectionStatus state.
+  //   2. PATCH /api/meetings/:id via updateMeeting() — marks the meeting
+  //      status: 'completed' with ended_at set to now.
+  //   3. setMeeting(updated) — swaps the local meeting object to the
+  //      server's response, which flips isActive to false and switches the
+  //      page from the live "Active meeting" view to the "Post-meeting" view
+  //      (transcript, summary/export actions, etc.) via the existing
+  //      isActive-gated render branches — no separate navigation call needed.
+  // Note: this does NOT trigger summary generation — that remains a
+  // separate, explicit "✨ Generate Summary" action in the post-meeting view
+  // (pre-existing behavior, unchanged by this pass).
   async function handleEndMeeting() {
     stopRecording();
     if (!meetingId) return;
@@ -443,6 +480,32 @@ export default function MeetingPage() {
       setMeeting(updated);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to end meeting');
+    }
+  }
+
+  // 2026-08-05: entry point for the bottom "End Meeting" button. Now that
+  // this button is the ONLY way to stop a recording (see handleEndMeeting()
+  // above and the removed separate stop-recording control), ending a meeting
+  // while actively recording is a more consequential, harder-to-undo action
+  // than it used to be — a stray tap mid-sentence kills the mic and
+  // finalizes the meeting in one shot. So: gate on isRecording and show a
+  // confirm dialog first.
+  //
+  // If isActive but NOT isRecording (rep started a meeting, tapped Record,
+  // then already tapped End Meeting once and is looking at... actually this
+  // state doesn't really occur in the UI today — the only way to reach
+  // "active" without "recording" is before the rep has hit Record at all,
+  // i.e. no audio has been captured yet). In that case there's nothing to
+  // lose — no live recording to interrupt, and ending just marks an
+  // essentially-empty meeting as completed. Skipping the confirm there
+  // matches "probably not" from the task brief: the only consequential,
+  // hard-to-undo path is stopping an in-progress recording, so that's the
+  // only path that gets the extra click.
+  function handleEndMeetingButtonClick() {
+    if (isRecording) {
+      setShowEndMeetingConfirm(true);
+    } else {
+      handleEndMeeting();
     }
   }
 
@@ -694,34 +757,70 @@ export default function MeetingPage() {
         {/* ── Active meeting: Record controls ── */}
         {isActive && (
           <>
-            {/* Big Record button */}
+            {/* Big Record button.
+                2026-08-05: while recording this used to be a live "Stop"
+                button that called stopRecording() directly — stopping only
+                the audio capture without finalizing the meeting record.
+                That was the separate "End Recording" action Gabe flagged as
+                confusing (memory/2026-08-04.md 23:47 CDT note): a rep could
+                stop the mic here and the meeting would just sit "active"
+                forever with no obvious next step. Consolidated: the ONLY way
+                to stop recording now is the bottom "End Meeting" button,
+                which stops the mic AND finalizes the meeting in one action
+                (see handleEndMeeting()). While recording, this circle is now
+                a non-interactive live-status indicator only (no onClick) —
+                same pulsing visual, but it can no longer diverge from the
+                meeting's actual lifecycle. */}
             <div className="flex flex-col items-center py-6">
-              <button
-                onClick={isRecording ? stopRecording : handleStartButton}
-                className={`w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg transition-all
-                  ${isRecording
-                    ? 'bg-red-600 hover:bg-red-700 active:scale-95 ring-4 ring-red-300'
-                    : 'bg-green-600 hover:bg-green-700 active:scale-95'
-                  }`}
-              >
-                {isRecording ? (
+              {isRecording ? (
+                <div
+                  aria-live="polite"
+                  className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg bg-red-600 ring-4 ring-red-300 flex items-center justify-center animate-pulse"
+                >
                   <span className="flex flex-col items-center gap-1">
-                    <span className="text-3xl">⏹</span>
-                    <span className="text-sm">Stop</span>
+                    <span className="text-3xl">🎙️</span>
+                    <span className="text-sm">Recording</span>
                   </span>
-                ) : (
+                </div>
+              ) : (
+                <button
+                  onClick={handleStartButton}
+                  className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg transition-all bg-green-600 hover:bg-green-700 active:scale-95"
+                >
                   <span className="flex flex-col items-center gap-1">
                     <span className="text-3xl">🎙️</span>
                     <span className="text-sm">Record</span>
                   </span>
-                )}
-              </button>
+                </button>
+              )}
               {isRecording && (
                 <p className="mt-3 text-2xl font-mono font-bold text-red-700">
                   {formatElapsed(elapsedSec)}
                 </p>
               )}
             </div>
+
+            {/* ARIA Priority 1 roadmap, item 5: Live rebuttal teleprompter
+                (first-pass scaffolding — objection detection is a STUB
+                keyword matcher, rebuttal text is REAL Claude output. See
+                objectionDetection.js / coachingAnalysis.js for details.) */}
+            {suggestedRebuttal && (
+              <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 flex items-start gap-3">
+                <span className="text-2xl">💬</span>
+                <div className="flex-1">
+                  <p className="text-xs font-semibold text-indigo-500 uppercase tracking-wide mb-1">
+                    Suggested rebuttal · {suggestedRebuttal.objectionCategory}
+                  </p>
+                  <p className="text-sm text-indigo-900 font-medium">{suggestedRebuttal.rebuttal}</p>
+                </div>
+                <button
+                  onClick={() => setSuggestedRebuttal(null)}
+                  className="text-indigo-400 hover:text-indigo-600 text-sm"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
 
             {/* Phase 3: Coaching Panel */}
             <CoachingPanel
@@ -854,6 +953,10 @@ export default function MeetingPage() {
             {/* Post-meeting analytics: WPM, checklist timing, Meeting Score */}
             {!isActive && meetingId && <MeetingScoreCard meetingId={meetingId} />}
 
+            {/* ARIA Priority 1 roadmap: BANT/closing certainty, insider-language
+                flags, question-listening gaps, aggregate coaching report */}
+            {!isActive && meetingId && <CoachingReportCard meetingId={meetingId} />}
+
             {/* Summary */}
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
               <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">
@@ -963,7 +1066,7 @@ export default function MeetingPage() {
       >
         {isActive ? (
           <button
-            onClick={handleEndMeeting}
+            onClick={handleEndMeetingButtonClick}
             className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-4 rounded-2xl text-lg transition-colors"
           >
             ⏹ End Meeting
@@ -985,6 +1088,58 @@ export default function MeetingPage() {
           onCancel={() => setShowConsentPrompt(false)}
         />
       )}
+
+      {/* End Meeting confirmation modal — only shown when ending while
+          actively recording (see handleEndMeetingButtonClick()). Confirm
+          reuses the existing merged handleEndMeeting() handler as-is; Cancel
+          just dismisses with no side effects and recording continues. */}
+      {showEndMeetingConfirm && (
+        <EndMeetingConfirmModal
+          onConfirm={() => {
+            setShowEndMeetingConfirm(false);
+            handleEndMeeting();
+          }}
+          onCancel={() => setShowEndMeetingConfirm(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── EndMeetingConfirmModal ─────────────────────────────────────────────────
+
+function EndMeetingConfirmModal({
+  onConfirm,
+  onCancel,
+}: {
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6">
+        <div className="text-center mb-4">
+          <div className="text-4xl mb-2">⏹</div>
+          <h2 className="text-lg font-bold text-gray-900">End this meeting?</h2>
+        </div>
+        <p className="text-sm text-gray-600 text-center mb-5">
+          This will stop recording and finalize the meeting.
+        </p>
+        <div className="flex gap-3">
+          <button
+            onClick={onCancel}
+            className="flex-1 border border-gray-200 text-gray-600 font-semibold py-3 rounded-xl text-sm hover:bg-gray-50 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-3 rounded-xl text-sm transition-colors"
+          >
+            ⏹ End Meeting
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -9,21 +9,27 @@
  * for the reference data shape: title/customer_name/started_at/summary +
  * speaker/text segments).
  *
- * This is a read-only viewer (summary + full transcript) — no
- * download/export/delete actions here, matching the task's "minimal
- * history-viewer" scope; those remain web-only for now.
+ * This is a read-only transcript viewer, PLUS (2026-08-04 save-parity fix)
+ * a "Generate Summary" action mirroring web's MeetingPage.tsx
+ * handleGenerateSummary() — web does NOT auto-generate a summary when a
+ * meeting ends either; it's a manual, rep-initiated button tap that calls
+ * the existing POST /api/meetings/:id/summary endpoint. Mobile previously
+ * had no UI path to reach that endpoint at all (verified via a live
+ * mobile-sequence test against production: transcript_segments persisted
+ * correctly, summary stayed null forever with no way to trigger it) — this
+ * closes that gap with the minimal, exact match to web's existing behavior.
+ * Download/export/delete actions remain web-only for now (out of scope).
  */
 
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet } from 'react-native';
-import { Pressable } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
-import { getMeeting, getMeetingSegments, Meeting, TranscriptSegment } from '@/lib/api';
+import { generateSummary, getMeeting, getMeetingSegments, Meeting, TranscriptSegment } from '@/lib/api';
 
 export default function MeetingDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -32,6 +38,7 @@ export default function MeetingDetailScreen() {
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -49,6 +56,19 @@ export default function MeetingDetailScreen() {
       }
     })();
   }, [id]);
+
+  async function handleGenerateSummary() {
+    if (!id) return;
+    setSummaryLoading(true);
+    try {
+      const { summary } = await generateSummary(id);
+      setMeeting((prev) => (prev ? { ...prev, summary } : prev));
+    } catch (err) {
+      Alert.alert('Summary failed', err instanceof Error ? err.message : 'Failed to generate summary.');
+    } finally {
+      setSummaryLoading(false);
+    }
+  }
 
   return (
     <ThemedView style={styles.fill}>
@@ -88,14 +108,35 @@ export default function MeetingDetailScreen() {
                 </ThemedText>
               )}
 
-              {meeting.summary && (
-                <ThemedView style={styles.card} type="backgroundElement">
-                  <ThemedText type="smallBold" style={styles.cardLabel}>
-                    SUMMARY
-                  </ThemedText>
+              <ThemedView style={styles.card} type="backgroundElement">
+                <ThemedText type="smallBold" style={styles.cardLabel}>
+                  SUMMARY
+                </ThemedText>
+                {meeting.summary ? (
                   <ThemedText type="small">{meeting.summary}</ThemedText>
-                </ThemedView>
-              )}
+                ) : (
+                  <>
+                    <ThemedText type="small" themeColor="textSecondary">
+                      No summary generated yet.
+                    </ThemedText>
+                    <Pressable
+                      onPress={handleGenerateSummary}
+                      disabled={summaryLoading || segments.length === 0}
+                      style={[styles.generateButton, (summaryLoading || segments.length === 0) && styles.generateButtonDisabled]}>
+                      {summaryLoading ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <ThemedText style={styles.generateButtonText}>✨ Generate Summary</ThemedText>
+                      )}
+                    </Pressable>
+                    {segments.length === 0 && (
+                      <ThemedText type="small" themeColor="textSecondary" style={styles.noTranscriptNote}>
+                        No transcript to summarize.
+                      </ThemedText>
+                    )}
+                  </>
+                )}
+              </ThemedView>
 
               <ThemedView style={styles.card} type="backgroundElement">
                 <ThemedText type="smallBold" style={styles.cardLabel}>
@@ -135,4 +176,15 @@ const styles = StyleSheet.create({
   cardLabel: { letterSpacing: 0.5, marginBottom: Spacing.one },
   segmentLine: { marginBottom: Spacing.two },
   errorText: { color: '#DC2626', textAlign: 'center' },
+  generateButton: {
+    backgroundColor: '#2563EB',
+    borderRadius: Spacing.two,
+    paddingVertical: Spacing.three,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: Spacing.two,
+  },
+  generateButtonDisabled: { opacity: 0.5 },
+  generateButtonText: { color: '#fff', fontWeight: '700' },
+  noTranscriptNote: { textAlign: 'center', marginTop: Spacing.two },
 });

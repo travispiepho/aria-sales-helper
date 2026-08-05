@@ -219,3 +219,18 @@ export interface TranscriptSegment {
 export async function getMeetingSegments(id: string): Promise<{ segments: TranscriptSegment[] }> {
   return request('GET', `/api/meetings/${id}/segments`);
 }
+
+// ─── Summary generation (2026-08-04, mobile/web save-parity fix) ──────────
+// Mirrors app/web/src/pages/MeetingPage.tsx's handleGenerateSummary(): a
+// manual, user-initiated call to the EXISTING POST /api/meetings/:id/summary
+// endpoint. Web does NOT auto-generate a summary when a meeting ends either —
+// the rep taps a "Generate Summary" button in the post-meeting view. Mobile
+// previously had no UI path to reach this endpoint at all, so a mobile
+// meeting's summary stayed null forever even though its transcript persisted
+// correctly (same backend WS code path as web). This restores parity with
+// web's existing (manual) behavior — it does NOT make summary generation
+// automatic on every mobile meeting-end, which would add an unconditional
+// Anthropic API cost per call and diverge from web's own UX.
+export async function generateSummary(id: string): Promise<{ summary: string }> {
+  return request('POST', `/api/meetings/${id}/summary`, {});
+}

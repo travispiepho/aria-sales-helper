@@ -78,6 +78,12 @@ export default function MeetingScreen() {
   const wsRef = useRef<WebSocket | null>(null);
   const streamerRef = useRef<ChunkedPcmStreamer | null>(null);
   const segmentCounter = useRef(0);
+  // Set synchronously by handleEnd() BEFORE ws.close() is called, so that by
+  // the time the resulting onclose event fires, we can distinguish an
+  // intentional user-initiated close (WS close code 1000, expected/normal)
+  // from a genuine unexpected disconnect (network drop, auth rejection
+  // codes like 4001/4003/4004, backend crash, etc.).
+  const endedIntentionallyRef = useRef(false);
 
   // expo-audio recorder instance for streaming (iOS only — see
   // audioStream.ts header for why). Options are stable so the hook doesn't
@@ -94,6 +100,7 @@ export default function MeetingScreen() {
   useEffect(() => cleanup, [cleanup]);
 
   async function handleStart() {
+    endedIntentionallyRef.current = false;
     setErrorMsg(null);
     setStreamWarning(null);
     setSegments([]);
@@ -197,8 +204,18 @@ export default function MeetingScreen() {
       console.log('[meeting ws] onclose code:', evt?.code, 'reason:', evt?.reason);
       streamerRef.current?.stop().catch(() => {});
       streamerRef.current = null;
-      // Only treat as an error if we hadn't already ended intentionally.
-      setStage((prev) => (prev === 'ended' ? prev : 'ws-error'));
+      if (endedIntentionallyRef.current) {
+        // handleEnd() already called ws.close() itself — WS close code 1000
+        // here is the expected clean closure for that, not an error. Reflect
+        // the already-set 'ended' stage cleanly: no error message, no
+        // error-styled UI.
+        setStage('ended');
+        return;
+      }
+      // The user did NOT click "End Meeting" — this is a genuine unexpected
+      // disconnect (network drop, auth rejection codes like 4001/4003/4004,
+      // backend crash, etc.), so surface the error-styled UI.
+      setStage('ws-error');
       setErrorMsg(
         `Connection closed (code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
       );
@@ -243,6 +260,7 @@ export default function MeetingScreen() {
   }
 
   async function handleEnd() {
+    endedIntentionallyRef.current = true;
     setStage('ended');
     cleanup();
     if (meeting) {
@@ -258,7 +276,20 @@ export default function MeetingScreen() {
     <ThemedView style={styles.fill}>
       <SafeAreaView style={styles.fill}>
         <ThemedView style={styles.container}>
-          <Pressable onPress={() => router.back()} style={styles.backButton}>
+          {/* 2026-08-04: was router.back() — standard stack-back, which
+              could land on whatever screen happened to precede this one in
+              nav history (e.g. Profile) depending on how the user reached
+              this screen. Gabe flagged this as non-deterministic, especially
+              once a meeting has ended: this button (same element at every
+              stage on this screen) must always return to the Home tab —
+              the meeting-history list — never "back one step" in history.
+              router.replace (not push) so an ended meeting screen doesn't
+              linger in the stack for the device back-gesture to return to.
+              '/(tabs)' is the Home tab's real resolved route: per Expo
+              Router's generated route types (.expo/types/router.d.ts), the
+              tab group's root resolves to pathname `${'/(tabs)'}` | `/` —
+              i.e. (tabs)/index.tsx (Home) IS that route. */}
+          <Pressable onPress={() => router.replace('/(tabs)')} style={styles.backButton}>
             <ThemedText type="link">← Back</ThemedText>
           </Pressable>
 
@@ -285,7 +316,15 @@ export default function MeetingScreen() {
             )}
           </ThemedView>
 
-          {stage === 'idle' || stage === 'mic-denied' || stage === 'ws-error' || stage === 'ended' ? (
+          {/* 2026-08-04: 'ended' removed from this condition per Gabe's
+              request — a completed meeting screen must not offer to start a
+              brand-new meeting from here; the Home tab's Record flow is the
+              one true way to start a fresh meeting now. 'idle' / 'mic-denied'
+              / 'ws-error' are kept: those are still legitimate restart-from-
+              this-same-screen cases (never started yet, or a real recoverable
+              error), unlike 'ended' which means the recording already
+              completed successfully. */}
+          {stage === 'idle' || stage === 'mic-denied' || stage === 'ws-error' ? (
             <Pressable onPress={handleStart} style={[styles.button, styles.startButton]}>
               <ThemedText style={styles.buttonText}>🎙️ Start Meeting</ThemedText>
             </Pressable>
@@ -293,6 +332,12 @@ export default function MeetingScreen() {
             <Pressable onPress={handleEnd} style={[styles.button, styles.endButton]}>
               <ThemedText style={styles.buttonText}>⏹ End Meeting</ThemedText>
             </Pressable>
+          ) : stage === 'ended' ? (
+            // Nothing to offer here — the status card above already shows the
+            // "Meeting ended" confirmation (see StatusRow's `ended` label),
+            // and the ← Back button now deterministically routes Home (fix
+            // above), which is the intended way to move on from this screen.
+            null
           ) : (
             <ThemedView style={styles.loadingRow}>
               <ActivityIndicator />
@@ -338,11 +383,9 @@ export default function MeetingScreen() {
             </ThemedView>
           )}
 
-          {stage !== 'connected' && segments.length === 0 && (
+          {stage !== 'connected' && segments.length === 0 && !STREAMING_SUPPORTED_PLATFORM && (
             <ThemedText type="small" themeColor="textSecondary" style={styles.stubNote}>
-              {STREAMING_SUPPORTED_PLATFORM
-                ? 'Live audio streaming (iOS) — not yet verified on a real device.'
-                : 'Live audio streaming is iOS-only in this build.'}
+              Live audio streaming is iOS-only in this build.
             </ThemedText>
           )}
         </ThemedView>

@@ -96,12 +96,35 @@ export interface Meeting {
   rep_id: string;
   started_at: string;
   ended_at?: string;
-  status: 'active' | 'completed' | 'cancelled';
+  // 'interrupted' added 2026-08-05 (server-side auto-finalize on abandoned
+  // WS connections — see server.js's finalizeMeetingIfAbandoned()). Was
+  // missing from this union even though the DB CHECK constraint and server
+  // responses have allowed it since that migration landed — harmless at
+  // runtime (isActive/statusBadge() both have safe fallbacks for an
+  // unrecognized status) but wrong for type-checking, fixed here in passing.
+  status: 'active' | 'completed' | 'cancelled' | 'interrupted';
   summary?: string;
   title?: string;
   rep_name?: string;
   customer_name?: string;
   speaker_labels?: Record<string, string>;
+  // 2026-08-05 (live meeting sync full-page rebuild): which APP originally
+  // started this meeting. Used purely for the small "synced from phone"
+  // indicator/copy in MeetingPage's observer view — NOT the field that
+  // gates functional differences (mic/End Meeting), see is_owner_session.
+  origin_client?: 'mobile' | 'web';
+  // 2026-08-05 (live meeting sync full-page rebuild): true if THIS session
+  // (the one making this request) is the session that started/owns this
+  // meeting, false if it's a different logged-in session observing a
+  // mobile-started meeting, true/undefined for legacy meetings with no
+  // recorded owner (permissive default, matches server.js's own
+  // permissive-when-NULL enforcement everywhere else this check exists).
+  // Computed server-side (server.js's shapeMeetingForClient()) by comparing
+  // the request's session cookie against the meeting's owner_session_id —
+  // the RAW owner_session_id value itself is never sent to any client.
+  // Drives MeetingPage's owner-vs-observer render branches: only an owner
+  // session sees the Record button / mic capture / End Meeting control.
+  is_owner_session?: boolean;
 }
 
 export async function createMeeting(customerId?: string): Promise<Meeting> {
@@ -278,12 +301,15 @@ export async function getCoachingReport(id: string): Promise<CoachingReport> {
   return request('GET', `/api/meetings/${id}/coaching-report`);
 }
 
-// ─── Live meeting sync (mobile → web), 2026-08-05 ──────────────────────────
+// ─── Live meeting sync (mobile → web), 2026-08-05, full-page rebuild ───────
 // v1, mobile-origin only. See server.js's "Live meeting sync" comment block
-// and useMeetingSync.ts for the full design. This REST call is the polling
-// fallback / initial-load check; the real-time path is the GET /api/sync
-// WebSocket (opened directly by useMeetingSync.ts, not through this typed
-// request() helper since it's a raw WS, not a fetch).
+// and useMeetingSyncWatcher.ts for the full design (that hook only
+// navigates the tab to /meetings/:id — MeetingPage.tsx itself then reads
+// live data via GET /meetings/:id/observe for a non-owner session). This
+// REST call is the polling fallback / initial-load check; the real-time
+// path is the GET /api/sync WebSocket (opened directly by
+// useMeetingSyncWatcher.ts, not through this typed request() helper since
+// it's a raw WS, not a fetch).
 
 export interface ActiveSyncMeeting {
   id: string;

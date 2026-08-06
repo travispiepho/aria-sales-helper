@@ -6,14 +6,18 @@ import LoginPage from './pages/LoginPage';
 import HomePage from './pages/HomePage';
 import MeetingPage from './pages/MeetingPage';
 import ProfilePage from './pages/ProfilePage';
-// 2026-08-05 (live meeting sync, mobile → web): mounted once at the
-// authenticated-app root (inside RequireAuth-gated routes only, via
-// AuthedSyncGate below) so the "meeting in progress" dialog can appear
-// regardless of which page the user is currently on — not just while a
-// MeetingPage happens to be open — satisfying requirement 1's "pull up a
-// meeting dialog on all instances" (i.e. it must surface proactively, not
-// only if the user happens to already be looking at that specific meeting).
-import MeetingSyncDialog from './components/MeetingSyncDialog';
+// 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
+// same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
+// live-testing it: "Instead of a popup, I would like an almost identical
+// page to when you are in a meeting started on aria-web"). Mounted once at
+// the authenticated-app root (via AuthedSyncGate below) for the same reason
+// the popup was — it must detect a mobile-started meeting regardless of
+// which page the user is currently on — but now it does so by NAVIGATING
+// this tab to the meeting's normal /meetings/:id route/component (the same
+// one a web-started meeting renders) instead of opening a separate,
+// limited-UI dialog. See useMeetingSyncWatcher.ts and MeetingPage.tsx's
+// observer-mode render branches for the full rework.
+import { useMeetingSyncWatcher } from './lib/useMeetingSyncWatcher';
 
 function IOSWarning() {
   return (
@@ -50,17 +54,31 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-// 2026-08-05 (live meeting sync, mobile → web): mounted ONCE, alongside
+// Actually opens the /api/sync socket (via useMeetingSyncWatcher). Split
+// into its own component so the hook is only ever CALLED once `user` is
+// known-authenticated — React hooks can't be called conditionally inside
+// a single component, so "don't open a socket before login" has to be
+// enforced by conditionally MOUNTING this component instead (see
+// AuthedSyncGate below), not by an early-return after the hook call.
+function MeetingSyncWatcherMount() {
+  useMeetingSyncWatcher();
+  return null;
+}
+
+// 2026-08-05 (live meeting sync, full-page rebuild): mounted ONCE, alongside
 // (not inside) the route tree below, so it survives navigation between
 // HomePage/MeetingPage/ProfilePage without re-mounting its WebSocket
-// connections (see useMeetingSync.ts) on every route change. Only rendered
-// once `user` is resolved — no point opening an authenticated /api/sync
-// socket before we know a session exists, and it must not render (or open
-// any socket) on /login.
+// connection on every route change. Only active once `user` is resolved —
+// no point opening an authenticated /api/sync socket before we know a
+// session exists, and it must not run (or open any socket) on /login.
+// Renders nothing itself — it's a pure side-effect hook that calls
+// navigate() when a mobile-started meeting is detected; the actual UI for
+// that meeting is MeetingPage itself (rendered by the route below once
+// navigation lands there), not a separate component tree.
 function AuthedSyncGate() {
   const { user, loading } = useAuth();
   if (loading || !user) return null;
-  return <MeetingSyncDialog />;
+  return <MeetingSyncWatcherMount />;
 }
 
 export default function App() {

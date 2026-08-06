@@ -4,6 +4,7 @@ import { getMeeting, updateMeeting, getMeetingSegments, getLatestCoaching, Meeti
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 import MeetingScoreCard from '../components/MeetingScoreCard';
 import CoachingReportCard from '../components/CoachingReportCard';
+import { getWsBase } from '../lib/wsBase';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,17 +32,10 @@ function formatDuration(startIso: string, endIso?: string): string {
   return formatElapsed(Math.floor((end - start) / 1000));
 }
 
-// Derive a WS URL from VITE_API_URL (production) or current location (dev)
-function getWsBase(): string {
-  const apiUrl = import.meta.env.VITE_API_URL;
-  if (apiUrl) {
-    // Convert https://host to wss://host, http://host to ws://host
-    return apiUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
-  }
-  // Dev fallback: Vite proxies HTTP but WS hits backend directly on :3000
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://localhost:3000`;
-}
+// getWsBase() moved to lib/wsBase.ts (2026-08-05, live meeting sync
+// full-page rebuild) so useMeetingSyncWatcher.ts can share the exact same
+// derivation logic without a second copy — see that file's own header for
+// why. Behavior is byte-for-byte identical to what lived here before.
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -110,6 +104,26 @@ export default function MeetingPage() {
   const elapsedIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recordingStartRef = useRef<number>(0);
 
+  // ── Live meeting sync full-page rebuild, 2026-08-05 ──────────────────────
+  // Observer-mode socket (GET /meetings/:id/observe) — opened INSTEAD of the
+  // owner's /meetings/:id/audio connection above when this session is not
+  // the one that started the meeting (see isOwnerSession below). Kept as a
+  // separate ref/connect function (not reusing wsRef/connectWebSocket)
+  // because the two sockets are mutually exclusive per session for a given
+  // meeting and have different lifecycles (audio: driven by isRecording;
+  // observe: driven by meeting.status), but they feed the EXACT SAME
+  // `applyLiveMessage()` handler below so live transcript/coaching/speaker
+  // rendering is one code path regardless of which socket produced the
+  // message — this is the actual code-reuse fix, not a second parallel UI.
+  const observeWsRef = useRef<WebSocket | null>(null);
+  const observeReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror of meeting.status === 'active' / meeting.is_owner_session as
+  // refs so socket close/reconnect closures (which capture at connect time,
+  // not render time) always see the CURRENT value — same pattern already
+  // used for isRecordingRef above.
+  const isActiveRef = useRef(false);
+  const isOwnerSessionRef = useRef(true);
+
   // ─── Load meeting ──────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -168,7 +182,14 @@ export default function MeetingPage() {
 
   useEffect(() => {
     return () => {
-      stopRecording();
+      stopRecording(); // no-op if this session never started a mic (observer view)
+      // 2026-08-05: also tear down the observer socket/reconnect timer on
+      // unmount — the owner-vs-observer effect above only closes it on a
+      // status/ownership CHANGE, not on navigating away from the page
+      // entirely (e.g. the rep taps ← Back while still observing).
+      if (observeReconnectTimerRef.current) clearTimeout(observeReconnectTimerRef.current);
+      observeWsRef.current?.close();
+      observeWsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -196,7 +217,92 @@ export default function MeetingPage() {
     wakeLockRef.current = null;
   }
 
-  // ─── WebSocket connection ─────────────────────────────────────────────────
+  // ─── Shared live-message handler (owner audio socket AND observer socket) ──
+  // 2026-08-05 (live meeting sync full-page rebuild): extracted from the
+  // owner /meetings/:id/audio connection's onmessage handler so the
+  // /meetings/:id/observe connection (opened for a non-owner session below,
+  // see connectObserverSocket()) can feed the EXACT SAME state updates —
+  // the same live transcript/coaching/speaker-relabel rendering, no second
+  // parallel implementation to keep in sync by hand. This is the actual
+  // "reuse the existing MeetingPage rendering for both scenarios"
+  // requirement: one message handler, two socket sources.
+  const applyLiveMessage = useCallback((msg: any) => {
+    if (msg.type === 'interim') {
+      setInterimText(msg.text || '');
+      setInterimSpeaker(msg.speaker || '');
+    } else if (msg.type === 'final') {
+      setInterimText('');
+      setInterimSpeaker('');
+      if (msg.text && msg.text.trim()) {
+        setSegments(prev => [
+          ...prev,
+          {
+            speaker: msg.speaker || 'Speaker',
+            text: msg.text,
+            isFinal: true,
+            ts: Date.now(),
+          },
+        ]);
+      }
+    } else if (msg.type === 'speaker_lock') {
+      // Voice fingerprint matched — auto-label the rep's speaker ID
+      const { speakerId, name } = msg as { type: string; speakerId: string; name: string };
+      handleSpeakerLabelChange(speakerId, name);
+      setVoiceToast(`🎙️ ${name} identified`);
+      setTimeout(() => setVoiceToast(null), 4000);
+    } else if (msg.type === 'speaker_unlock') {
+      // Server detected the rep-voiceprint lock drifted (likely a wrong
+      // initial match) and released it. No relabeling here — leave
+      // already-rendered segments as-is; a fresh speaker_lock will
+      // arrive once re-verification finds the right speaker again.
+      setVoiceToast(`⚠️ Re-checking speaker match…`);
+      setTimeout(() => setVoiceToast(null), 3000);
+    } else if (msg.type === 'speaker_merge') {
+      // Server detected Deepgram over-segmented one person into two
+      // speaker indices and merged them. Rewrite already-rendered
+      // segments in place and carry forward any manual label the user
+      // had set on the stale speaker id.
+      const { from, to } = msg as { type: string; from: string; to: string };
+      setSegments(prev => prev.map(seg => (seg.speaker === from ? { ...seg, speaker: to } : seg)));
+      setSpeakerLabels(prev => {
+        if (prev[from] === undefined) return prev;
+        const next = { ...prev };
+        if (next[to] === undefined) next[to] = next[from];
+        delete next[from];
+        return next;
+      });
+    } else if (msg.type === 'suggested_rebuttal') {
+      // Live rebuttal teleprompter (item 5) — first-pass scaffolding.
+      const { objectionCategory, rebuttal } = msg as { type: string; objectionCategory: string; rebuttal: string };
+      setSuggestedRebuttal({ objectionCategory, rebuttal });
+    } else if (msg.type === 'coaching' && msg.data) {
+      // Phase 3: real-time coaching update
+      const incoming = msg.data as CoachingData;
+      // Grow the locked set — never shrink it
+      if (incoming.checklist) {
+        setLockedChecked(prev => {
+          const next = new Set(prev);
+          incoming.checklist.filter(i => i.done).forEach(i => next.add(i.id));
+          return next;
+        });
+      }
+      // Store raw coaching data (lockedChecked handles sticky state at render time)
+      setCoachingData(incoming);
+    } else if (msg.type === 'meeting_ended') {
+      // Observer-only in practice (the owner learns the meeting ended via its
+      // own updateMeeting() response, not this message) — the mobile device
+      // finalized the meeting (End Meeting tap, or server-side
+      // finalizeMeetingIfAbandoned() on a dropped connection). Re-fetch so
+      // this page flips from the live "Active meeting" branch to the
+      // post-meeting branch with the final status/ended_at from the server,
+      // same as if the owner's own handleEndMeeting() had run locally.
+      if (meetingId) {
+        getMeeting(meetingId).then(setMeeting).catch(() => {});
+      }
+    }
+  }, [meetingId]);
+
+  // ─── WebSocket connection (owner: audio streaming) ───────────────────────
 
   const connectWebSocket = useCallback(() => {
     if (!meetingId) return;
@@ -224,70 +330,7 @@ export default function MeetingPage() {
 
     ws.onmessage = (evt) => {
       try {
-        const msg = JSON.parse(evt.data as string);
-        if (msg.type === 'interim') {
-          setInterimText(msg.text || '');
-          setInterimSpeaker(msg.speaker || '');
-        } else if (msg.type === 'final') {
-          setInterimText('');
-          setInterimSpeaker('');
-          if (msg.text && msg.text.trim()) {
-            setSegments(prev => [
-              ...prev,
-              {
-                speaker: msg.speaker || 'Speaker',
-                text: msg.text,
-                isFinal: true,
-                ts: Date.now(),
-              },
-            ]);
-          }
-        } else if (msg.type === 'speaker_lock') {
-          // Voice fingerprint matched — auto-label the rep's speaker ID
-          const { speakerId, name } = msg as { type: string; speakerId: string; name: string };
-          handleSpeakerLabelChange(speakerId, name);
-          setVoiceToast(`🎙️ ${name} identified`);
-          setTimeout(() => setVoiceToast(null), 4000);
-        } else if (msg.type === 'speaker_unlock') {
-          // Server detected the rep-voiceprint lock drifted (likely a wrong
-          // initial match) and released it. No relabeling here — leave
-          // already-rendered segments as-is; a fresh speaker_lock will
-          // arrive once re-verification finds the right speaker again.
-          const { speakerId } = msg as { type: string; speakerId: string };
-          setVoiceToast(`⚠️ Re-checking speaker match…`);
-          setTimeout(() => setVoiceToast(null), 3000);
-        } else if (msg.type === 'speaker_merge') {
-          // Server detected Deepgram over-segmented one person into two
-          // speaker indices and merged them. Rewrite already-rendered
-          // segments in place and carry forward any manual label the user
-          // had set on the stale speaker id.
-          const { from, to } = msg as { type: string; from: string; to: string };
-          setSegments(prev => prev.map(seg => (seg.speaker === from ? { ...seg, speaker: to } : seg)));
-          setSpeakerLabels(prev => {
-            if (prev[from] === undefined) return prev;
-            const next = { ...prev };
-            if (next[to] === undefined) next[to] = next[from];
-            delete next[from];
-            return next;
-          });
-        } else if (msg.type === 'suggested_rebuttal') {
-          // Live rebuttal teleprompter (item 5) — first-pass scaffolding.
-          const { objectionCategory, rebuttal } = msg as { type: string; objectionCategory: string; rebuttal: string };
-          setSuggestedRebuttal({ objectionCategory, rebuttal });
-        } else if (msg.type === 'coaching' && msg.data) {
-          // Phase 3: real-time coaching update
-          const incoming = msg.data as CoachingData;
-          // Grow the locked set — never shrink it
-          if (incoming.checklist) {
-            setLockedChecked(prev => {
-              const next = new Set(prev);
-              incoming.checklist.filter(i => i.done).forEach(i => next.add(i.id));
-              return next;
-            });
-          }
-          // Store raw coaching data (lockedChecked handles sticky state at render time)
-          setCoachingData(incoming);
-        }
+        applyLiveMessage(JSON.parse(evt.data as string));
       } catch {
         // ignore malformed messages
       }
@@ -313,6 +356,126 @@ export default function MeetingPage() {
       }, delay);
     };
   }, [meetingId]);
+
+  // ─── WebSocket connection (observer: read-only mobile-meeting sync) ───────
+  // 2026-08-05 (live meeting sync full-page rebuild). Opened INSTEAD of the
+  // owner audio socket above when this session did not start the meeting
+  // (see the useEffect below that chooses between the two). NEVER captures
+  // a mic, NEVER opens an AudioContext/AudioWorklet, NEVER sends anything
+  // on this socket — purely receive-only, same server-side contract
+  // /meetings/:id/observe has always had (see server.js's route comment).
+  // Every message it receives is handed to the SAME applyLiveMessage()
+  // the owner's audio socket uses — that shared function is what makes
+  // this "reuse the existing MeetingPage rendering" rather than a second
+  // parallel transcript-rendering implementation.
+  const connectObserverSocket = useCallback(() => {
+    if (!meetingId) return;
+    if (observeWsRef.current && observeWsRef.current.readyState === WebSocket.OPEN) return;
+
+    setConnectionStatus('connecting');
+
+    const ws = new WebSocket(`${getWsBase()}/meetings/${meetingId}/observe`);
+    observeWsRef.current = ws;
+
+    ws.onopen = () => {
+      setConnectionStatus('connected');
+    };
+
+    ws.onmessage = (evt) => {
+      let msg: any;
+      try {
+        msg = JSON.parse(evt.data as string);
+      } catch {
+        return;
+      }
+      if (msg.type === 'sync_snapshot') {
+        // Initial catch-up snapshot, sent once right after connect — mirrors
+        // what getMeeting()/getMeetingSegments()/getLatestCoaching() already
+        // gave THIS page on load for an owner session, just pushed
+        // proactively instead of requiring a second REST round-trip. Only
+        // apply if we don't already have segments (e.g. from the initial
+        // load effect above resolving first) to avoid a duplicate-render
+        // flash — harmless either way since both sources agree, but avoids
+        // a visible re-sort/re-render blip.
+        setSegments(prev => (prev.length > 0 ? prev : (msg.segments || []).map((s: any) => ({
+          speaker: s.speaker,
+          text: s.text,
+          isFinal: true,
+          ts: new Date(s.ts).getTime(),
+        }))));
+        if (msg.coaching) {
+          const c = msg.coaching as CoachingData;
+          setCoachingData(c);
+          if (c.checklist) {
+            setLockedChecked(prev => {
+              const next = new Set(prev);
+              c.checklist.filter(i => i.done).forEach(i => next.add(i.id));
+              return next;
+            });
+          }
+        }
+      } else {
+        applyLiveMessage(msg);
+      }
+    };
+
+    ws.onerror = () => {
+      setConnectionStatus('reconnecting');
+    };
+
+    ws.onclose = () => {
+      if (observeWsRef.current === ws) observeWsRef.current = null;
+      setConnectionStatus('disconnected');
+      // Reconnect while the meeting is still active on the phone — mirrors
+      // the owner audio socket's own reconnect-while-recording behavior
+      // above. isActiveRef (declared further below, tracks meeting.status)
+      // lets this closure see current status without re-subscribing.
+      if (isActiveRef.current && !isOwnerSessionRef.current) {
+        observeReconnectTimerRef.current = setTimeout(connectObserverSocket, 3000);
+      }
+    };
+  }, [meetingId, applyLiveMessage]);
+
+  // ─── Owner vs. observer: which live socket (if any) should be open ──────
+  // 2026-08-05 (live meeting sync full-page rebuild) — THE core routing
+  // decision that replaces the old popup's separate code path. This page
+  // is reused verbatim for both scenarios; the only thing that changes is
+  // which live socket (if any) feeds applyLiveMessage():
+  //   - Active meeting, owner session (normal web-started meeting, or the
+  //     mobile owner viewing their OWN meeting on web — rare but not
+  //     disallowed): no socket opened by THIS effect at all — the owner's
+  //     mic/audio socket is opened explicitly by handleStartButton() /
+  //     connectWebSocket(), driven by the Record button, exactly as
+  //     before this rework. This effect does nothing in that case.
+  //   - Active meeting, NON-owner session (a web tab observing a
+  //     mobile-started meeting): open the read-only observer socket
+  //     automatically — there is no Record button to wait for; the
+  //     transcript is already being produced by the phone's mic.
+  //   - Not active (completed/cancelled/interrupted): close whichever
+  //     socket might still be open and don't reconnect — same terminal
+  //     handling for both owner and observer.
+  useEffect(() => {
+    if (!meeting) return;
+    const active = meeting.status === 'active';
+    // Permissive default (true) when is_owner_session is omitted — matches
+    // the server's own permissive-when-NULL convention (shapeMeetingForClient()
+    // in server.js), so a pre-migration meeting record is never mistakenly
+    // treated as an observer view with no owner controls.
+    const owner = meeting.is_owner_session !== false;
+    isActiveRef.current = active;
+    isOwnerSessionRef.current = owner;
+
+    if (active && !owner) {
+      connectObserverSocket();
+    } else {
+      if (observeReconnectTimerRef.current) {
+        clearTimeout(observeReconnectTimerRef.current);
+        observeReconnectTimerRef.current = null;
+      }
+      observeWsRef.current?.close();
+      observeWsRef.current = null;
+    }
+  }, [meeting, connectObserverSocket]);
 
   // ─── Start recording ──────────────────────────────────────────────────────
 
@@ -703,13 +866,39 @@ export default function MeetingPage() {
   if (!meeting) return null;
 
   const isActive = meeting.status === 'active';
+  // 2026-08-05 (live meeting sync full-page rebuild): permissive default
+  // (true) when omitted, mirroring server.js's own NULL-owner_session_id
+  // permissiveness — see shapeMeetingForClient(). This is the ONE flag
+  // this whole page branches on to distinguish "my own web meeting" from
+  // "observing a mobile meeting"; every other render path below is shared.
+  const isOwnerSession = meeting.is_owner_session !== false;
+  // Small distinguishing element (see this task's report, open question 7,
+  // for the reasoning on why a minimal indicator like this is worth
+  // keeping despite the "almost identical" requirement): a rep must be able
+  // to tell at a glance that THEIR mic is not live and tapping around
+  // this page won't start/stop anything audio-related on this device.
+  const isSyncedFromMobile = isActive && !isOwnerSession;
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* Recording banner */}
+      {/* Recording banner — owner-only; an observer session never captures
+          audio on this device, so "keep screen on" would be misleading
+          (this page's wake lock is only ever acquired by startRecording(),
+          which an observer session never calls). See the synced-status
+          banner just below for the observer's equivalent. */}
       {isRecording && (
         <div className="bg-red-600 text-white text-center py-2 px-4 text-sm font-semibold animate-pulse sticky top-0 z-50">
           🔴 RECORDING — keep screen on
+        </div>
+      )}
+
+      {/* Synced-from-mobile banner — observer-only equivalent of the
+          recording banner above. Distinguishing element per this task's
+          open question 7: makes it unmistakable that the live transcript
+          below is arriving from the phone, not this browser's mic. */}
+      {isSyncedFromMobile && (
+        <div className="bg-indigo-600 text-white text-center py-2 px-4 text-sm font-semibold sticky top-0 z-50">
+          📱 LIVE — synced from mobile device
         </div>
       )}
 
@@ -722,7 +911,7 @@ export default function MeetingPage() {
 
       {/* Header */}
       <div
-        className={`px-4 pt-4 pb-5 ${isRecording ? 'bg-red-700' : isActive ? 'bg-green-700' : 'bg-blue-700'} text-white`}
+        className={`px-4 pt-4 pb-5 ${isRecording ? 'bg-red-700' : isSyncedFromMobile ? 'bg-indigo-700' : isActive ? 'bg-green-700' : 'bg-blue-700'} text-white`}
         style={{ paddingTop: 'calc(1rem + env(safe-area-inset-top))' }}
       >
         <div className="flex items-center gap-3 mb-3">
@@ -739,14 +928,18 @@ export default function MeetingPage() {
             <p className="text-white/70 text-sm">
               {isRecording
                 ? `Recording · ${formatElapsed(elapsedSec)}`
-                : isActive
-                  ? `Active · ${formatDuration(meeting.started_at)}`
-                  : `Completed · ${formatDuration(meeting.started_at, meeting.ended_at ?? undefined)}`}
+                : isSyncedFromMobile
+                  ? `Synced from mobile · ${formatDuration(meeting.started_at)}`
+                  : isActive
+                    ? `Active · ${formatDuration(meeting.started_at)}`
+                    : `Completed · ${formatDuration(meeting.started_at, meeting.ended_at ?? undefined)}`}
             </p>
           </div>
-          {/* Connection status indicator */}
+          {/* Connection status indicator — shared badge, works for either
+              socket (owner audio or observer) since both drive the same
+              connectionStatus state. */}
           {isActive && (
-            <ConnectionBadge status={connectionStatus} isRecording={isRecording} />
+            <ConnectionBadge status={connectionStatus} isRecording={isRecording || isSyncedFromMobile} />
           )}
         </div>
       </div>
@@ -772,7 +965,26 @@ export default function MeetingPage() {
                 same pulsing visual, but it can no longer diverge from the
                 meeting's actual lifecycle. */}
             <div className="flex flex-col items-center py-6">
-              {isRecording ? (
+              {isSyncedFromMobile ? (
+                // 2026-08-05 (live meeting sync full-page rebuild): observer
+                // session — there is nothing to tap here. No Record button
+                // (this device has no mic role in this meeting at all), and
+                // deliberately NOT the same red "Recording" indicator the
+                // owner sees while recording — a phone icon instead, so a
+                // rep glancing at this screen can't mistake it for "my own
+                // mic is live on this browser" (see this task's report,
+                // open question 7, for why this distinguishing element is
+                // kept despite the "almost identical" requirement).
+                <div
+                  aria-live="polite"
+                  className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg bg-indigo-600 ring-4 ring-indigo-300 flex items-center justify-center animate-pulse"
+                >
+                  <span className="flex flex-col items-center gap-1">
+                    <span className="text-3xl">📱</span>
+                    <span className="text-sm">Live from phone</span>
+                  </span>
+                </div>
+              ) : isRecording ? (
                 <div
                   aria-live="polite"
                   className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg bg-red-600 ring-4 ring-red-300 flex items-center justify-center animate-pulse"
@@ -842,7 +1054,7 @@ export default function MeetingPage() {
 
               {segments.length === 0 && !interimText ? (
                 <p className="text-sm text-gray-400 text-center py-4">
-                  {isRecording ? 'Listening…' : 'Start recording to see live transcript'}
+                  {isSyncedFromMobile ? 'Waiting for live transcript from phone…' : isRecording ? 'Listening…' : 'Start recording to see live transcript'}
                 </p>
               ) : (
                 <div
@@ -1055,16 +1267,41 @@ export default function MeetingPage() {
                 <span className="text-gray-700">{meeting.customer_name}</span>
               </div>
             )}
+            {/* 2026-08-05 (live meeting sync full-page rebuild): small,
+                low-key indicator of which device started this meeting —
+                shown for EVERY meeting (not just synced ones) since it's
+                genuinely just a details row, not a special-cased banner. */}
+            {meeting.origin_client === 'mobile' && (
+              <div className="flex justify-between">
+                <span className="text-gray-500">Source</span>
+                <span className="text-gray-700">📱 Mobile</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
 
       {/* Bottom action */}
+      {/* 2026-08-05 (live meeting sync full-page rebuild) — HARD REQUIREMENT
+          carried over from the popup this replaces (Gabe/Troy, verbatim:
+          "the meeting should only be able to be ended on the device that
+          started the meeting in the first place"): an observer session
+          renders NO End Meeting button at all here — not a disabled one,
+          not one with a client-side guard, NONE. There is no code path in
+          this branch that could even attempt to call handleEndMeeting() for
+          an observer. The actual enforcement (the part that matters even if
+          this UI branch had a bug) is server-side: PATCH /api/meetings/:id's
+          owner_session_id check in server.js, unchanged by this rework —
+          see this task's report for a real HTTP test proving a synced
+          session's direct PATCH attempt is still rejected with 403 even
+          bypassing this UI entirely. Observer sessions get a plain
+          "← Back to Home" instead, same as the post-meeting view every
+          session sees once the mobile device ends the meeting. */}
       <div
         className="fixed bottom-0 left-0 right-0 px-4 pb-4 bg-white border-t border-gray-100 shadow-lg"
         style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
       >
-        {isActive ? (
+        {isActive && isOwnerSession ? (
           <button
             onClick={handleEndMeetingButtonClick}
             className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-4 rounded-2xl text-lg transition-colors"

@@ -20,6 +20,13 @@ function statusBadge(status: Meeting['status']) {
     active: 'bg-green-100 text-green-800',
     completed: 'bg-gray-100 text-gray-600',
     cancelled: 'bg-red-100 text-red-700',
+    // 'interrupted' (2026-08-05, server-side auto-finalize on abandoned WS
+    // connections) was already a valid runtime status value before this
+    // pass — just missing from the Meeting['status'] TS union until this
+    // task's api.ts fix, which is what surfaced this as a type error here.
+    // Amber, not red: distinct from a rep's intentional 'cancelled', not
+    // as neutral as a clean 'completed'.
+    interrupted: 'bg-amber-100 text-amber-800',
   };
   return map[status] ?? 'bg-gray-100 text-gray-600';
 }

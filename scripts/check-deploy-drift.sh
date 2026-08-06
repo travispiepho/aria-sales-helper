@@ -42,9 +42,35 @@ log() {
   echo "- $(timestamp) — $1" >> "$LOG_FILE"
 }
 
+# Alert-on-problem only (never on success): sends a short Telegram message
+# via the Bot API so a human sees drift/failure immediately instead of it
+# sitting silently in $LOG_FILE. Failure to send the alert itself is logged
+# but never crashes the script (a broken Telegram call must not mask the
+# real underlying drift/health failure or change the script's exit code).
+alert_telegram() {
+  local reason="$1"
+  local bot_token chat_id resp
+  bot_token="$(grep -m1 '^TELEGRAM_BOT_TOKEN=' "$SECRETS_FILE" 2>/dev/null | cut -d= -f2-)"
+  chat_id="$(grep -m1 '^TELEGRAM_CHAT_ID=' "$SECRETS_FILE" 2>/dev/null | cut -d= -f2-)"
+  if [ -z "$bot_token" ] || [ -z "$chat_id" ]; then
+    log "⚠️ Telegram alert NOT sent — TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing from $SECRETS_FILE"
+    return 0
+  fi
+  resp="$(curl -s -m 10 -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
+    --data-urlencode "chat_id=${chat_id}" \
+    --data-urlencode "text=🚨 ARIA deploy-drift alert
+${reason}" || echo '{"ok":false,"error":"curl failed"}')"
+  if echo "$resp" | grep -q '"ok":true'; then
+    log "📨 Telegram alert sent successfully."
+  else
+    log "⚠️ Telegram alert send FAILED — raw response: ${resp:0:300}"
+  fi
+}
+
 RAILWAY_TOKEN="$(grep -m1 '^RAILWAY_TOKEN=' "$SECRETS_FILE" | cut -d= -f2-)"
 if [ -z "$RAILWAY_TOKEN" ]; then
   log "❌ ERROR: could not read RAILWAY_TOKEN from $SECRETS_FILE"
+  alert_telegram "ERROR: check-deploy-drift.sh could not read RAILWAY_TOKEN from $SECRETS_FILE. Drift check did not run."
   exit 1
 fi
 
@@ -56,6 +82,7 @@ fi
 EXPECTED_SHA="$(git -C "$REPO_DIR" log -1 --format=%H origin/main -- server/)"
 if [ -z "$EXPECTED_SHA" ]; then
   log "❌ ERROR: could not resolve origin/main HEAD via git ls-remote"
+  alert_telegram "ERROR: check-deploy-drift.sh could not resolve origin/main HEAD via git. Drift check did not run."
   exit 1
 fi
 
@@ -70,15 +97,18 @@ DEPLOY_STATUS="$(echo "$DEPLOY_RESPONSE" | grep -o '"status":"[A-Z]*"' | head -1
 
 if [ -z "$DEPLOYED_SHA" ]; then
   log "❌ ERROR: could not extract commitHash from Railway API response — raw: ${DEPLOY_RESPONSE:0:300}"
+  alert_telegram "ERROR: check-deploy-drift.sh could not extract commitHash from Railway's API response. Drift check did not run. Raw response: ${DEPLOY_RESPONSE:0:300}"
   exit 1
 fi
 
 # ── Step 3: do they actually match? (This is the check that would have ─────
 #     caught both 2026-08-02 and 2026-08-03 incidents before a human noticed.)
 DRIFT=0
+ALERT_REASONS=()
 if [ "$DEPLOYED_SHA" != "$EXPECTED_SHA" ]; then
   DRIFT=1
   log "🚨 DRIFT DETECTED — Railway status is '$DEPLOY_STATUS' but deployed commit ($DEPLOYED_SHA) does NOT match origin/main tip ($EXPECTED_SHA). This is exactly the failure mode that caused the 2026-08-02/03 analytics-feature incident. Action needed: check Railway dashboard, consider forcing a redeploy pinned to $EXPECTED_SHA."
+  ALERT_REASONS+=("Commit hash mismatch: Railway is serving ${DEPLOYED_SHA:0:12} but origin/main (server/) tip is ${EXPECTED_SHA:0:12}. Railway status reported as '$DEPLOY_STATUS'. Action: check Railway dashboard, consider forcing a redeploy pinned to ${EXPECTED_SHA:0:12}.")
 fi
 
 # ── Step 4: is the backend actually healthy right now, independent of Step 3? ─
@@ -86,11 +116,16 @@ HEALTH_RESPONSE="$(curl -s -m 10 "$HEALTH_URL" || echo '{"status":"unreachable"}
 if ! echo "$HEALTH_RESPONSE" | grep -q '"status":"ok"'; then
   DRIFT=1
   log "🚨 HEALTH CHECK FAILED — $HEALTH_URL did not return status:ok. Raw response: ${HEALTH_RESPONSE:0:300}"
+  ALERT_REASONS+=("Health check failed: ${HEALTH_URL} did not return status:ok. Raw response: ${HEALTH_RESPONSE:0:200}")
 fi
 
 if [ "$DRIFT" -eq 0 ]; then
   log "✅ OK — deployed commit ($DEPLOYED_SHA) matches origin/main, status=$DEPLOY_STATUS, health=ok."
   exit 0
 else
+  REASON_TEXT="$(printf '%s\n' "${ALERT_REASONS[@]}")"
+  alert_telegram "$REASON_TEXT
+
+Full log: memory/deploy-drift-log.md"
   exit 1
 fi

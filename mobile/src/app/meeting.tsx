@@ -41,9 +41,16 @@
  * call, etc.) — the in-flight chunk is simply lost and no more chunks can
  * be recorded until the app is foregrounded again, silently truncating the
  * transcript with no user-visible signal. Two mitigations added here:
- *   1. A persistent warning banner, visible for the entire time a meeting
- *      is actively recording (`stage === 'connected'`), telling the user not
- *      to leave the app.
+ *   1. A warning banner. (2026-08-05 update, later same day: originally
+ *      this rendered for the ENTIRE recording duration — per feedback that
+ *      was too much persistent on-screen noise for the whole meeting, so it
+ *      now fires ONCE, right as recording starts (`ws.onopen`, the same
+ *      moment `stage` becomes `'connected'`), stays visible for
+ *      `LEAVE_WARNING_VISIBLE_MS` (4s — long enough to read a short
+ *      sentence, short enough to not linger), then auto-dismisses via a
+ *      timeout and does not reappear for the rest of that meeting. This is
+ *      PURELY a display-duration change to mitigation 1 — mitigation 2
+ *      below (the actual detection/auto-stop behavior) is untouched.)
  *   2. An `AppState` listener that detects the app leaving the foreground
  *      while recording is active and auto-stops client-side + finalizes the
  *      meeting server-side via the SAME `handleEnd()` path the manual
@@ -81,9 +88,19 @@
  *     safety net for this.
  */
 
+import { useNavigation } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, type AppStateStatus, Pressable, ScrollView, StyleSheet } from 'react-native';
+import {
+  ActivityIndicator,
+  AppState,
+  type AppStateStatus,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { requestRecordingPermissionsAsync, useAudioRecorder } from 'expo-audio';
@@ -118,16 +135,45 @@ type TranscriptSegment = {
 
 export default function MeetingScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
   const [stage, setStage] = useState<Stage>('idle');
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [interim, setInterim] = useState<{ speaker: string; text: string } | null>(null);
   const [streamWarning, setStreamWarning] = useState<string | null>(null);
+  // (2026-08-05, later same day) One-time leave-app warning visibility —
+  // see file header "Leave-app-while-recording guard" section. Flips true
+  // the instant recording starts (ws.onopen) and false again after
+  // LEAVE_WARNING_VISIBLE_MS via a timeout — it is NOT tied to `stage` any
+  // more, so it does not come back for the rest of the meeting even though
+  // `stage` stays 'connected' the whole time.
+  const [showLeaveWarning, setShowLeaveWarning] = useState(false);
+  const leaveWarningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamerRef = useRef<ChunkedPcmStreamer | null>(null);
   const segmentCounter = useRef(0);
+  // ── Smart auto-scroll (mirrors app/web/src/pages/MeetingPage.tsx's
+  // `userScrolledUpRef` + `handleTranscriptScroll()` pattern exactly): the
+  // transcript ScrollView auto-scrolls to the bottom as new lines/interim
+  // text arrive UNLESS the user has manually scrolled away from the
+  // bottom (e.g. to re-read an earlier line) — in which case auto-scroll
+  // pauses so it doesn't fight the user, and resumes once they scroll back
+  // down near the bottom themselves, or once a new meeting is started.
+  const transcriptScrollRef = useRef<ScrollView | null>(null);
+  const userScrolledUpRef = useRef(false);
+  // Web uses a fixed 80px "distance from bottom" threshold on the DOM
+  // scroll container to decide whether the user has intentionally scrolled
+  // away from the live edge. RN's onScroll payload gives the same three
+  // numbers (contentOffset.y, contentSize.height, layoutMeasurement.height)
+  // so the same threshold translates directly.
+  const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 80;
+  // How long the one-time "don't leave the app" warning stays on screen
+  // after recording starts before auto-dismissing. 4s: long enough to read
+  // the ~15-word sentence once, short enough to not linger and compete with
+  // the transcript/status UI for the rest of the meeting.
+  const LEAVE_WARNING_VISIBLE_MS = 4000;
   // Set synchronously by handleEnd() BEFORE ws.close() is called, so that by
   // the time the resulting onclose event fires, we can distinguish an
   // intentional user-initiated close (WS close code 1000, expected/normal)
@@ -145,6 +191,10 @@ export default function MeetingScreen() {
     streamerRef.current = null;
     wsRef.current?.close();
     wsRef.current = null;
+    if (leaveWarningTimerRef.current) {
+      clearTimeout(leaveWarningTimerRef.current);
+      leaveWarningTimerRef.current = null;
+    }
   }, []);
 
   useEffect(() => cleanup, [cleanup]);
@@ -185,12 +235,45 @@ export default function MeetingScreen() {
     return () => subscription.remove();
   }, []);
 
+  // ── Back-navigation lockout while actively recording (2026-08-05) ─────
+  // The on-screen ← Back button is conditionally rendered below (hidden
+  // while `stage === 'connected'`), but that alone doesn't stop Android's
+  // hardware/gesture back action, which React Navigation's native-stack
+  // wires directly into a `goBack`-style action independent of whatever JSX
+  // this component renders. `beforeRemove` is the standard React Navigation
+  // event that fires for ANY action that would remove this screen from the
+  // stack — hardware back button, edge-swipe-back gesture, and header back
+  // button alike — so gating it on the same `stageRef` used above covers
+  // all three in one place instead of only the on-screen button. Checked via
+  // `stageRef` (not `stage`) so this listener — subscribed once — always
+  // sees the current stage, same pattern as the AppState listener above.
+  // Guarded on 'connected' only: this deliberately does NOT block leaving
+  // once the meeting has ended ('ended') or during any pre-recording setup
+  // stage, and it never blocks our OWN `handleEnd`-driven navigation since
+  // the on-screen back button (the only in-component navigation call) is
+  // hidden for the entire 'connected' stage, so this listener is never
+  // fighting a navigation this component itself initiated.
+  useEffect(() => {
+    const subscription = navigation.addListener('beforeRemove', (e) => {
+      if (stageRef.current === 'connected') {
+        e.preventDefault();
+      }
+    });
+    return subscription;
+  }, [navigation]);
+
   async function handleStart() {
     endedIntentionallyRef.current = false;
     setErrorMsg(null);
     setStreamWarning(null);
     setSegments([]);
     setInterim(null);
+    setShowLeaveWarning(false);
+    if (leaveWarningTimerRef.current) {
+      clearTimeout(leaveWarningTimerRef.current);
+      leaveWarningTimerRef.current = null;
+    }
+    userScrolledUpRef.current = false; // fresh meeting starts pinned to the (empty) bottom
 
     // Step 1: mic permission
     setStage('requesting-mic');
@@ -251,6 +334,18 @@ export default function MeetingScreen() {
 
     ws.onopen = () => {
       setStage('connected');
+
+      // One-time leave-app warning (see file header): fire right as
+      // recording actually starts, auto-dismiss after
+      // LEAVE_WARNING_VISIBLE_MS, and never show it again for the rest of
+      // this meeting (does not re-trigger on later renders since it's not
+      // gated on `stage` any more).
+      setShowLeaveWarning(true);
+      if (leaveWarningTimerRef.current) clearTimeout(leaveWarningTimerRef.current);
+      leaveWarningTimerRef.current = setTimeout(() => {
+        setShowLeaveWarning(false);
+        leaveWarningTimerRef.current = null;
+      }, LEAVE_WARNING_VISIBLE_MS);
 
       // Step 4: start streaming real mic audio once the socket is open.
       // iOS only for now (see audioStream.ts header) — on Android we still
@@ -345,6 +440,28 @@ export default function MeetingScreen() {
     // rendering only). See report for what remains.
   }
 
+  // ── Smart auto-scroll (mirrors app/web/src/pages/MeetingPage.tsx's
+  // handleTranscriptScroll() exactly) ────────────────────────────────────
+  // Tracks whether the user has manually scrolled away from the live edge
+  // by more than the threshold, so handleTranscriptContentSizeChange below
+  // can skip auto-scrolling while they're reading back through earlier
+  // lines — same nuance as web, not a blind force-scroll on every update.
+  function handleTranscriptScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distFromBottom = contentSize.height - contentOffset.y - layoutMeasurement.height;
+    userScrolledUpRef.current = distFromBottom > AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+  }
+
+  // Fires whenever the ScrollView's content grows (new final segment
+  // appended, or interim text updated/cleared) — the RN equivalent of
+  // web's `useEffect(() => { el.scrollTop = el.scrollHeight; }, [segments,
+  // interimText])`. Only snaps to the bottom if the user hasn't scrolled
+  // away from the live edge, exactly like web.
+  function handleTranscriptContentSizeChange() {
+    if (userScrolledUpRef.current) return;
+    transcriptScrollRef.current?.scrollToEnd({ animated: false });
+  }
+
   // Single finalize path for BOTH the manual "End Meeting" button and the
   // (2026-08-05) auto-stop-on-backgrounding guard above — intentionally not
   // duplicated: whichever caller reaches this first wins, and the
@@ -355,6 +472,7 @@ export default function MeetingScreen() {
     if (endedIntentionallyRef.current) return; // already ending/ended — no-op
     endedIntentionallyRef.current = true;
     setStage('ended');
+    userScrolledUpRef.current = false; // re-enable auto-scroll after recording — mirrors web's stopRecording()
     cleanup();
     if (meeting) {
       try {
@@ -388,21 +506,40 @@ export default function MeetingScreen() {
               '/(tabs)' is the Home tab's real resolved route: per Expo
               Router's generated route types (.expo/types/router.d.ts), the
               tab group's root resolves to pathname `${'/(tabs)'}` | `/` —
-              i.e. (tabs)/index.tsx (Home) IS that route. */}
-          <Pressable onPress={() => router.replace('/(tabs)')} style={styles.backButton}>
-            <ThemedText type="link">← Back</ThemedText>
-          </Pressable>
+              i.e. (tabs)/index.tsx (Home) IS that route.
 
-          <ThemedText type="title" style={styles.title}>
-            In-Person Meeting
-          </ThemedText>
+              2026-08-05: hidden entirely while `stage === 'connected'` — a
+              rep mid-recording should not have a readily-available way to
+              navigate off this screen; the button only (re)appears once the
+              recording has actually stopped/finalized (any stage other than
+              'connected': pre-start, error, or ended). See the `beforeRemove`
+              listener above for the matching Android hardware/gesture-back
+              lockout covering the same 'connected' window. */}
+          {stage !== 'connected' && (
+            <Pressable onPress={() => router.replace('/(tabs)')} style={styles.backButton}>
+              <ThemedText type="link">← Back</ThemedText>
+            </Pressable>
+          )}
 
-          {/* 2026-08-05: persistent "don't leave the app" banner, visible
-              for the entire duration a meeting is actively recording. This
-              is the up-front half of the leave-app guard (see file header
-              + the AppState listener above for the auto-stop half) — warn
-              BEFORE the user backgrounds the app, not just react after. */}
-          {stage === 'connected' && (
+          {/* 2026-08-05 (later same day): the "In-Person Meeting" title was
+              removed per feedback — this screen is getting more content and
+              doesn't need a static meeting-type label taking up vertical
+              space. This was a DISPLAY-ONLY removal: nothing about meeting
+              type is tracked in this label (the meeting row created by
+              `createMeeting()` and everything in src/lib/api.ts is
+              untouched), so no data model change is implied. */}
+
+          {/* 2026-08-05: one-time "don't leave the app" warning. Originally
+              a persistent banner rendered for the whole recording (gated on
+              `stage === 'connected'`); per feedback it now shows once at
+              recording start and auto-dismisses after
+              LEAVE_WARNING_VISIBLE_MS — hence gating on the
+              `showLeaveWarning` timer state rather than on `stage`. This is
+              the up-front half of the leave-app guard (see file header +
+              the AppState listener above for the auto-stop half) — warn
+              BEFORE the user backgrounds the app, not just react after.
+              The auto-stop half is deliberately NOT touched by this change. */}
+          {showLeaveWarning && (
             <ThemedView style={styles.leaveWarningBanner}>
               <ThemedText type="smallBold" style={styles.leaveWarningText}>
                 ⚠️ Stay in this app while recording. Locking the screen or
@@ -473,7 +610,12 @@ export default function MeetingScreen() {
               <ThemedText type="small" themeColor="textSecondary" style={styles.transcriptLabel}>
                 LIVE TRANSCRIPT
               </ThemedText>
-              <ScrollView style={styles.transcriptScroll}>
+              <ScrollView
+                ref={transcriptScrollRef}
+                style={styles.transcriptScroll}
+                onScroll={handleTranscriptScroll}
+                onContentSizeChange={handleTranscriptContentSizeChange}
+                scrollEventThrottle={100}>
                 {segments.length === 0 && !interim && (
                   <ThemedText type="small" themeColor="textSecondary">
                     {stage === 'connected' ? 'Listening…' : 'No transcript yet.'}
@@ -553,7 +695,6 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   container: { flex: 1, padding: Spacing.four, gap: Spacing.four },
   backButton: { alignSelf: 'flex-start' },
-  title: { fontSize: 28, lineHeight: 34 },
   leaveWarningBanner: {
     backgroundColor: '#FEF3C7',
     borderWidth: 1,

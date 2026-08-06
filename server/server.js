@@ -231,6 +231,30 @@ function broadcastToMeeting(meetingId, payload) {
   broadcastToObservers(meetingId, payload);
 }
 
+// ── Live meeting sync full-page rebuild, 2026-08-05 ─────────────────────────
+// Shapes a raw `meetings` row for client consumption, computing
+// `is_owner_session` (does THIS request's session cookie match the row's
+// owner_session_id) and never leaking the raw owner_session_id value itself
+// to the client. Used by every GET/PATCH meeting-detail route below so the
+// web app's MeetingPage can render the SAME component for "my own web
+// meeting" and "observing a mobile meeting" while still knowing, per
+// request, whether THIS session is allowed to drive the mic/End Meeting —
+// replaces the popup-only MeetingSyncDialog.tsx approach (removed) which
+// never needed this because it had no owner-gated controls at all.
+// Permissive default (`true`) when owner_session_id is NULL, matching the
+// existing permissive-when-NULL convention used by the PATCH ownership
+// check and the audio-WS ownership check elsewhere in this file — a
+// pre-migration meeting (or any meeting created before this column
+// existed) is never treated as "someone else's" meeting.
+function shapeMeetingForClient(meetingRow, requestSessionId) {
+  if (!meetingRow) return meetingRow;
+  const { owner_session_id, ...rest } = meetingRow;
+  return {
+    ...rest,
+    is_owner_session: !owner_session_id || owner_session_id === requestSessionId,
+  };
+}
+
 // ─── Root-cause fix (2026-08-05): stuck-`active`-meeting bug ────────────────
 // Diagnosed 2026-08-04 (see memory/aria-web-runaway-meetings-2026-08-04.md,
 // "ROOT CAUSE of remaining open indefinitely"): the audio WS's `close`
@@ -297,7 +321,7 @@ async function finalizeMeetingIfAbandoned(meetingId) {
       `UPDATE meetings
        SET status = 'interrupted', ended_at = COALESCE(ended_at, NOW())
        WHERE id = $1 AND status = 'active'
-       RETURNING id, rep_id`,
+       RETURNING id, rep_id, origin_client, title`,
       [meetingId]
     );
     if (result.rows.length > 0) {
@@ -313,6 +337,21 @@ async function finalizeMeetingIfAbandoned(meetingId) {
       // wouldn't. Reuses the same notification calls the PATCH route uses.
       broadcastToObservers(meetingId, { type: 'meeting_ended', meetingId, status: 'interrupted' });
       notifyUserSyncMeetingEnded(result.rows[0].rep_id, meetingId);
+      // Auto-title (origin-agnostic as of the 2026-08-05 follow-up pass —
+      // see generateAutoTitleForMeeting() doc comment below for full scope/
+      // reasoning/history). A crashed/dropped meeting (mobile OR web) that
+      // never hit the client's own "End Meeting" PATCH still deserves an
+      // auto-title if enough transcript exists — this is the OTHER terminal
+      // path (server-initiated instead of client-initiated) that can
+      // finalize a meeting, so it needs the same hook as the PATCH route
+      // below. No origin_client gate here anymore (previously mobile-only);
+      // fires for any origin. Fire-and-forget: never blocks/throws into the
+      // WS close handler that calls this function.
+      if (!result.rows[0].title) {
+        generateAutoTitleForMeeting(meetingId).catch((err) => {
+          fastify.log.error(`generateAutoTitleForMeeting error (abandoned-meeting path) for ${meetingId}: ${err.message}`);
+        });
+      }
     }
   } catch (err) {
     // Non-fatal: most likely cause right now is the CHECK constraint not
@@ -333,6 +372,179 @@ const anthropic = ANTHROPIC_API_KEY
         defaultHeaders: { 'HTTP-Referer': 'https://aria.certaprograndhaven.com', 'X-Title': 'ARIA Sales Helper' }
       })
     : null;
+
+// ─── Auto-title (origin-agnostic: mobile + web), 2026-08-05 ────────────────
+// Backlog item was "auto-generate a meeting title from the 2+ identified
+// speakers" (ties into diarization/voiceprint work) — explicitly NOT what
+// this pass builds. Per Gabe's clarification, v1 is a plain CONTENT summary
+// title ("what was this call about", 3-9 words), generated from the
+// transcript text alone, no speaker-identity logic at all. That fuller
+// speaker-based titling is a separate future item.
+//
+// SCOPE (updated 2026-08-05, follow-up pass): originally shipped mobile-
+// only (`origin_client === 'mobile'`) earlier today. Per Gabe's explicit
+// follow-up decision, that restriction is now REMOVED — this fires for
+// BOTH web-started and mobile-started meetings, using the exact same
+// generalized logic/call sites (no duplicated web-specific code path).
+// Every call site below (finalizeMeetingIfAbandoned() above and the PATCH
+// /api/meetings/:id route below) now calls this function regardless of
+// `origin_client`; this function itself never checked origin_client
+// directly (callers were always the enforcement point), so no change was
+// needed inside the function body for this part — only the callers' gates
+// were relaxed.
+//
+// TRIGGER: meeting finalization (status becomes a TERMINAL_MEETING_STATUS),
+// mirroring the timing of the existing manual POST /:id/summary flow —
+// full transcript is available at that point, same rationale. Unlike
+// summary generation (which stays a manual rep-tap for both platforms,
+// unchanged by this pass), auto-title fires automatically server-side
+// (no button, no client call) since it's cheap/low-stakes and "mostly for
+// testing purposes" per the ask — explicitly a judgment call, flagged in
+// the report for Gabe/Troy sign-off alongside the other open questions
+// there (e.g. should manual edits be protected from being overwritten by
+// a later re-run of this).
+//
+// STORAGE: reuses the EXISTING `title` column on `meetings` (already used
+// by the web PWA's manual "Add a title…" field — see MeetingPage.tsx).
+// Only fires when `title` is currently NULL/empty (see the `!title` guard
+// at both call sites) so it never silently clobbers a title a rep already
+// set by hand. As of this follow-up pass, a companion `auto_titled`
+// boolean column has been added (migration:
+// server/migrations/2026-08-05-meeting-auto-titled-flag.sql, WRITTEN BUT
+// NOT APPLIED to prod, per the standing convention in this repo) — this
+// function's UPDATE now also sets `auto_titled = true` whenever it
+// successfully writes a generated title, so the system/future UI can tell
+// an AI-generated title apart from a human-typed one. The PATCH route
+// below sets `auto_titled = false` whenever a caller supplies an explicit
+// `title` in the request body (a manual edit/override), since at that
+// point the stored title is no longer purely AI-generated. The race
+// described previously (a manual title landing between finalize-time-
+// trigger and this async call resolving) is still closed by the same
+// `WHERE title IS NULL OR title = ''` guard on this function's own UPDATE.
+//
+// TITLE LENGTH: the system prompt below still asks the model to aim for
+// 3-9 words, but per Gabe's explicit testing-phase decision there is NO
+// programmatic validation/rejection/truncation/regeneration on the actual
+// returned length — whatever the model returns (after the wrapping-quote/
+// trailing-punctuation cleanup below, which is formatting cleanup, not
+// length enforcement) is stored as-is. This was already true before this
+// follow-up pass (no retry/regeneration logic existed previously either)
+// and remains unchanged now — confirmed, no code change needed for this
+// item; noted here explicitly so it doesn't get re-added by accident
+// later without a deliberate decision to do so.
+//
+// MODEL: claude-haiku-4-5 via the SAME OpenRouter-or-Anthropic-direct path
+// already used by runCoachingAnalysis()/the summary endpoint above — no
+// new provider, no new API key requirement.
+async function generateAutoTitleForMeeting(meetingId) {
+  // ── Feature flag (2026-08-05 pre-deploy gating pass) ──────────────────────
+  // The `auto_titled` DB column already exists in prod (migration applied
+  // directly via psql, separate from this deploy — see
+  // server/migrations/2026-08-05-meeting-auto-titled-flag.sql), but the
+  // GENERATION call below (real OpenRouter/Anthropic API spend on every
+  // meeting finalize, both call sites: finalizeMeetingIfAbandoned() and the
+  // PATCH /api/meetings/:id finalize path) has NOT been cost-approved by
+  // Troy yet. Hard off-switch: this function returns immediately, before any
+  // DB read or model call, unless ENABLE_AUTO_TITLE_GENERATION=true is set.
+  // Intentionally NOT set on Railway as part of this deploy — leave unset so
+  // the feature ships completely inert. Set it on the aria-backend Railway
+  // service once Troy approves the recurring cost.
+  if (process.env.ENABLE_AUTO_TITLE_GENERATION !== 'true') {
+    fastify.log.info(`auto-title: generation disabled (ENABLE_AUTO_TITLE_GENERATION not 'true'), skipping for ${meetingId}`);
+    return null;
+  }
+
+  if (!ANTHROPIC_API_KEY && !OPENROUTER_API_KEY) return null;
+
+  let segments;
+  try {
+    const segResult = await pool.query(
+      `SELECT speaker, text FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
+      [meetingId]
+    );
+    segments = segResult.rows;
+  } catch (err) {
+    fastify.log.error(`auto-title: DB error fetching segments for ${meetingId}: ${err.message}`);
+    return null;
+  }
+
+  // Too little transcript to summarize meaningfully — same floor as the
+  // coaching analysis's `segments.length < 3` bail-out, for the same reason
+  // (a title generated from 1-2 lines is noise, not signal).
+  if (segments.length < 3) return null;
+
+  const transcriptText = segments.map(s => `${s.speaker}: ${s.text}`).join('\n');
+
+  const TITLE_SYSTEM = `You write short, plain-English meeting titles for sales-call transcripts. Read the transcript and output ONE title only — no quotes, no punctuation at the end, no preamble, no explanation. 3 to 9 words. It should describe what the call was actually about (e.g. "Kitchen cabinet refinish estimate walkthrough", "Follow-up on flooring quote pricing"). Do not mention speaker names or "Speaker 1/2" labels.`;
+  const TITLE_USER = `Transcript:\n\n${transcriptText.slice(0, 6000)}\n\nOutput only the title.`;
+
+  let titleText = null;
+  try {
+    if (OPENROUTER_API_KEY && !ANTHROPIC_API_KEY) {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://aria.certaprograndhaven.com',
+          'X-Title': 'ARIA Sales Helper',
+        },
+        body: JSON.stringify({
+          model: 'anthropic/claude-haiku-4-5',
+          max_tokens: 40,
+          messages: [
+            { role: 'system', content: TITLE_SYSTEM },
+            { role: 'user', content: TITLE_USER },
+          ],
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        fastify.log.error(`auto-title: OpenRouter error for ${meetingId}: ${JSON.stringify(data)}`);
+        return null;
+      }
+      titleText = data.choices?.[0]?.message?.content || null;
+    } else {
+      const response = await anthropic.messages.create({
+        model: 'claude-haiku-4-5',
+        max_tokens: 40,
+        system: TITLE_SYSTEM,
+        messages: [{ role: 'user', content: TITLE_USER }],
+      });
+      titleText = response.content[0]?.type === 'text' ? response.content[0].text : null;
+    }
+  } catch (err) {
+    fastify.log.error(`auto-title: generation error for ${meetingId}: ${err.message}`);
+    return null;
+  }
+
+  if (!titleText) return null;
+
+  // Clean up: strip wrapping quotes/whitespace/trailing period Claude
+  // sometimes adds despite the system prompt telling it not to.
+  titleText = titleText.trim().replace(/^["'“‘]+|["'”’]+$/g, '').replace(/[.\s]+$/, '').trim();
+  if (!titleText) return null;
+
+  try {
+    // Guard again inside the write itself: only overwrite if title is still
+    // NULL/empty at write time (closes most of the manual-title race window
+    // described above — does not need its own migration/flag, just a WHERE
+    // clause on the existing column).
+    const result = await pool.query(
+      `UPDATE meetings SET title = $1, auto_titled = true WHERE id = $2 AND (title IS NULL OR title = '') RETURNING id, title, auto_titled`,
+      [titleText, meetingId]
+    );
+    if (result.rows.length === 0) {
+      fastify.log.info(`auto-title: skipped write for ${meetingId} — title already set (manual title race, or already auto-titled).`);
+      return null;
+    }
+  } catch (err) {
+    fastify.log.error(`auto-title: failed to save title for ${meetingId}: ${err.message}`);
+    return null;
+  }
+
+  return titleText;
+}
 
 // ─── DB Pool ─────────────────────────────────────────────────────────────────
 
@@ -686,7 +898,7 @@ fastify.post('/api/meetings', { preHandler: [requireAuth] }, async (request, rep
     notifyUserSyncMeetingStarted(repId, meetingRow);
   }
 
-  return reply.code(201).send(meetingRow);
+  return reply.code(201).send(shapeMeetingForClient(meetingRow, ownerSessionId));
 });
 
 fastify.get('/api/meetings', { preHandler: [requireAuth] }, async (request, reply) => {
@@ -713,7 +925,8 @@ fastify.get('/api/meetings', { preHandler: [requireAuth] }, async (request, repl
     );
   }
 
-  return result.rows;
+  const requestSessionId = request.cookies?.session_id || null;
+  return result.rows.map(row => shapeMeetingForClient(row, requestSessionId));
 });
 
 // ── Live meeting sync (mobile → web), 2026-08-05: REST catch-up/fallback ────
@@ -772,7 +985,7 @@ fastify.get('/api/meetings/:id', { preHandler: [requireAuth] }, async (request, 
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
-  return meeting;
+  return shapeMeetingForClient(meeting, request.cookies?.session_id || null);
 });
 
 // Statuses that FINALIZE a meeting (stop it from being live/editable in the
@@ -835,7 +1048,23 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   if (status !== undefined) { updates.push(`status = $${idx++}`); values.push(status); }
   if (ended_at !== undefined) { updates.push(`ended_at = $${idx++}`); values.push(ended_at); }
   if (summary !== undefined) { updates.push(`summary = $${idx++}`); values.push(summary); }
-  if (title !== undefined) { updates.push(`title = $${idx++}`); values.push(title); }
+  if (title !== undefined) {
+    updates.push(`title = $${idx++}`);
+    values.push(title);
+    // Manual title edit/override (2026-08-05 auto_titled follow-up): this
+    // is the ONE existing path in this repo that writes `title` from a
+    // client request body (the web PWA's "Add a title…" field, per
+    // generateAutoTitleForMeeting()'s doc comment above). Any title set
+    // through here is, by definition, no longer purely AI-generated —
+    // clear `auto_titled` back to false in the SAME statement, even if
+    // this row was previously auto-titled. (If a future auto-title re-run
+    // ever fires again for this meeting, `generateAutoTitleForMeeting()`'s
+    // own `WHERE title IS NULL OR title = ''` guard already prevents it
+    // from clobbering this manual title, so this flag will correctly stay
+    // false until/unless a title is cleared back to empty and re-auto-
+    // generated.)
+    updates.push(`auto_titled = false`);
+  }
   if (speaker_labels !== undefined) { updates.push(`speaker_labels = $${idx++}`); values.push(JSON.stringify(speaker_labels)); }
 
   if (updates.length === 0) {
@@ -859,9 +1088,33 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   if (status !== undefined && TERMINAL_MEETING_STATUSES.has(status)) {
     broadcastToObservers(id, { type: 'meeting_ended', meetingId: id, status });
     notifyUserSyncMeetingEnded(meeting.rep_id, id);
+
+    // Auto-title (origin-agnostic as of the 2026-08-05 follow-up pass) —
+    // see generateAutoTitleForMeeting()'s doc comment for full scope/
+    // reasoning/storage decision. Fires on THIS, the normal client-
+    // initiated "End Meeting" finalize path (the other is
+    // finalizeMeetingIfAbandoned() above, for crashed/dropped meetings
+    // that never reach this PATCH). No `origin_client` gate anymore
+    // (previously mobile-only) — fires for meetings started on either
+    // platform. Still gated on:
+    //   - `!title` (this request's OWN body) — if the SAME PATCH call that
+    //     finalizes the meeting is also setting a manual title (e.g. a
+    //     future client sending both at once), that explicit human choice
+    //     wins and auto-title does not run at all, rather than racing to
+    //     overwrite it. `generateAutoTitleForMeeting()`'s own UPDATE has a
+    //     second `title IS NULL` guard for the remaining race window (a
+    //     manual title PATCH landing between this finalize and this async
+    //     call resolving).
+    // Fire-and-forget, matches the existing runCoachingAnalysis() call-site
+    // pattern below (auto-coaching) — never blocks/fails this response.
+    if (!title) {
+      generateAutoTitleForMeeting(id).catch((err) => {
+        fastify.log.error(`generateAutoTitleForMeeting error (PATCH finalize path) for ${id}: ${err.message}`);
+      });
+    }
   }
 
-  return updated;
+  return shapeMeetingForClient(updated, request.cookies?.session_id || null);
 });
 
 // ─── Phase 3: Coaching analysis ──────────────────────────────────────────────
@@ -2308,9 +2561,13 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
         } catch (dbErr) {
           fastify.log.error('transcript_segments relabel error:', dbErr);
         }
-        if (socket.readyState === 1) {
-          socket.send(JSON.stringify({ type: 'speaker_merge', from: staleLabel, to: canonicalLabel }));
-        }
+        // 2026-08-05 live-sync fix: was socket.send() (owner-only) — any
+        // read-only /observe session watching this meeting (see
+        // broadcastToMeeting()) never received this relabel, so a synced
+        // web view would show the stale speaker tag forever. Route through
+        // broadcastToMeeting() like every other live message type below so
+        // the owner AND observers both get it from one call site.
+        broadcastToMeeting(meetingId, { type: 'speaker_merge', from: staleLabel, to: canonicalLabel });
       }
       delete speakerRefChunks[rawSi];
     } else {
@@ -2449,13 +2706,16 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
                   `margin=${secondScore !== null ? (bestScore - secondScore).toFixed(3) : 'n/a'}, ` +
                   `waited=${now - earliestReady}ms)`
                 );
-                if (socket.readyState === 1) {
-                  socket.send(JSON.stringify({
-                    type: 'speaker_lock',
-                    speakerId: `Speaker ${parseInt(bestSi, 10) + 1}`,
-                    name: repName,
-                  }));
-                }
+                // 2026-08-05 live-sync fix: was socket.send() (owner-only)
+                // — see broadcastToMeeting() call sites throughout this
+                // handler; every OTHER live message type already fans out to
+                // observers, this one didn't, so a synced view's speaker
+                // labels never got auto-identified even when the owner's did.
+                broadcastToMeeting(meetingId, {
+                  type: 'speaker_lock',
+                  speakerId: `Speaker ${parseInt(bestSi, 10) + 1}`,
+                  name: repName,
+                });
               } else if (!marginOk && !pastMaxWait) {
                 // Close race between two candidates — give it a bit more audio
                 // before forcing a decision.
@@ -2487,13 +2747,13 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
               for (const k of Object.keys(candidateReadyAt)) delete candidateReadyAt[k];
               matchGraceDeadline = null;
               for (const k of Object.keys(speakerChunks)) delete speakerChunks[k];
-              if (socket.readyState === 1) {
-                socket.send(JSON.stringify({
-                  type: 'speaker_unlock',
-                  speakerId: `Speaker ${parseInt(unlockedSpeakerId, 10) + 1}`,
-                  reason: 'drift_detected',
-                }));
-              }
+              // 2026-08-05 live-sync fix: broadcastToMeeting(), not
+              // socket.send() — same reasoning as the speaker_lock fix above.
+              broadcastToMeeting(meetingId, {
+                type: 'speaker_unlock',
+                speakerId: `Speaker ${parseInt(unlockedSpeakerId, 10) + 1}`,
+                reason: 'drift_detected',
+              });
             }
           }
         }
@@ -2564,13 +2824,14 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
                 const name = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
                 speakerLocks[si] = name;
                 fastify.log.info(`Name introduction detected: Speaker ${si} -> ${name}`);
-                if (socket.readyState === 1) {
-                  socket.send(JSON.stringify({
-                    type: 'speaker_lock',
-                    speakerId: `Speaker ${parseInt(si, 10) + 1}`,
-                    name,
-                  }));
-                }
+                // 2026-08-05 live-sync fix: broadcastToMeeting(), not
+                // socket.send() — same reasoning as the other speaker_lock
+                // fix above (voice-fingerprint match path).
+                broadcastToMeeting(meetingId, {
+                  type: 'speaker_lock',
+                  speakerId: `Speaker ${parseInt(si, 10) + 1}`,
+                  name,
+                });
               }
             }
           }
@@ -2584,9 +2845,22 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           } catch (dbErr) {
             fastify.log.error('transcript_segments insert error:', dbErr);
           }
-          if (socket.readyState === 1) {
-            socket.send(JSON.stringify({ type: 'final', text: groupText, speaker: groupLabel }));
-          }
+          // ── 2026-08-05 live-sync ROOT-CAUSE FIX ──────────────────────────
+          // This was socket.send() (owner-audio-socket only). That is the
+          // actual live transcript line — the single most important message
+          // this whole route produces — and it NEVER reached any
+          // /meetings/:id/observe session. Every observer-side "transcript not
+          // transferring" symptom traces back to this one call site (plus
+          // the identical `interim` bug just below): the read-only synced
+          // dialog was, from day one, only ever going to receive
+          // `sync_snapshot` (the one-time initial catch-up) and `coaching`
+          // (which already used broadcastToMeeting()) — never a single live
+          // `final` line after that. broadcastToMeeting() sends to the
+          // owner's own registered socket(s) in activeMeetingSockets AND any
+          // observer sockets in activeMeetingObservers, so this one-line
+          // change is the fix: owner behavior is 100% unchanged (still gets
+          // this message, still to the same socket), observers now do too.
+          broadcastToMeeting(meetingId, { type: 'final', text: groupText, speaker: groupLabel });
 
           // ── ARIA Priority 1 roadmap, item 5: Live rebuttal teleprompter ──────
           // Keep a short rolling context buffer of every finalized segment
@@ -2615,20 +2889,22 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
                 generateRebuttal(OPENROUTER_API_KEY, meetingId, objection.category, groupText, contextSnapshot)
                   .then(rebuttalText => {
                     if (!rebuttalText) return;
-                    if (socket.readyState === 1) {
-                      socket.send(JSON.stringify({
-                        type: 'suggested_rebuttal',
-                        objectionCategory: objection.category,
-                        objectionText: groupText,
-                        rebuttal: rebuttalText,
-                        // Explicit stub/real flag surfaced to the client so the UI
-                        // (and anyone reading a WS log) can tell detection was
-                        // heuristic even though the rebuttal text itself is real
-                        // LLM output. Remove once detectObjection() is replaced
-                        // with a real classifier.
-                        detectionMethod: 'stub_keyword_match',
-                      }));
-                    }
+                    // 2026-08-05 live-sync fix: broadcastToMeeting(), not
+                    // socket.send() — same class of bug as `final`/`interim`
+                    // above; an observer watching a mobile meeting deserves
+                    // the same rebuttal teleprompter the owner sees.
+                    broadcastToMeeting(meetingId, {
+                      type: 'suggested_rebuttal',
+                      objectionCategory: objection.category,
+                      objectionText: groupText,
+                      rebuttal: rebuttalText,
+                      // Explicit stub/real flag surfaced to the client so the UI
+                      // (and anyone reading a WS log) can tell detection was
+                      // heuristic even though the rebuttal text itself is real
+                      // LLM output. Remove once detectObjection() is replaced
+                      // with a real classifier.
+                      detectionMethod: 'stub_keyword_match',
+                    });
                   })
                   .catch(err => fastify.log.error('generateRebuttal error:', err.message));
               }
@@ -2651,10 +2927,10 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
         }
       } else {
         // Interim: use first speaker (splitting interims is too noisy)
+        // 2026-08-05 live-sync fix: broadcastToMeeting(), not socket.send()
+        // — same root-cause bug as `final` above.
         const interimLabel = speakerLocks[String(rawSpeakerIdx)] || `Speaker ${rawSpeakerIdx + 1}`;
-        if (socket.readyState === 1) {
-          socket.send(JSON.stringify({ type: 'interim', text, speaker: interimLabel }));
-        }
+        broadcastToMeeting(meetingId, { type: 'interim', text, speaker: interimLabel });
       }
     });
 

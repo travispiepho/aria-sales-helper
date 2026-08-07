@@ -24,7 +24,7 @@ import { createMeetingDoc } from './googleDocs.js';
 // TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_PHONE_NUMBER) are set. See
 // voicePrint.js / telephony.js module-level docs for full context.
 import * as pyannote from './voicePrint.js';
-import { registerTelephonyRoutes, isConfigured as isTwilioConfigured } from './telephony.js';
+import { registerTelephonyRoutes, isConfigured as isTwilioConfigured, configStatus as twilioConfigStatus } from './telephony.js';
 // ARIA Priority 1 roadmap (2026-08-05): BANT/closing-certainty, insider-
 // language flagger, question-listening gaps. See coachingAnalysis.js.
 import { analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebuttal } from './coachingAnalysis.js';
@@ -57,8 +57,11 @@ if (!pyannote.isConfigured()) {
   console.warn('WARN: PYANNOTE_API_KEY not set — pyannoteAI voiceprint identification is scaffolded but inactive.');
 }
 
-if (!isTwilioConfigured()) {
-  console.warn('WARN: Twilio env vars (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_PHONE_NUMBER) not set — Aria Phone Channel routes are scaffolded but will return 503.');
+{
+  const twStatus = twilioConfigStatus();
+  if (twStatus.status !== 'configured') {
+    console.warn(`WARN: Twilio ${twStatus.status} — missing: ${twStatus.missing.join(', ')}. Aria Phone Channel routes will return 503 until phone_number/twiml_app_sid arrive.`);
+  }
 }
 
 if (!OPENROUTER_API_KEY) {
@@ -721,7 +724,10 @@ fastify.get('/health', async (request, reply) => {
       deepgram: DEEPGRAM_API_KEY ? 'configured' : 'missing',
       anthropic: ANTHROPIC_API_KEY ? 'configured' : 'missing (summary will stub)',
       pyannote: pyannote.isConfigured() ? 'configured' : 'missing (scaffolded, inactive)',
-      twilio: isTwilioConfigured() ? 'configured' : 'missing (scaffolded, inactive)',
+      twilio: (() => {
+        const s = twilioConfigStatus();
+        return s.status === 'configured' ? 'configured' : `${s.status} (missing: ${s.missing.join(', ')})`;
+      })(),
     };
   } catch (err) {
     reply.code(503).send({ status: 'error', db: 'disconnected', error: err.message });

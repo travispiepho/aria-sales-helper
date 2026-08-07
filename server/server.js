@@ -907,8 +907,27 @@ fastify.post('/api/meetings', { preHandler: [requireAuth] }, async (request, rep
   return reply.code(201).send(shapeMeetingForClient(meetingRow, ownerSessionId));
 });
 
+// GET /api/meetings — 2026-08-07: added limit+offset pagination so older
+// meetings (beyond the frontend's original unbounded-but-effectively-
+// "recent" list) become reachable. Chosen over cursor-based pagination as
+// the lowest-risk option matching this endpoint's existing simple
+// SELECT + ORDER BY started_at DESC pattern — no new indexes or schema
+// changes required, and started_at DESC + LIMIT/OFFSET is stable enough
+// for a rep's own meeting history (no concurrent high-frequency inserts
+// racing pagination the way a global feed might see).
+// Fetches `limit + 1` rows so `hasMore` can be derived from the extra row
+// without a separate COUNT(*) query, then trims back to `limit` before
+// responding. Response shape changed from a bare array to
+// `{ meetings, hasMore, limit, offset }` — the only frontend consumer
+// (web/src/lib/api.ts's listMeetings()) is updated in this same pass.
 fastify.get('/api/meetings', { preHandler: [requireAuth] }, async (request, reply) => {
   const { role, id } = request.user;
+
+  const rawLimit = parseInt(request.query?.limit, 10);
+  const rawOffset = parseInt(request.query?.offset, 10);
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 100) : 20;
+  const offset = Number.isFinite(rawOffset) ? Math.max(rawOffset, 0) : 0;
+
   let result;
 
   if (role === 'admin') {
@@ -917,7 +936,9 @@ fastify.get('/api/meetings', { preHandler: [requireAuth] }, async (request, repl
        FROM meetings m
        LEFT JOIN users u ON m.rep_id = u.id
        LEFT JOIN customers c ON m.customer_id = c.id
-       ORDER BY m.started_at DESC`
+       ORDER BY m.started_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit + 1, offset]
     );
   } else {
     result = await pool.query(
@@ -926,13 +947,22 @@ fastify.get('/api/meetings', { preHandler: [requireAuth] }, async (request, repl
        LEFT JOIN users u ON m.rep_id = u.id
        LEFT JOIN customers c ON m.customer_id = c.id
        WHERE m.rep_id = $1
-       ORDER BY m.started_at DESC`,
-      [id]
+       ORDER BY m.started_at DESC
+       LIMIT $2 OFFSET $3`,
+      [id, limit + 1, offset]
     );
   }
 
+  const hasMore = result.rows.length > limit;
+  const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
+
   const requestSessionId = request.cookies?.session_id || null;
-  return result.rows.map(row => shapeMeetingForClient(row, requestSessionId));
+  return {
+    meetings: rows.map(row => shapeMeetingForClient(row, requestSessionId)),
+    hasMore,
+    limit,
+    offset,
+  };
 });
 
 // ── Live meeting sync (mobile → web), 2026-08-05: REST catch-up/fallback ────

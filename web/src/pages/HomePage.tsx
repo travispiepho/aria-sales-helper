@@ -40,6 +40,22 @@ export default function HomePage() {
   const [starting, setStarting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  // 2026-08-07: pagination state for the "Recent" list — backend now
+  // returns limit+offset pages (see api.ts's listMeetings/MeetingsPage)
+  // instead of one unbounded/recent-only array. A "Load more" button
+  // (rather than infinite-scroll) was chosen deliberately: this list
+  // renders inside a page that already scrolls with the rest of the
+  // Home screen (Start Meeting CTA + Today's list above it), so an
+  // IntersectionObserver-driven auto-load risks firing while the user is
+  // simply scrolling past unrelated content above, or double-firing on
+  // fast scroll/loading-state races — a plain button is a much smaller,
+  // easier-to-get-right surface for the time available, with identical
+  // end-user capability (reach older meetings) and no risk of an
+  // unexpected/uncontrolled fetch loop.
+  const PAGE_SIZE = 20;
+  const [pageOffset, setPageOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   async function handleDownload(e: React.MouseEvent, m: Meeting) {
     e.stopPropagation();
@@ -124,12 +140,34 @@ export default function HomePage() {
 
   async function loadMeetings() {
     try {
-      const data = await listMeetings();
-      setMeetings(data);
+      const page = await listMeetings(0, PAGE_SIZE);
+      setMeetings(page.meetings);
+      setHasMore(page.hasMore);
+      setPageOffset(page.meetings.length);
     } catch {
       // silent
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadMoreMeetings() {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const page = await listMeetings(pageOffset, PAGE_SIZE);
+      // De-dupe defensively in case a meeting shifted pages between
+      // requests (e.g. a brand-new meeting was created in between).
+      setMeetings(prev => {
+        const seen = new Set(prev.map(m => m.id));
+        return [...prev, ...page.meetings.filter(m => !seen.has(m.id))];
+      });
+      setHasMore(page.hasMore);
+      setPageOffset(prev => prev + page.meetings.length);
+    } catch {
+      // silent — leave hasMore as-is so the user can retry the button
+    } finally {
+      setLoadingMore(false);
     }
   }
 
@@ -258,7 +296,6 @@ export default function HomePage() {
             <div className="space-y-3">
               {meetings
                 .filter(m => new Date(m.started_at).toDateString() !== todayStr)
-                .slice(0, 5)
                 .map(m => (
                   <div key={m.id} className="relative group">
                     <button
@@ -300,6 +337,15 @@ export default function HomePage() {
                   </div>
                 ))}
             </div>
+            {hasMore && (
+              <button
+                onClick={loadMoreMeetings}
+                disabled={loadingMore}
+                className="w-full mt-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-60 transition-colors"
+              >
+                {loadingMore ? 'Loading…' : 'Load more'}
+              </button>
+            )}
           </div>
         )}
       </div>

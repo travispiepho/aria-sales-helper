@@ -131,8 +131,21 @@ export async function createMeeting(customerId?: string): Promise<Meeting> {
   return request('POST', '/api/meetings', { customer_id: customerId });
 }
 
-export async function listMeetings(): Promise<Meeting[]> {
-  return request('GET', '/api/meetings');
+// 2026-08-07: /api/meetings now paginates (limit+offset) so older meetings
+// are reachable instead of an unbounded "recent-only" list — see
+// server.js's GET /api/meetings for the backend side. Response shape
+// changed from a bare Meeting[] to { meetings, hasMore, limit, offset };
+// this wrapper's return type follows suit. HomePage.tsx (the only caller)
+// is updated in this same pass to page via a "Load more" button.
+export interface MeetingsPage {
+  meetings: Meeting[];
+  hasMore: boolean;
+  limit: number;
+  offset: number;
+}
+
+export async function listMeetings(offset = 0, limit = 20): Promise<MeetingsPage> {
+  return request('GET', `/api/meetings?limit=${limit}&offset=${offset}`);
 }
 
 export async function getMeeting(id: string): Promise<Meeting> {

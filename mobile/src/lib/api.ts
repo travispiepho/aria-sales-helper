@@ -201,8 +201,17 @@ export async function createMeeting(customerId?: string): Promise<Meeting> {
   return request('POST', '/api/meetings', { customer_id: customerId, origin_client: 'mobile' });
 }
 
+// 2026-08-07: GET /api/meetings now returns a paginated
+// { meetings, hasMore, limit, offset } envelope (see aria-web's
+// pagination pass in server.js + app/web/src/lib/api.ts) instead of a
+// bare array. Mobile's history screen ((tabs)/index.tsx) is out of scope
+// for adding pagination UI in that same pass, but must not break against
+// the now-shared backend contract — this just unwraps `.meetings` and
+// keeps mobile's existing "show what the server gives us" behavior
+// (first page, i.e. the most recent `limit` meetings) unchanged.
 export async function listMeetings(): Promise<Meeting[]> {
-  return request('GET', '/api/meetings');
+  const page = await request<{ meetings: Meeting[] }>('GET', '/api/meetings');
+  return page.meetings;
 }
 
 export async function getMeeting(id: string): Promise<Meeting> {

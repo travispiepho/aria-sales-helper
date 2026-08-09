@@ -55,6 +55,10 @@ export async function getMe(): Promise<{ user: User }> {
   return request('GET', '/api/auth/me');
 }
 
+export async function changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
+  return request('PATCH', '/api/account/password', { currentPassword, newPassword });
+}
+
 // Customers
 
 export interface Customer {

@@ -805,6 +805,46 @@ fastify.get('/api/auth/me', { preHandler: [requireAuth] }, async (request, reply
   return { user: request.user, sessionId: request.cookies?.session_id };
 });
 
+// PATCH /api/account/password — self-service password change.
+// Requires the CURRENT password to be re-verified server-side before the
+// change is applied (standard defense-in-depth: a hijacked/stolen session
+// cookie alone is not sufficient to lock the real owner out by rotating
+// their password). Works for any authenticated user regardless of role
+// (rep or admin) — this is a self-service "change MY OWN password" route,
+// not an admin-changes-another-user's-password route (that's part of the
+// separate, not-yet-built "add/delete accounts" admin-management work).
+fastify.patch('/api/account/password', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { currentPassword, newPassword } = request.body || {};
+
+  if (!currentPassword || !newPassword) {
+    return reply.code(400).send({ error: 'currentPassword and newPassword are required' });
+  }
+  if (typeof newPassword !== 'string' || newPassword.length < 8) {
+    return reply.code(400).send({ error: 'newPassword must be at least 8 characters' });
+  }
+
+  const result = await pool.query('SELECT id, password_hash FROM users WHERE id = $1', [request.user.id]);
+  if (result.rows.length === 0) {
+    return reply.code(401).send({ error: 'Unauthorized' });
+  }
+  const user = result.rows[0];
+
+  const valid = await bcrypt.compare(currentPassword, user.password_hash);
+  if (!valid) {
+    return reply.code(401).send({ error: 'Current password is incorrect' });
+  }
+
+  const sameAsOld = await bcrypt.compare(newPassword, user.password_hash);
+  if (sameAsOld) {
+    return reply.code(400).send({ error: 'New password must be different from the current password' });
+  }
+
+  const newHash = await bcrypt.hash(newPassword, 10);
+  await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, user.id]);
+
+  return { ok: true };
+});
+
 // ─── Voice print routes ─────────────────────────────────────────────────────────
 
 // GET /api/profile/voice-print — check enrollment status

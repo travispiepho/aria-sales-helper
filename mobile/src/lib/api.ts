@@ -160,6 +160,10 @@ export async function getMe(): Promise<{ user: User; sessionId?: string }> {
   return result;
 }
 
+export async function changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
+  return request('PATCH', '/api/account/password', { currentPassword, newPassword });
+}
+
 export async function getCachedUser(): Promise<User | null> {
   const raw = await secureStore.getItemAsync(CACHED_USER_KEY);
   if (!raw) return null;

@@ -27,8 +27,18 @@
  * behaves as expected in practice (timing, file I/O latency, WAV header
  * correctness for a real short recording) — that requires a real device.
  *
- * No reconnect/backoff logic yet (present in the web app, not ported here —
- * out of scope for this pass; flagged as a known gap, see report).
+ * (2026-08-10) WS auto-reconnect with exponential backoff — ported from the
+ * web PWA's `connectWebSocket()`/`ws.onclose` pattern in
+ * app/web/src/pages/MeetingPage.tsx (same delay formula: 1000ms *
+ * 2^attempts, capped at 10000ms, reset to 0 on a successful `onopen`).
+ * Previously this screen had NO reconnect logic at all — any transient
+ * disconnect (the 8/9 outage's 502s/dial-timeouts being the motivating
+ * case) went straight to the 'ws-error' terminal stage with no retry,
+ * unlike web. Only retries while still actively recording and not an
+ * intentional user-initiated close (`endedIntentionallyRef`); gives up and
+ * shows the existing 'ws-error' UI once `MAX_RECONNECT_ATTEMPTS` is
+ * exceeded, matching the circuit-breaker-style ceiling added server-side
+ * for the analogous Deepgram reconnect loop this same night.
  *
  * ── (2026-08-05) Leave-app-while-recording guard ───────────────────────────
  * Unlike the web PWA (which holds a Screen Wake Lock — see
@@ -123,6 +133,13 @@ type Stage =
   | 'creating-meeting'
   | 'connecting-ws'
   | 'connected'
+  // (2026-08-10) distinct from 'ws-error': a transient disconnect that is
+  // actively being retried via exponential backoff (see file header +
+  // connectWebSocket() below), matching web's separate 'reconnecting'
+  // connectionStatus in app/web/src/pages/MeetingPage.tsx. 'ws-error' is now
+  // reserved for the terminal case — initial connect failure, or giving up
+  // after MAX_RECONNECT_ATTEMPTS.
+  | 'reconnecting'
   | 'ws-error'
   | 'ended';
 
@@ -154,6 +171,18 @@ export default function MeetingScreen() {
   const wsRef = useRef<WebSocket | null>(null);
   const streamerRef = useRef<ChunkedPcmStreamer | null>(null);
   const segmentCounter = useRef(0);
+  // (2026-08-10) WS auto-reconnect — mirrors app/web/src/pages/MeetingPage.tsx's
+  // reconnectAttemptsRef/reconnectTimerRef exactly (see file header). Reset
+  // to 0 on a successful `onopen`; incremented on every reconnect attempt;
+  // capped at MAX_RECONNECT_ATTEMPTS before giving up.
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isRecordingRef = useRef(false);
+  const wsUrlRef = useRef<string | null>(null);
+  // True once the WS has reached 'connected' at least once for the current
+  // meeting — used only to gate the one-time leave-app warning below so a
+  // mid-meeting reconnect doesn't re-show it.
+  const hasConnectedOnceRef = useRef(false);
   // ── Smart auto-scroll (mirrors app/web/src/pages/MeetingPage.tsx's
   // `userScrolledUpRef` + `handleTranscriptScroll()` pattern exactly): the
   // transcript ScrollView auto-scrolls to the bottom as new lines/interim
@@ -174,6 +203,17 @@ export default function MeetingScreen() {
   // the ~15-word sentence once, short enough to not linger and compete with
   // the transcript/status UI for the rest of the meeting.
   const LEAVE_WARNING_VISIBLE_MS = 4000;
+  // (2026-08-10) WS reconnect tuning — same delay formula/cap as web's
+  // connectWebSocket() (see file header): 1000ms * 2^attempts, capped at
+  // 10000ms. MAX_RECONNECT_ATTEMPTS is a ceiling web doesn't have (web just
+  // retries forever while isRecordingRef is true) — added here as a small,
+  // additional safety net so a genuinely dead backend doesn't leave this
+  // screen retrying indefinitely in the background; 8 attempts at the
+  // capped 10s delay is a few minutes of retry coverage, comfortably
+  // longer than the ~35min 8/9 outage window's individual gap durations.
+  const RECONNECT_BASE_MS = 1000;
+  const RECONNECT_MAX_MS = 10000;
+  const MAX_RECONNECT_ATTEMPTS = 8;
   // Set synchronously by handleEnd() BEFORE ws.close() is called, so that by
   // the time the resulting onclose event fires, we can distinguish an
   // intentional user-initiated close (WS close code 1000, expected/normal)
@@ -187,8 +227,13 @@ export default function MeetingScreen() {
   const recorder = useAudioRecorder(getStreamingRecorderOptions());
 
   const cleanup = useCallback(() => {
+    isRecordingRef.current = false;
     streamerRef.current?.stop().catch(() => {});
     streamerRef.current = null;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     wsRef.current?.close();
     wsRef.current = null;
     if (leaveWarningTimerRef.current) {
@@ -264,6 +309,7 @@ export default function MeetingScreen() {
 
   async function handleStart() {
     endedIntentionallyRef.current = false;
+    hasConnectedOnceRef.current = false;
     setErrorMsg(null);
     setStreamWarning(null);
     setSegments([]);
@@ -329,25 +375,47 @@ export default function MeetingScreen() {
     const wsBase = getWsBase();
     const wsUrl = `${wsBase}/meetings/${created.id}/audio${sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''}`;
     console.log('[meeting ws] resolved wsBase =', wsBase, '| auth =', sessionId ? 'session-query-param' : 'cookie-only (no stored sessionId!)');
+    isRecordingRef.current = true;
+    reconnectAttemptsRef.current = 0;
+    connectWebSocket(wsUrl);
+  }
+
+  // (2026-08-10) Opens (or re-opens, on reconnect) the audio WS. Ported from
+  // app/web/src/pages/MeetingPage.tsx's `connectWebSocket()` — see file
+  // header. Called once from handleStart() above, and again by itself (via
+  // the reconnect timer in `ws.onclose` below) on every retry, reusing the
+  // SAME wsUrl (same meeting id, same session-id query param) — this only
+  // re-establishes the transport, it never re-creates the meeting or
+  // re-requests mic permission.
+  function connectWebSocket(wsUrl: string) {
+    const wsBase = getWsBase();
+    wsUrlRef.current = wsUrl;
+    setStage(reconnectAttemptsRef.current > 0 ? 'reconnecting' : 'connecting-ws');
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      reconnectAttemptsRef.current = 0;
       setStage('connected');
+      setErrorMsg(null);
 
       // One-time leave-app warning (see file header): fire right as
       // recording actually starts, auto-dismiss after
       // LEAVE_WARNING_VISIBLE_MS, and never show it again for the rest of
       // this meeting (does not re-trigger on later renders since it's not
-      // gated on `stage` any more).
-      setShowLeaveWarning(true);
-      if (leaveWarningTimerRef.current) clearTimeout(leaveWarningTimerRef.current);
-      leaveWarningTimerRef.current = setTimeout(() => {
-        setShowLeaveWarning(false);
-        leaveWarningTimerRef.current = null;
-      }, LEAVE_WARNING_VISIBLE_MS);
+      // gated on `stage` any more). Only on the FIRST connect — a
+      // reconnect mid-meeting shouldn't re-show this.
+      if (!hasConnectedOnceRef.current) {
+        hasConnectedOnceRef.current = true;
+        setShowLeaveWarning(true);
+        if (leaveWarningTimerRef.current) clearTimeout(leaveWarningTimerRef.current);
+        leaveWarningTimerRef.current = setTimeout(() => {
+          setShowLeaveWarning(false);
+          leaveWarningTimerRef.current = null;
+        }, LEAVE_WARNING_VISIBLE_MS);
+      }
 
-      // Step 4: start streaming real mic audio once the socket is open.
+      // Step 4: (re)start streaming real mic audio once the socket is open.
       // iOS only for now (see audioStream.ts header) — on Android we still
       // reach "connected" (proving the WS/auth pipe works) but surface a
       // clear, non-fatal warning instead of silently sending nothing or
@@ -374,12 +442,13 @@ export default function MeetingScreen() {
       // the real failure reason (if any) arrives on the subsequent 'close'
       // event as `code`/`reason` (see react-native/Libraries/WebSocket/WebSocket.js
       // websocketFailed handler). Log the raw event defensively in case a
-      // future RN/Expo version does attach detail here.
+      // future RN/Expo version does attach detail here. The actual
+      // stage/reconnect decision is made in onclose below, not here — same
+      // split web uses (onerror just flips a status, onclose does the retry
+      // logic) — so a transient error during an active recording doesn't
+      // jump straight to the terminal 'ws-error' stage before the retry
+      // logic below even runs.
       console.log('[meeting ws] onerror event:', evt);
-      setStage('ws-error');
-      // Set a fallback message only — onclose below unconditionally
-      // overwrites it with the real code/reason once it fires.
-      setErrorMsg(`WebSocket connection failed (base: ${wsBase}). Check network/backend URL.`);
     };
     ws.onclose = (evt: { code?: number; reason?: string }) => {
       console.log('[meeting ws] onclose code:', evt?.code, 'reason:', evt?.reason);
@@ -393,13 +462,38 @@ export default function MeetingScreen() {
         setStage('ended');
         return;
       }
-      // The user did NOT click "End Meeting" — this is a genuine unexpected
-      // disconnect (network drop, auth rejection codes like 4001/4003/4004,
-      // backend crash, etc.), so surface the error-styled UI.
-      setStage('ws-error');
+      if (!isRecordingRef.current) {
+        // Not actively recording (e.g. closed before ever reaching
+        // 'connected', or cleanup() already ran) — nothing to reconnect.
+        setStage('ws-error');
+        setErrorMsg(
+          `Connection closed (code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
+        );
+        return;
+      }
+      if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+        // Give up — same terminal 'ws-error' UI as before this change, just
+        // reached after retrying instead of immediately.
+        setStage('ws-error');
+        setErrorMsg(
+          `Lost connection and could not reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts ` +
+            `(last code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
+        );
+        return;
+      }
+      // Auto-reconnect with exponential backoff, cap at 10s — same formula
+      // as web's connectWebSocket()/ws.onclose (see file header).
+      setStage('reconnecting');
       setErrorMsg(
-        `Connection closed (code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
+        `Connection lost (code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Reconnecting…`
       );
+      const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttemptsRef.current), RECONNECT_MAX_MS);
+      reconnectAttemptsRef.current += 1;
+      reconnectTimerRef.current = setTimeout(() => {
+        if (isRecordingRef.current && wsUrlRef.current) {
+          connectWebSocket(wsUrlRef.current);
+        }
+      }, delay);
     };
     ws.onmessage = (evt) => {
       handleWsMessage(evt.data);
@@ -575,11 +669,20 @@ export default function MeetingScreen() {
               this-same-screen cases (never started yet, or a real recoverable
               error), unlike 'ended' which means the recording already
               completed successfully. */}
+          {/* (2026-08-10) 'reconnecting' added to the End-Meeting branch,
+              not the Start-Meeting branch — mirrors web's isRecording-gated
+              (not connectionStatus-gated) record button, see
+              app/web/src/pages/MeetingPage.tsx: a transient reconnect is
+              still an active, in-progress recording from the user's
+              perspective, and they must still be able to tap End Meeting
+              (which tears down the reconnect timer via cleanup()) rather
+              than being shown the Start-Meeting button as if nothing were
+              recording. */}
           {stage === 'idle' || stage === 'mic-denied' || stage === 'ws-error' ? (
             <Pressable onPress={handleStart} style={[styles.button, styles.startButton]}>
               <ThemedText style={styles.buttonText}>🎙️ Start Meeting</ThemedText>
             </Pressable>
-          ) : stage === 'connected' ? (
+          ) : stage === 'connected' || stage === 'reconnecting' ? (
             <Pressable onPress={handleEnd} style={[styles.button, styles.endButton]}>
               <ThemedText style={styles.buttonText}>⏹ End Meeting</ThemedText>
             </Pressable>
@@ -658,6 +761,8 @@ function stageLabel(stage: Stage): string {
       return 'Creating meeting…';
     case 'connecting-ws':
       return 'Connecting…';
+    case 'reconnecting':
+      return 'Reconnecting…';
     default:
       return '';
   }
@@ -675,6 +780,7 @@ function StatusRow({ stage }: { stage: Stage }) {
     // non-green, explicitly-worded status instead of "listening", so a user
     // never mistakes "WS connected" for "mic is actually capturing audio".
     connected: { label: 'Connected — listening', color: '#16A34A' },
+    reconnecting: { label: 'Reconnecting…', color: '#F59E0B' },
     'ws-error': { label: 'Connection error', color: '#DC2626' },
     ended: { label: 'Meeting ended', color: '#6B7280' },
   };

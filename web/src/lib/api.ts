@@ -93,6 +93,32 @@ export async function deleteAdminUser(id: string): Promise<DeleteAdminUserResult
   return request('DELETE', `/api/admin/users/${id}`);
 }
 
+// Admin: invite a new user (2026-08-10).
+//
+// ⚠️ STUB — the backend route this calls (POST /api/admin/invite) does NOT
+// send an email. It only persists an "invite intent" row so this flow is
+// testable end-to-end and duplicate invites/existing accounts are caught.
+// Wiring up a real email-sending service is explicitly out of scope for
+// this task (a separate task is scoping that). See server.js's route
+// comment for the full explanation.
+export type InviteRole = 'admin' | 'rep';
+
+export interface InviteUserResult {
+  ok: boolean;
+  invite: {
+    id: string;
+    email: string;
+    role: InviteRole;
+    invited_by: string;
+    created_at: string;
+    status: 'pending' | 'accepted' | 'revoked';
+  };
+}
+
+export async function inviteUser(email: string, role: InviteRole): Promise<InviteUserResult> {
+  return request('POST', '/api/admin/invite', { email, role });
+}
+
 // Customers
 
 export interface Customer {

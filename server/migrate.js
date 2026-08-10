@@ -40,6 +40,22 @@ CREATE TABLE IF NOT EXISTS users (
 -- get it via CREATE TABLE; upgrades get it via this ALTER).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
 
+-- 2026-08-10: admin "invite a new user" feature — POST /api/admin/invite.
+-- STUB persistence only: no email is sent by that route yet (see
+-- server.js's route comment). This table just records invite intent so
+-- the admin UI has a real success/duplicate-check flow to test against.
+CREATE TABLE IF NOT EXISTS invites (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'rep' CHECK (role IN ('rep', 'admin')),
+  invited_by UUID NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'revoked'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS invites_pending_email_unique
+ON invites (LOWER(email))
+WHERE status = 'pending';
+
 CREATE TABLE IF NOT EXISTS customers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,

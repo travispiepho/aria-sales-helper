@@ -1,14 +1,23 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
-import { listAdminUsers, deleteAdminUser, AdminUser } from '../lib/api';
+import { listAdminUsers, deleteAdminUser, inviteUser, AdminUser, InviteRole } from '../lib/api';
 
 // AdminUsersPage — 2026-08-10.
 //
-// Minimal admin-only account list, currently exposing DELETE (soft-delete
-// via DELETE /api/admin/users/:id). The queued follow-up task will add
-// "add new account" on this same page; that flow deliberately isn't
-// wired up here yet to keep this ship-piece focused on the delete flow.
+// Admin-only account list (soft-delete via DELETE /api/admin/users/:id)
+// PLUS the "invite a new user" flow (POST /api/admin/invite) added in this
+// same pass, per Gabe's request: an admin-only email textbox + role picker
+// (Admin/Sales Rep) + Invite button on this page.
+//
+// ⚠️ IMPORTANT — the invite flow below is FRONTEND + STUB BACKEND ONLY.
+// No email is actually sent. POST /api/admin/invite just records the
+// invite intent in a new `invites` table (email, role, invited_by,
+// created_at, status) so this UI is fully testable end-to-end (including
+// the duplicate-email / already-invited error paths) without requiring
+// a real email-sending integration, which is explicitly scoped to a
+// separate task. The success state below intentionally says "Invite
+// recorded", never "email sent".
 //
 // UI patterns intentionally mirror ProfilePage.tsx: brand-700 header
 // with back arrow, rounded-2xl cards on gray-50, red destructive style
@@ -17,6 +26,9 @@ import { listAdminUsers, deleteAdminUser, AdminUser } from '../lib/api';
 // pattern). Non-admins who somehow reach /admin/users get a friendly
 // 403 explanation instead of an empty page — the server also enforces
 // this, so hand-crafting a URL doesn't leak anything.
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export default function AdminUsersPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -26,6 +38,13 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // ── Invite a new user ──────────────────────────────────────────────────
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<InviteRole | null>(null);
+  const [inviteFieldError, setInviteFieldError] = useState<string | null>(null);
+  const [inviting, setInviting] = useState(false);
+  const [inviteFlash, setInviteFlash] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   async function load() {
     setError(null);
@@ -93,6 +112,47 @@ export default function AdminUsersPage() {
     }
   }
 
+  async function handleInvite(e: React.FormEvent) {
+    e.preventDefault();
+    setInviteFlash(null);
+
+    // Client-side validation, per the task's explicit requirement: valid
+    // email format AND a role must be selected, both checked BEFORE we
+    // allow submit (i.e. before calling the API at all).
+    const trimmedEmail = inviteEmail.trim();
+    if (!trimmedEmail) {
+      setInviteFieldError('Enter an email address.');
+      return;
+    }
+    if (!EMAIL_RE.test(trimmedEmail)) {
+      setInviteFieldError('Enter a valid email address.');
+      return;
+    }
+    if (!inviteRole) {
+      setInviteFieldError('Choose a role: Admin or Sales Rep.');
+      return;
+    }
+    setInviteFieldError(null);
+
+    setInviting(true);
+    try {
+      const result = await inviteUser(trimmedEmail, inviteRole);
+      // Deliberately "Invite recorded", NOT "email sent" — the backend
+      // stub does not send an email yet (see file header comment).
+      setInviteFlash({
+        type: 'success',
+        text: `✅ Invite recorded for ${result.invite.email} (${result.invite.role === 'admin' ? 'Admin' : 'Sales Rep'}). Email delivery isn't wired up yet — this only saved the pending invite.`,
+      });
+      setInviteEmail('');
+      setInviteRole(null);
+    } catch (err: unknown) {
+      const text = err instanceof Error ? err.message : 'Failed to record invite';
+      setInviteFlash({ type: 'error', text: `❌ ${text}` });
+    } finally {
+      setInviting(false);
+    }
+  }
+
   // Non-admin fallback — friendly explanation instead of a blank page.
   // Server also returns 403 so this is a UX niceness, not a security gate.
   if (!loading && user?.role !== 'admin') {
@@ -140,6 +200,89 @@ export default function AdminUsersPage() {
       </div>
 
       <div className="px-4 py-6 max-w-lg mx-auto space-y-4">
+        {/* Invite a new user — 2026-08-10. STUB: no email is sent yet;
+            see file header comment. */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+          <h2 className="font-semibold text-gray-900 mb-1">Invite a new user</h2>
+          <p className="text-xs text-gray-400 mb-4">
+            Sends a signup link so they can create an account and password.
+          </p>
+
+          {inviteFlash && (
+            <div
+              className={`rounded-xl px-3 py-2 mb-3 text-sm ${
+                inviteFlash.type === 'success'
+                  ? 'bg-green-50 border border-green-200 text-green-800'
+                  : 'bg-red-50 border border-red-200 text-red-700'
+              }`}
+            >
+              {inviteFlash.text}
+            </div>
+          )}
+
+          <form onSubmit={handleInvite} className="space-y-3">
+            <div>
+              <label htmlFor="invite-email" className="sr-only">
+                Email address to invite
+              </label>
+              <input
+                id="invite-email"
+                type="email"
+                inputMode="email"
+                autoComplete="off"
+                placeholder="name@example.com"
+                value={inviteEmail}
+                onChange={(e) => {
+                  setInviteEmail(e.target.value);
+                  if (inviteFieldError) setInviteFieldError(null);
+                }}
+                disabled={inviting}
+                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+            </div>
+
+            {/* Role picker toggle: Admin vs Sales Rep — exactly the two
+                roles the `users.role` CHECK constraint allows. */}
+            <div className="flex gap-2" role="radiogroup" aria-label="Role for the invited user">
+              {(['admin', 'rep'] as const).map((r) => {
+                const selected = inviteRole === r;
+                return (
+                  <button
+                    key={r}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => {
+                      setInviteRole(r);
+                      if (inviteFieldError) setInviteFieldError(null);
+                    }}
+                    disabled={inviting}
+                    className={`flex-1 text-sm font-semibold py-2 rounded-xl border transition-colors ${
+                      selected
+                        ? 'bg-brand-700 text-white border-brand-700'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-brand-300'
+                    }`}
+                  >
+                    {r === 'admin' ? 'Admin' : 'Sales Rep'}
+                  </button>
+                );
+              })}
+            </div>
+
+            {inviteFieldError && (
+              <p className="text-xs text-red-600">{inviteFieldError}</p>
+            )}
+
+            <button
+              type="submit"
+              disabled={inviting}
+              className="w-full bg-brand-700 hover:bg-brand-800 text-white font-semibold py-2.5 rounded-xl text-sm disabled:opacity-50"
+            >
+              {inviting ? 'Sending…' : 'Invite'}
+            </button>
+          </form>
+        </div>
+
         {flash && (
           <div
             className={`rounded-2xl px-4 py-3 text-sm ${

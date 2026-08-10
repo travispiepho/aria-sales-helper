@@ -613,6 +613,30 @@ async function ensureSessionsTable() {
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ
   `);
+  // Invites table (added 2026-08-10, part of the admin "invite a new user"
+  // feature — POST /api/admin/invite). This is a STUB persistence layer
+  // only: no email is actually sent by this route yet (see the route
+  // comment below for the full explanation). Recording the invite here
+  // lets us (a) show the admin a real success/pending state, and (b)
+  // prevent duplicate invites to the same still-pending email, without
+  // requiring any email-sending integration to exist yet.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invites (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      email TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('rep', 'admin')),
+      invited_by UUID NOT NULL REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'revoked'))
+    )
+  `);
+  // Case-insensitive dup-check support: one pending invite per email at a
+  // time (a revoked/accepted row doesn't block a fresh re-invite).
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS invites_pending_email_unique
+    ON invites (LOWER(email))
+    WHERE status = 'pending'
+  `);
 }
 
 async function createSession(userId) {
@@ -1001,6 +1025,88 @@ fastify.delete('/api/admin/users/:id', { preHandler: [requireAuth] }, async (req
   }
 });
 
+// POST /api/admin/invite — record an intent to invite a new user.
+//
+// ⚠️ STUB — NO EMAIL IS ACTUALLY SENT BY THIS ROUTE. ⚠️
+// This is the minimal backend piece for the admin "invite a new user" UI
+// (Gabe's request: admin-only email textbox + role picker + Invite
+// button). There is no email-sending capability anywhere else in this
+// codebase either (checked before writing this — no SendGrid/SES/Postmark/
+// nodemailer/etc. integration exists), and wiring one up is explicitly
+// OUT OF SCOPE for this task (a separate task is scoping the actual email
+// service). So this route validates the request, checks for an existing
+// account or an already-pending invite for that email, and persists an
+// `invites` row with status='pending' — that's it. It returns success
+// once the row is saved so the frontend flow is fully testable end-to-end,
+// but the response/UI copy deliberately says "invite recorded", never
+// "email sent", because none was. Whoever wires up real email sending
+// later should: look up pending invites here, generate a signup token,
+// send the actual email, and flip status to 'accepted' once the invitee
+// completes signup.
+fastify.post('/api/admin/invite', { preHandler: [requireAuth] }, async (request, reply) => {
+  if (request.user.role !== 'admin') {
+    return reply.code(403).send({ error: 'Admin access required' });
+  }
+
+  const { email, role } = request.body || {};
+
+  if (typeof email !== 'string' || !email.trim()) {
+    return reply.code(400).send({ error: 'email is required' });
+  }
+  // Same pragmatic email-format check used client-side — kept intentionally
+  // simple (not a full RFC 5322 validator) since the only thing that
+  // matters server-side is "not obviously garbage", the same bar other
+  // routes in this file hold user-supplied strings to.
+  const normalizedEmail = email.trim().toLowerCase();
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!EMAIL_RE.test(normalizedEmail)) {
+    return reply.code(400).send({ error: 'Please enter a valid email address' });
+  }
+
+  if (role !== 'admin' && role !== 'rep') {
+    return reply.code(400).send({ error: 'role must be "admin" or "rep"' });
+  }
+
+  // Guard 1: an account with this email already exists (active OR
+  // deactivated — re-inviting a soft-deleted email is a deliberate
+  // separate decision, not this button's job).
+  const existingUser = await pool.query(
+    'SELECT id FROM users WHERE LOWER(email) = $1',
+    [normalizedEmail]
+  );
+  if (existingUser.rows.length > 0) {
+    return reply.code(409).send({ error: 'An account with this email already exists' });
+  }
+
+  // Guard 2: an invite for this email is already pending.
+  const existingInvite = await pool.query(
+    "SELECT id FROM invites WHERE LOWER(email) = $1 AND status = 'pending'",
+    [normalizedEmail]
+  );
+  if (existingInvite.rows.length > 0) {
+    return reply.code(409).send({ error: 'An invite is already pending for this email' });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO invites (email, role, invited_by, status)
+       VALUES ($1, $2, $3, 'pending')
+       RETURNING id, email, role, invited_by, created_at, status`,
+      [normalizedEmail, role, request.user.id]
+    );
+    return reply.code(201).send({ ok: true, invite: result.rows[0] });
+  } catch (err) {
+    // Race-condition backstop: the partial unique index on
+    // (LOWER(email)) WHERE status='pending' catches a concurrent
+    // double-submit that both passed the guard-2 SELECT above.
+    if (err.code === '23505') {
+      return reply.code(409).send({ error: 'An invite is already pending for this email' });
+    }
+    request.log.error({ err }, 'admin invite failed');
+    return reply.code(500).send({ error: 'Failed to record invite' });
+  }
+});
+
 // ─── Voice print routes ─────────────────────────────────────────────────────────
 
 // GET /api/profile/voice-print — check enrollment status
@@ -1038,8 +1144,26 @@ fastify.delete('/api/profile/voice-print', { preHandler: [requireAuth] }, async 
 // ─── Meeting routes ───────────────────────────────────────────────────────────
 
 fastify.post('/api/meetings', { preHandler: [requireAuth] }, async (request, reply) => {
-  const { customer_id, origin_client } = request.body || {};
+  const { customer_id, origin_client, channel } = request.body || {};
   const repId = request.user.id;
+
+  // (2026-08-10) `channel` — reuses the EXISTING `meetings.channel` column
+  // (see migrations/2026-08-04-phone-channel-columns.sql — despite that
+  // file's own "PROPOSED / SKETCH ONLY" header, this column IS live in prod;
+  // confirmed via a direct information_schema query against the meetings
+  // table). Previously NO caller (mobile or web) ever sent this field, so
+  // every meeting silently fell through to the column's DB default,
+  // `'in_person'` — including phone-channel meetings once mobile adds a
+  // caller that can actually set 'phone' (see the new pre-record
+  // meeting-setup step in mobile/src/app/meeting-setup.tsx). Validated
+  // against the same CHECK constraint values the column already enforces
+  // so a bad/typo'd value fails fast with a clear 400 here rather than a
+  // less legible Postgres constraint-violation error.
+  const validChannels = ['in_person', 'phone'];
+  if (channel !== undefined && !validChannels.includes(channel)) {
+    return reply.code(400).send({ error: `Invalid channel "${channel}" — must be one of: ${validChannels.join(', ')}` });
+  }
+  const meetingChannel = channel || 'in_person';
 
   // ── Live meeting sync (mobile → web), 2026-08-05 ──────────────────────────
   // `owner_session_id` records WHICH logged-in session created this meeting
@@ -1061,18 +1185,21 @@ fastify.post('/api/meetings', { preHandler: [requireAuth] }, async (request, rep
   let meetingRow;
   try {
     const result = await pool.query(
-      `INSERT INTO meetings (customer_id, rep_id, status, owner_session_id, origin_client)
-       VALUES ($1, $2, 'active', $3, $4)
+      `INSERT INTO meetings (customer_id, rep_id, status, owner_session_id, origin_client, channel)
+       VALUES ($1, $2, 'active', $3, $4, $5)
        RETURNING *`,
-      [customer_id || null, repId, ownerSessionId, originClient]
+      [customer_id || null, repId, ownerSessionId, originClient, meetingChannel]
     );
     meetingRow = result.rows[0];
   } catch (err) {
     if (err.code === '42703') {
-      // owner_session_id/origin_client columns not yet migrated in this DB
-      // — fall back to the pre-sync-feature insert so meeting creation is
-      // never blocked on that pending migration.
-      fastify.log.warn('meetings.owner_session_id/origin_client columns missing (migration pending) — creating meeting without sync tracking.');
+      // owner_session_id/origin_client/channel columns not yet migrated in
+      // this DB — fall back to the pre-sync-feature insert so meeting
+      // creation is never blocked on a pending migration. Note: on this
+      // fallback path the caller's `channel` choice is silently dropped
+      // (same pre-existing behavior as origin_client on this path) since
+      // the column doesn't exist yet to write it to.
+      fastify.log.warn('meetings.owner_session_id/origin_client/channel columns missing (migration pending) — creating meeting without sync tracking or channel.');
       const fallback = await pool.query(
         `INSERT INTO meetings (customer_id, rep_id, status)
          VALUES ($1, $2, 'active')

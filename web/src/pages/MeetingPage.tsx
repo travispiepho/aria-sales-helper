@@ -1063,7 +1063,7 @@ export default function MeetingPage() {
                   className="space-y-2 max-h-64 overflow-y-auto"
                 >
                   {segments.map((seg, i) => (
-                    <div key={i} className="text-sm">
+                    <div key={`${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
                       <span className="font-semibold text-blue-700">
                         {getDisplayLabel(seg.speaker)}:
                       </span>{' '}
@@ -1102,7 +1102,7 @@ export default function MeetingPage() {
               ) : (
                 <div className="space-y-2 max-h-96 overflow-y-auto">
                   {segments.map((seg, i) => (
-                    <div key={i} className="text-sm">
+                    <div key={`${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
                       <span className="font-semibold text-blue-700">
                         {getDisplayLabel(seg.speaker)}:
                       </span>{' '}

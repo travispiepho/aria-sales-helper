@@ -6,6 +6,7 @@ import LoginPage from './pages/LoginPage';
 import HomePage from './pages/HomePage';
 import MeetingPage from './pages/MeetingPage';
 import ProfilePage from './pages/ProfilePage';
+import AdminUsersPage from './pages/AdminUsersPage';
 // 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
 // same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
 // live-testing it: "Instead of a popup, I would like an almost identical
@@ -121,6 +122,18 @@ export default function App() {
             element={
               <RequireAuth>
                 <ProfilePage />
+              </RequireAuth>
+            }
+          />
+          {/* Admin-only user management (2026-08-10). Server enforces
+              role === 'admin'; the page itself renders a friendly 403
+              card for a non-admin who somehow lands here, and quietly
+              redirects unauthenticated users via RequireAuth as usual. */}
+          <Route
+            path="/admin/users"
+            element={
+              <RequireAuth>
+                <AdminUsersPage />
               </RequireAuth>
             }
           />

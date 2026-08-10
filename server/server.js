@@ -598,6 +598,21 @@ async function ensureSessionsTable() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  // Soft-delete flag on users (added 2026-08-10, part of admin account
+  // deletion feature — DELETE /api/admin/users/:id). Chose soft-delete over
+  // hard delete because meetings.rep_id and customers.created_by are FK
+  // references to users(id) with NO ON DELETE clause (see migrate.js): a
+  // hard row DELETE would either FK-violate on any rep who has ever run a
+  // meeting, or force us to null out those references and orphan meeting
+  // attribution history (bad for a sales-coaching product where 'which rep
+  // ran the meeting' IS the data). This nullable column lets us mark an
+  // account as deleted while preserving all historical meeting/customer
+  // attribution intact. Login and the preHandler user-lookup below both
+  // filter WHERE deactivated_at IS NULL so a deactivated user can neither
+  // sign in fresh nor continue an already-open session.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ
+  `);
 }
 
 async function createSession(userId) {
@@ -690,11 +705,20 @@ await registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregister
 fastify.decorateRequest('user', null);
 
 fastify.addHook('preHandler', async (request, reply) => {
-  // Attach user to request if session cookie present
+  // Attach user to request if session cookie present.
+  // deactivated_at IS NULL filter (added 2026-08-10 with admin account-
+  // delete feature) ensures a soft-deleted user's still-valid session
+  // cookie stops resolving to a request.user, so requireAuth kicks them
+  // out with 401 on their next authenticated request even if we didn't
+  // catch/kill their session row on the delete side. Belt-and-suspenders
+  // vs the DELETE handler's explicit session cleanup for that same user.
   const sessionId = request.cookies?.session_id;
   const session = await getSession(sessionId);
   if (session) {
-    const result = await pool.query('SELECT id, name, email, role FROM users WHERE id = $1', [session.userId]);
+    const result = await pool.query(
+      'SELECT id, name, email, role FROM users WHERE id = $1 AND deactivated_at IS NULL',
+      [session.userId]
+    );
     if (result.rows.length > 0) {
       request.user = result.rows[0];
     }
@@ -749,6 +773,14 @@ fastify.post('/api/auth/login', async (request, reply) => {
   }
 
   const user = result.rows[0];
+  // Deactivated accounts (soft-deleted via DELETE /api/admin/users/:id) must
+  // not be able to log in. Deliberately return the SAME 401 'Invalid
+  // credentials' message as a wrong-password attempt to avoid leaking
+  // account-state information (i.e. so a random attacker can't distinguish
+  // 'user was deleted' from 'user never existed / wrong password').
+  if (user.deactivated_at) {
+    return reply.code(401).send({ error: 'Invalid credentials' });
+  }
   const valid = await bcrypt.compare(password, user.password_hash);
   if (!valid) {
     return reply.code(401).send({ error: 'Invalid credentials' });
@@ -843,6 +875,130 @@ fastify.patch('/api/account/password', { preHandler: [requireAuth] }, async (req
   await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, user.id]);
 
   return { ok: true };
+});
+
+// ─── Admin: user management ─────────────────────────────────────────────────
+// Admin-only surface for listing accounts and soft-deleting them. Currently
+// exposes GET + DELETE only; the queued follow-up work will add POST
+// (create account) on this same URL prefix. Both routes gate on
+// requireAuth first, then explicitly re-check role === 'admin' inside the
+// handler (same pattern used everywhere else in this file for admin-only
+// branches, e.g. GET /api/meetings, GET /api/customers).
+//
+// Soft-delete rationale (see also the ALTER TABLE users ADD COLUMN
+// deactivated_at note in ensureSessionsTable()): meetings.rep_id and
+// customers.created_by reference users(id) with NO ON DELETE clause,
+// so a hard row DELETE either FK-violates or forces orphaning historical
+// attribution. This route flips deactivated_at to NOW() instead and
+// atomically kills any live sessions for the target user so a
+// currently-signed-in deactivated user is booted on their next request.
+
+fastify.get('/api/admin/users', { preHandler: [requireAuth] }, async (request, reply) => {
+  if (request.user.role !== 'admin') {
+    return reply.code(403).send({ error: 'Admin access required' });
+  }
+  const result = await pool.query(
+    `SELECT id, name, email, role, created_at, deactivated_at
+     FROM users
+     ORDER BY deactivated_at IS NULL DESC, created_at DESC`
+  );
+  return { users: result.rows };
+});
+
+fastify.delete('/api/admin/users/:id', { preHandler: [requireAuth] }, async (request, reply) => {
+  if (request.user.role !== 'admin') {
+    return reply.code(403).send({ error: 'Admin access required' });
+  }
+  const { id } = request.params;
+
+  // Guard 1: an admin cannot delete their own account. Doing so mid-session
+  // would also potentially strand the tenant with zero admins (see guard 2)
+  // and is a foot-gun regardless — self-deactivation should be its own
+  // deliberate flow, not a side effect of the user-list delete button.
+  if (id === request.user.id) {
+    return reply.code(400).send({ error: 'You cannot delete your own account' });
+  }
+
+  // Look up the target and enforce guard 2 in the same transaction-ish
+  // window. Race note: two concurrent admin-delete requests targeting the
+  // last two admins could each read admin_count=2 and each proceed to
+  // deactivate their target, leaving the tenant with zero admins. Fixed
+  // by re-checking admin_count AFTER the UPDATE inside the same connection
+  // and rolling back if it dropped to zero.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const targetResult = await client.query(
+      'SELECT id, name, email, role, deactivated_at FROM users WHERE id = $1 FOR UPDATE',
+      [id]
+    );
+    if (targetResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return reply.code(404).send({ error: 'User not found' });
+    }
+    const target = targetResult.rows[0];
+    if (target.deactivated_at) {
+      await client.query('ROLLBACK');
+      return reply.code(400).send({ error: 'User is already deactivated' });
+    }
+
+    // Guard 2: never let the last active admin be deactivated. Counted
+    // BEFORE the update so an already-deactivated admin doesn't count.
+    if (target.role === 'admin') {
+      const adminCount = await client.query(
+        "SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin' AND deactivated_at IS NULL"
+      );
+      if (adminCount.rows[0].n <= 1) {
+        await client.query('ROLLBACK');
+        return reply.code(400).send({
+          error: 'Cannot delete the last remaining admin account'
+        });
+      }
+    }
+
+    // Soft-delete: flip the flag, keep the row.
+    await client.query(
+      'UPDATE users SET deactivated_at = NOW() WHERE id = $1',
+      [id]
+    );
+
+    // Race-condition post-check (see comment above).
+    const postCheck = await client.query(
+      "SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin' AND deactivated_at IS NULL"
+    );
+    if (postCheck.rows[0].n < 1) {
+      await client.query('ROLLBACK');
+      return reply.code(400).send({
+        error: 'Cannot delete the last remaining admin account'
+      });
+    }
+
+    // Kill any live sessions for the deactivated user so an already-signed-
+    // in tab loses auth on its next request (belt to the preHandler's
+    // suspenders that also filters deactivated_at IS NULL).
+    const sessKill = await client.query(
+      'DELETE FROM sessions WHERE user_id = $1 RETURNING id',
+      [id]
+    );
+
+    await client.query('COMMIT');
+    return {
+      ok: true,
+      user: {
+        id: target.id,
+        name: target.name,
+        email: target.email,
+        role: target.role,
+      },
+      sessions_revoked: sessKill.rowCount,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    request.log.error({ err }, 'admin delete user failed');
+    return reply.code(500).send({ error: 'Failed to delete user' });
+  } finally {
+    client.release();
+  }
 });
 
 // ─── Voice print routes ─────────────────────────────────────────────────────────

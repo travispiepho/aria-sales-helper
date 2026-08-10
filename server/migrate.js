@@ -28,8 +28,17 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'rep' CHECK (role IN ('rep', 'admin')),
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  -- 2026-08-10: soft-delete flag for admin account deletion feature. NULL
+  -- for active accounts, set to NOW() when an admin deactivates a user via
+  -- DELETE /api/admin/users/:id. See server.js's ensureSessionsTable() for
+  -- the mirroring idempotent ALTER TABLE that keeps existing prod DBs in
+  -- sync on server boot.
+  deactivated_at TIMESTAMPTZ
 );
+-- Idempotent add for DBs that predate the column above (fresh installs
+-- get it via CREATE TABLE; upgrades get it via this ALTER).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS customers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

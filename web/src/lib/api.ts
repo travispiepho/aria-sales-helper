@@ -59,6 +59,40 @@ export async function changePassword(currentPassword: string, newPassword: strin
   return request('PATCH', '/api/account/password', { currentPassword, newPassword });
 }
 
+// Admin: user management (2026-08-10). Currently list + soft-delete only;
+// the queued follow-up work will add a create-account POST on the same
+// URL prefix. Both endpoints return 403 to non-admin callers server-side
+// (see server.js's request.user.role !== 'admin' guard), so a rep who
+// somehow lands on /admin/users will get an error instead of a list.
+
+export interface AdminUser {
+  id: string;
+  name: string;
+  email: string;
+  role: 'rep' | 'admin';
+  created_at: string;
+  // NULL for active accounts, ISO-8601 timestamp for soft-deleted ones.
+  deactivated_at: string | null;
+}
+
+export async function listAdminUsers(): Promise<{ users: AdminUser[] }> {
+  return request('GET', '/api/admin/users');
+}
+
+export interface DeleteAdminUserResult {
+  ok: boolean;
+  user: { id: string; name: string; email: string; role: 'rep' | 'admin' };
+  // Number of live session rows that were revoked as part of the delete
+  // (i.e. tabs the deactivated user had signed in on). Surfaced so the
+  // UI can show 'kicked out N sessions' in the confirmation toast; not
+  // load-bearing for correctness.
+  sessions_revoked: number;
+}
+
+export async function deleteAdminUser(id: string): Promise<DeleteAdminUserResult> {
+  return request('DELETE', `/api/admin/users/${id}`);
+}
+
 // Customers
 
 export interface Customer {

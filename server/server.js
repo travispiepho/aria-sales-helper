@@ -1872,7 +1872,7 @@ fastify.get('/api/meetings/:id/segments', { preHandler: [requireAuth] }, async (
     return reply.code(403).send({ error: 'Forbidden' });
   }
   const result = await pool.query(
-    `SELECT speaker, text, ts FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
+    `SELECT id, speaker, text, ts FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
     [id]
   );
   return { segments: result.rows };
@@ -2340,7 +2340,7 @@ fastify.get('/meetings/:meetingId/observe', { websocket: true }, async (socket, 
   // requiring the client to also call those REST routes itself.
   try {
     const segResult = await pool.query(
-      `SELECT speaker, text, ts FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
+      `SELECT id, speaker, text, ts FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
       [meetingId]
     );
     const coachingResult = await pool.query(
@@ -2913,11 +2913,19 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           }
 
           const groupLabel = speakerLocks[si] || `Speaker ${group.si + 1}`;
+          // 2026-08-09: capture the newly-inserted row's UUID (RETURNING id)
+          // so the 'final' broadcast below can carry the same stable id the
+          // REST /segments route and WS sync_snapshot now expose, instead of
+          // leaving live-pushed segments as the one path with no id. If the
+          // insert fails, insertedSegmentId stays undefined and the broadcast
+          // simply omits `id` (unchanged fallback behavior for that segment).
+          let insertedSegmentId;
           try {
-            await pool.query(
-              `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5)`,
+            const insertResult = await pool.query(
+              `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id`,
               [meetingId, groupLabel, groupText, groupWordCount, groupDurationMs]
             );
+            insertedSegmentId = insertResult.rows[0]?.id;
           } catch (dbErr) {
             fastify.log.error('transcript_segments insert error:', dbErr);
           }
@@ -2936,7 +2944,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           // observer sockets in activeMeetingObservers, so this one-line
           // change is the fix: owner behavior is 100% unchanged (still gets
           // this message, still to the same socket), observers now do too.
-          broadcastToMeeting(meetingId, { type: 'final', text: groupText, speaker: groupLabel });
+          broadcastToMeeting(meetingId, { type: 'final', id: insertedSegmentId, text: groupText, speaker: groupLabel });
 
           // ── ARIA Priority 1 roadmap, item 5: Live rebuttal teleprompter ──────
           // Keep a short rolling context buffer of every finalized segment

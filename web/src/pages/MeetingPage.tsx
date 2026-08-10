@@ -150,6 +150,7 @@ export default function MeetingPage() {
         }
         if (saved.length > 0) {
           setSegments(saved.map(s => ({
+            id: s.id,
             speaker: s.speaker,
             text: s.text,
             isFinal: true,
@@ -237,6 +238,12 @@ export default function MeetingPage() {
         setSegments(prev => [
           ...prev,
           {
+            // 2026-08-09: server now attaches the just-inserted DB row's
+            // UUID to the 'final' broadcast (see server.js). If the insert
+            // failed server-side, msg.id is undefined and this segment is
+            // the genuine remaining edge case that falls back to the
+            // composite key below (id-less live segment, no DB row).
+            id: msg.id,
             speaker: msg.speaker || 'Speaker',
             text: msg.text,
             isFinal: true,
@@ -398,6 +405,7 @@ export default function MeetingPage() {
         // flash — harmless either way since both sources agree, but avoids
         // a visible re-sort/re-render blip.
         setSegments(prev => (prev.length > 0 ? prev : (msg.segments || []).map((s: any) => ({
+          id: s.id,
           speaker: s.speaker,
           text: s.text,
           isFinal: true,
@@ -1063,7 +1071,13 @@ export default function MeetingPage() {
                   className="space-y-2 max-h-64 overflow-y-auto"
                 >
                   {segments.map((seg, i) => (
-                    <div key={`${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
+                    // 2026-08-09: prefer the real DB row id (now sent by REST
+                    // /segments, WS sync_snapshot, and WS 'final' broadcasts)
+                    // for a truly stable, collision-proof key. Fall back to
+                    // the ts+speaker+text composite from a8d21ed only for the
+                    // genuine remaining edge case: a live 'final' segment
+                    // whose server-side INSERT failed (msg.id undefined).
+                    <div key={seg.id ?? `${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
                       <span className="font-semibold text-blue-700">
                         {getDisplayLabel(seg.speaker)}:
                       </span>{' '}
@@ -1102,7 +1116,9 @@ export default function MeetingPage() {
               ) : (
                 <div className="space-y-2 max-h-96 overflow-y-auto">
                   {segments.map((seg, i) => (
-                    <div key={`${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
+                    // 2026-08-09: see live-view comment above — same real-id
+                    // preference, same genuine fallback edge case.
+                    <div key={seg.id ?? `${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
                       <span className="font-semibold text-blue-700">
                         {getDisplayLabel(seg.speaker)}:
                       </span>{' '}

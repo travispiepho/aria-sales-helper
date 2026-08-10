@@ -157,6 +157,7 @@ export async function getMeeting(id: string): Promise<Meeting> {
 }
 
 export interface TranscriptSegment {
+  id?: string;
   speaker: string;
   text: string;
   ts: string;

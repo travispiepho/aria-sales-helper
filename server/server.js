@@ -2672,8 +2672,27 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   let reconnectTimer = null;
   let reconnectAttempts = 0;
 
+  // 2026-08-10 hardening: the reconnect loop below used to retry
+  // immediately-ish forever with no ceiling on total attempts. During the
+  // 8/9 outage (48x 502s while the backend replica was intermittently
+  // unreachable) this loop was actively churning and is suspected to have
+  // added event-loop/connection pressure on top of the reachability issue.
+  // Two changes: (1) exponential backoff now starts at 1s and caps at 30s
+  // (was capped at 10s with no attempt ceiling), and (2) a circuit breaker —
+  // if DG_CIRCUIT_MAX_FAILURES reconnects fail within DG_CIRCUIT_WINDOW_MS,
+  // stop retrying entirely for this session, log it clearly, and tell the
+  // client transcription is degraded instead of spinning forever. This does
+  // NOT change behavior on a successful connection (reconnectAttempts and
+  // the failure-timestamp window both reset to empty on 'open').
+  const DG_RECONNECT_BASE_MS = 1000;
+  const DG_RECONNECT_MAX_MS = 30000;
+  const DG_CIRCUIT_MAX_FAILURES = 8;
+  const DG_CIRCUIT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+  let circuitOpen = false;
+  const dgFailureTimestamps = [];
+
   function connectDeepgram() {
-    if (closed) return;
+    if (closed || circuitOpen) return;
 
     dgSocket = new WebSocket(dgUrl, {
       headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
@@ -2682,6 +2701,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     dgSocket.on('open', () => {
       dgReady = true;
       reconnectAttempts = 0;
+      dgFailureTimestamps.length = 0;
       fastify.log.info(`Deepgram connected for meeting ${meetingId}`);
       const queued = audioQueue.splice(0);
       queued.forEach(buf => {
@@ -3021,11 +3041,38 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     dgSocket.on('close', (code) => {
       dgReady = false;
       fastify.log.warn(`Deepgram closed (code=${code}) for meeting ${meetingId}`);
-      if (!closed) {
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
-        reconnectAttempts += 1;
-        reconnectTimer = setTimeout(connectDeepgram, delay);
+      if (closed) return;
+
+      const now = Date.now();
+      dgFailureTimestamps.push(now);
+      // Trim timestamps outside the circuit window as we go, so a slow
+      // trickle of failures over hours never trips the breaker — only a
+      // burst within DG_CIRCUIT_WINDOW_MS does.
+      while (dgFailureTimestamps.length && now - dgFailureTimestamps[0] > DG_CIRCUIT_WINDOW_MS) {
+        dgFailureTimestamps.shift();
       }
+
+      if (dgFailureTimestamps.length >= DG_CIRCUIT_MAX_FAILURES) {
+        circuitOpen = true;
+        fastify.log.error(
+          `Deepgram circuit breaker OPEN for meeting ${meetingId}: ` +
+          `${dgFailureTimestamps.length} reconnect failures within ${DG_CIRCUIT_WINDOW_MS / 1000}s. ` +
+          `Giving up on Deepgram reconnects for this session; transcription is degraded.`
+        );
+        try {
+          broadcastToMeeting(meetingId, {
+            type: 'error',
+            error: 'Live transcription temporarily unavailable (Deepgram reconnect limit reached). Audio recording continues; transcription will resume on next meeting.',
+          });
+        } catch (e) {
+          fastify.log.error(`Failed to broadcast Deepgram circuit-open notice for meeting ${meetingId}: ${e.message}`);
+        }
+        return;
+      }
+
+      const delay = Math.min(DG_RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts), DG_RECONNECT_MAX_MS);
+      reconnectAttempts += 1;
+      reconnectTimer = setTimeout(connectDeepgram, delay);
     });
 
     dgSocket.on('error', (err) => {

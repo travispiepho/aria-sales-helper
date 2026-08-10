@@ -56,6 +56,21 @@ export default function HomePage() {
   const [pageOffset, setPageOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // (2026-08-10) GET /api/meetings failure state — previously
+  // loadMeetings() swallowed any fetch error entirely (bare `catch {}`,
+  // see below), leaving `meetings` at its initial `[]` and rendering the
+  // exact same "No meetings yet today" empty-state copy as a genuinely
+  // empty account. During the 8/9 outage (backend 502s) this meant the
+  // homescreen looked identical to "you have no meetings" when the real
+  // cause was a failed fetch — no way for a rep to tell the difference or
+  // retry without a full page reload. `loadError` now distinguishes the
+  // two cases; see the render branch below for the retry-button UI. This
+  // does NOT touch loadMoreMeetings()'s own separate silent-catch ("Load
+  // more" already has a natural, always-visible retry affordance — the
+  // button itself just stays clickable, per the task's happy-path-only
+  // scope for this fix; the FIRST/initial fetch silently failing into a
+  // blank homescreen was the actual incident-relevant gap).
+  const [loadError, setLoadError] = useState(false);
 
   async function handleDownload(e: React.MouseEvent, m: Meeting) {
     e.stopPropagation();
@@ -139,13 +154,17 @@ export default function HomePage() {
   }, []);
 
   async function loadMeetings() {
+    setLoadError(false);
     try {
       const page = await listMeetings(0, PAGE_SIZE);
       setMeetings(page.meetings);
       setHasMore(page.hasMore);
       setPageOffset(page.meetings.length);
     } catch {
-      // silent
+      // 2026-08-10: was a bare silent catch — now surfaces a visible
+      // error state with a retry action (see loadError render branch)
+      // instead of rendering an indistinguishable empty list.
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -235,6 +254,23 @@ export default function HomePage() {
           {loading ? (
             <div className="flex items-center justify-center py-12">
               <div className="animate-spin h-6 w-6 border-4 border-brand-600 border-t-transparent rounded-full" />
+            </div>
+          ) : loadError ? (
+            // 2026-08-10: visible error + retry, replacing what used to
+            // silently fall through to the "No meetings yet today" empty
+            // state below on any fetch failure (e.g. the 8/9 outage's
+            // GET /api/meetings 502s) — a rep opening the app during an
+            // outage now sees this instead of a blank/empty homescreen.
+            <div className="bg-white rounded-2xl shadow-sm border border-red-100 p-6 text-center">
+              <div className="text-3xl mb-2">⚠️</div>
+              <p className="text-gray-700 text-sm font-medium mb-1">Couldn't load your meetings</p>
+              <p className="text-gray-500 text-xs mb-4">Check your connection and try again.</p>
+              <button
+                onClick={() => { setLoading(true); loadMeetings(); }}
+                className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2 px-4 rounded-xl transition-colors"
+              >
+                Retry
+              </button>
             </div>
           ) : todayMeetings.length === 0 ? (
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 text-center">

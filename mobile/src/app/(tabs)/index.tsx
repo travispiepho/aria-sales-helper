@@ -63,6 +63,12 @@ export default function HistoryScreen() {
       setMeetings(data);
       setError(null);
     } catch (err) {
+      // This screen already tracked/rendered `error` as plain text (see
+      // the `error ?` render branch below) — but with no retry action, a
+      // rep hitting this during an outage (e.g. the 8/9 backend 502s on
+      // GET /api/meetings) had no way to recover short of a full app
+      // reload. (2026-08-10) Retry button added below; this catch itself
+      // is unchanged.
       setError(err instanceof Error ? err.message : 'Failed to load meetings.');
     }
   }, []);
@@ -98,10 +104,26 @@ export default function HistoryScreen() {
             <ActivityIndicator size="large" />
           </ThemedView>
         ) : error ? (
+          // (2026-08-10) Retry action added — calls the same `load()` used
+          // by initial mount and pull-to-refresh, so a rep hitting a
+          // transient backend failure (e.g. the 8/9 outage's 502s on
+          // GET /api/meetings) can recover in-place instead of needing a
+          // full app reload. The error text itself was already rendered
+          // here before this change; only the button is new.
           <ThemedView style={styles.centerFill}>
+            <ThemedText style={styles.emptyIcon}>⚠️</ThemedText>
             <ThemedText type="small" style={styles.errorText}>
               {error}
             </ThemedText>
+            <Pressable
+              onPress={async () => {
+                setLoading(true);
+                await load();
+                setLoading(false);
+              }}
+              style={({ pressed }) => [styles.retryButton, pressed && styles.cardPressed]}>
+              <ThemedText style={styles.retryButtonText}>Retry</ThemedText>
+            </Pressable>
           </ThemedView>
         ) : meetings.length === 0 ? (
           <ThemedView style={styles.centerFill}>
@@ -164,4 +186,12 @@ const styles = StyleSheet.create({
   statusPillText: { color: '#fff', fontWeight: '700', textTransform: 'capitalize' },
   emptyIcon: { fontSize: 32 },
   errorText: { color: '#DC2626', textAlign: 'center' },
+  retryButton: {
+    marginTop: Spacing.two,
+    backgroundColor: '#2563EB',
+    borderRadius: Spacing.two,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.four,
+  },
+  retryButtonText: { color: '#fff', fontWeight: '700' },
 });

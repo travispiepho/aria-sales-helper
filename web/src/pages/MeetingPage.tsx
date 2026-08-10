@@ -1,6 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getMeeting, updateMeeting, getMeetingSegments, getLatestCoaching, Meeting, apiFetch } from '../lib/api';
+import {
+  getMeeting,
+  updateMeeting,
+  getMeetingSegments,
+  getLatestCoaching,
+  getCoachingReport,
+  Meeting,
+  CoachingReport,
+  apiFetch,
+} from '../lib/api';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 import MeetingScoreCard from '../components/MeetingScoreCard';
 import CoachingReportCard from '../components/CoachingReportCard';
@@ -76,6 +85,7 @@ export default function MeetingPage() {
   // Post-meeting
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [summaryDownloadLoading, setSummaryDownloadLoading] = useState(false);
   const [exportingDoc, setExportingDoc] = useState(false);
   const [voiceToast, setVoiceToast] = useState<string | null>(null);
   // ARIA Priority 1 roadmap, item 5: Live rebuttal teleprompter. Handles the
@@ -755,6 +765,124 @@ export default function MeetingPage() {
     URL.revokeObjectURL(url);
   }
 
+  async function handleDownloadSummary() {
+    if (!meeting) return;
+    setSummaryDownloadLoading(true);
+
+    // The report card owns its own state, so fetch the same already-existing
+    // aggregate endpoint at download time. If no coaching report has been
+    // generated (or it is temporarily unavailable), the meeting summary is
+    // still useful and should download on its own.
+    let report: CoachingReport | null = null;
+    if (meetingId) {
+      try {
+        report = await getCoachingReport(meetingId);
+      } catch {
+        report = null;
+      }
+    }
+
+    try {
+      const activeSummary = summary || meeting.summary || '';
+      const displayTitle = title || meeting.customer_name || 'Meeting';
+      const meetingDate = new Date(meeting.started_at).toLocaleDateString('en-US', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      });
+      const meetingTime = new Date(meeting.started_at).toLocaleTimeString('en-US', {
+        hour: '2-digit', minute: '2-digit',
+      });
+      const lines: string[] = [];
+
+      lines.push('ARIA FEEDBACK & SUMMARY');
+      lines.push('='.repeat(60));
+      lines.push(`Title:    ${displayTitle}`);
+      lines.push(`Customer: ${meeting.customer_name}`);
+      lines.push(`Date:     ${meetingDate} at ${meetingTime}`);
+      if (meeting.ended_at) {
+        lines.push(`Duration: ${formatDuration(meeting.started_at, meeting.ended_at)}`);
+      }
+      lines.push('');
+      lines.push('AI-GENERATED SUMMARY');
+      lines.push('─'.repeat(60));
+      lines.push(activeSummary.replace(/\*/g, '') || '(no summary generated)');
+
+      if (report) {
+        const hasMetrics = report.meetingScore !== null
+          || report.coveragePct !== null
+          || report.wpm.avg !== null
+          || report.discAdaptationScore !== null;
+        const hasCoachingFeedback = report.bant
+          || report.insiderLanguageFlags.length > 0
+          || report.questionGaps.length > 0
+          || hasMetrics;
+
+        if (hasCoachingFeedback) {
+          lines.push('');
+          lines.push('COACHING FEEDBACK');
+          lines.push('─'.repeat(60));
+
+          if (hasMetrics) {
+            lines.push('Performance Metrics');
+            if (report.meetingScore !== null) lines.push(`- Meeting Score: ${report.meetingScore}/100`);
+            if (report.coveragePct !== null) lines.push(`- Checklist Coverage: ${report.coveragePct}%`);
+            if (report.wpm.avg !== null) lines.push(`- Speaking Pace: ${report.wpm.avg} WPM`);
+            if (report.discAdaptationScore !== null) lines.push(`- DISC Adaptation: ${report.discAdaptationScore}/100`);
+          }
+
+          if (report.bant) {
+            if (hasMetrics) lines.push('');
+            lines.push('BANT & Closing Certainty');
+            lines.push(`- Closing Certainty: ${report.bant.closing_certainty_pct}%`);
+            if (report.bant.rationale?.overall) lines.push(`  ${report.bant.rationale.overall}`);
+            const factors: [string, number, string | undefined][] = [
+              ['Budget', report.bant.budget_score, report.bant.rationale?.budget],
+              ['Authority', report.bant.authority_score, report.bant.rationale?.authority],
+              ['Need', report.bant.need_score, report.bant.rationale?.need],
+              ['Timeline', report.bant.timeline_score, report.bant.rationale?.timeline],
+            ];
+            factors.forEach(([label, score, rationale]) => {
+              lines.push(`- ${label}: ${score}/100${rationale ? ` — ${rationale}` : ''}`);
+            });
+          }
+
+          if (report.insiderLanguageFlags.length > 0) {
+            lines.push('');
+            lines.push(`Insider Language Flagged (${report.insiderLanguageFlags.length})`);
+            report.insiderLanguageFlags.forEach(flag => {
+              const timestamp = flag.minutes_in !== null ? ` (${Math.round(flag.minutes_in)}m in)` : '';
+              lines.push(`- “${flag.phrase}”${timestamp}${flag.explanation ? ` — ${flag.explanation}` : ''}`);
+            });
+          }
+
+          if (report.questionGaps.length > 0) {
+            lines.push('');
+            lines.push(`Unanswered Questions (${report.questionGaps.length})`);
+            report.questionGaps.forEach(gap => {
+              const timestamp = gap.question_minutes_in !== null
+                ? ` (${Math.round(gap.question_minutes_in)}m in)`
+                : '';
+              lines.push(`- “${gap.question_text}”${timestamp}${gap.explanation ? ` — ${gap.explanation}` : ''}`);
+            });
+          }
+        }
+      }
+
+      lines.push('');
+      lines.push('='.repeat(60));
+      lines.push('Generated by ARIA — CertaPro Grand Haven');
+
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${displayTitle.replace(/[^a-z0-9]/gi, '-').toLowerCase()}-feedback-summary.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setSummaryDownloadLoading(false);
+    }
+  }
+
   // Extract just the "ACTION ITEMS" section out of the generated summary text
   // so Troy can drop it straight into the CRM without the full write-up.
   function extractActionItems(summaryText: string): string | null {
@@ -1197,6 +1325,13 @@ export default function MeetingPage() {
                     {(summary || meeting.summary || '').replace(/\*/g, '')}
                   </p>
                   <div className="flex flex-col gap-2">
+                    <button
+                      onClick={handleDownloadSummary}
+                      disabled={summaryDownloadLoading}
+                      className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
+                    >
+                      <span>⬇️</span> {summaryDownloadLoading ? 'Preparing…' : 'Download Feedback & Summary'}
+                    </button>
                     <button
                       onClick={handleDownloadTranscript}
                       className="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"

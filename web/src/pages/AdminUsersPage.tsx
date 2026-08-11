@@ -158,15 +158,15 @@ export default function AdminUsersPage() {
   if (!loading && user?.role !== 'admin') {
     return (
       <div className="min-h-screen bg-gray-50">
-        <div className="bg-brand-700 text-white px-4 pt-4 pb-6 safe-top">
-          <div className="flex items-center gap-3">
+        <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
+          <div className="flex items-center gap-4">
             <button
               onClick={() => navigate('/')}
-              className="text-brand-100 hover:text-white text-xl leading-none p-1"
+              className="text-brand-100 hover:text-white text-2xl leading-none p-1"
             >
               ←
             </button>
-            <h1 className="text-xl font-bold">Admin — Users</h1>
+            <h1 className="text-2xl font-bold leading-tight">Admin — Users</h1>
           </div>
         </div>
         <div className="px-4 py-6 max-w-lg mx-auto">
@@ -187,15 +187,15 @@ export default function AdminUsersPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="bg-brand-700 text-white px-4 pt-4 pb-6 safe-top">
-        <div className="flex items-center gap-3">
+      <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
+        <div className="flex items-center gap-4">
           <button
             onClick={() => navigate('/')}
-            className="text-brand-100 hover:text-white text-xl leading-none p-1"
+            className="text-brand-100 hover:text-white text-2xl leading-none p-1"
           >
             ←
           </button>
-          <h1 className="text-xl font-bold">Admin — Users</h1>
+          <h1 className="text-2xl font-bold leading-tight">Admin — Users</h1>
         </div>
       </div>
 

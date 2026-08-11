@@ -212,15 +212,15 @@ export default function HomePage() {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <div className="bg-brand-700 text-white px-4 pt-4 pb-6 safe-top">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold">ARIA</h1>
-            <p className="text-brand-100 text-sm">Hey {user?.name?.split(' ')[0]} 👋</p>
+      <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
+        <div className="flex items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h1 className="text-2xl font-bold leading-tight">ARIA</h1>
+            <p className="text-brand-100 text-base leading-relaxed">Hey {user?.name?.split(' ')[0]} 👋</p>
           </div>
           <button
             onClick={() => navigate('/profile')}
-            className="w-9 h-9 rounded-full bg-brand-600 border-2 border-brand-400 hover:bg-brand-500 flex items-center justify-center text-white font-bold text-sm transition-colors"
+            className="w-11 h-11 rounded-full bg-brand-600 border-2 border-brand-400 hover:bg-brand-500 flex items-center justify-center text-white font-bold text-base transition-colors flex-shrink-0"
             aria-label="Profile"
           >
             {user?.name?.charAt(0)?.toUpperCase() || '?'}
@@ -239,7 +239,7 @@ export default function HomePage() {
           <button
             onClick={() => setShowIntake(true)}
             disabled={starting}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
+            className="w-full max-w-xs mx-auto block bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
           >
             {starting ? 'Starting…' : '▶ Start Meeting'}
           </button>
@@ -278,7 +278,7 @@ export default function HomePage() {
               <p className="text-gray-500 text-sm">No meetings yet today</p>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-3 max-w-xl mx-auto">
               {todayMeetings.map(m => (
                 <div key={m.id} className="relative group">
                   <button
@@ -329,7 +329,7 @@ export default function HomePage() {
             <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">
               Recent
             </h2>
-            <div className="space-y-3">
+            <div className="space-y-3 max-w-xl mx-auto">
               {meetings
                 .filter(m => new Date(m.started_at).toDateString() !== todayStr)
                 .map(m => (
@@ -377,7 +377,7 @@ export default function HomePage() {
               <button
                 onClick={loadMoreMeetings}
                 disabled={loadingMore}
-                className="w-full mt-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-60 transition-colors"
+                className="w-full max-w-xl mx-auto block mt-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-60 transition-colors"
               >
                 {loadingMore ? 'Loading…' : 'Load more'}
               </button>

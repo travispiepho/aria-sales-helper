@@ -1,6 +1,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
+import { hasAdminAccess } from '../lib/roles';
 
 // SettingsPage — 2026-08-10.
 //
@@ -13,10 +14,11 @@ import { useAuth } from '../lib/auth';
 // Reached via the gear icon in HomePage.tsx's header (next to the Profile
 // avatar button). This page itself is open to ANY logged-in user (no
 // admin gate on the page/route) — it just conditionally renders the
-// "Admin" link below when `user?.role === 'admin'`, matching the exact
-// role-check pattern used elsewhere (see AdminUsersPage.tsx line ~65/158
-// and ProfilePage.tsx's role badge: `user?.role === 'admin'` /
-// `user?.role || 'rep'`). AdminUsersPage.tsx already has its own internal
+// "Admin" link below when the user has admin-level access, via the shared
+// hasAdminAccess() helper in lib/roles.ts (which accepts both 'admin' and
+// the higher 'owner' role — added 2026-08-10). The same helper backs
+// AdminUsersPage.tsx's gates and ProfilePage.tsx's role badge, so all
+// three stay consistent. AdminUsersPage.tsx already has its own internal
 // admin check (and the server enforces it too), so this is just a
 // convenience nav entry, not a security boundary.
 //
@@ -27,7 +29,9 @@ export default function SettingsPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const isAdmin = user?.role === 'admin';
+  // Uses the shared helper so 'owner' (which outranks admin) also sees the
+  // Admin link — see lib/roles.ts for the full role model.
+  const isAdmin = hasAdminAccess(user?.role);
 
   return (
     <div className="min-h-screen bg-gray-100">

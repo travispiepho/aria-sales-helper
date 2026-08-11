@@ -3,6 +3,8 @@
  * Uses fetch with credentials: 'include' to send session cookies
  */
 
+import type { Role } from './roles';
+
 const BASE = import.meta.env.VITE_API_URL || '';
 
 // Raw fetch with credentials + BASE URL — use when you need the full Response
@@ -40,7 +42,7 @@ export interface User {
   id: string;
   name: string;
   email: string;
-  role: 'rep' | 'admin';
+  role: Role;
 }
 
 export async function login(email: string, password: string): Promise<{ user: User }> {
@@ -69,7 +71,7 @@ export interface AdminUser {
   id: string;
   name: string;
   email: string;
-  role: 'rep' | 'admin';
+  role: Role;
   created_at: string;
   // NULL for active accounts, ISO-8601 timestamp for soft-deleted ones.
   deactivated_at: string | null;
@@ -81,7 +83,7 @@ export async function listAdminUsers(): Promise<{ users: AdminUser[] }> {
 
 export interface DeleteAdminUserResult {
   ok: boolean;
-  user: { id: string; name: string; email: string; role: 'rep' | 'admin' };
+  user: { id: string; name: string; email: string; role: Role };
   // Number of live session rows that were revoked as part of the delete
   // (i.e. tabs the deactivated user had signed in on). Surfaced so the
   // UI can show 'kicked out N sessions' in the confirmation toast; not

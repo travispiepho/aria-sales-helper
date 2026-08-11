@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { listAdminUsers, deleteAdminUser, inviteUser, AdminUser, InviteRole } from '../lib/api';
+import { hasAdminAccess, isOwner, roleLabel } from '../lib/roles';
 
 // AdminUsersPage — 2026-08-10.
 //
@@ -62,7 +63,7 @@ export default function AdminUsersPage() {
   }
 
   useEffect(() => {
-    if (user?.role === 'admin') {
+    if (hasAdminAccess(user?.role)) {
       load();
     } else {
       setLoading(false);
@@ -155,7 +156,7 @@ export default function AdminUsersPage() {
 
   // Non-admin fallback — friendly explanation instead of a blank page.
   // Server also returns 403 so this is a UX niceness, not a security gate.
-  if (!loading && user?.role !== 'admin') {
+  if (!loading && !hasAdminAccess(user?.role)) {
     return (
       <div className="min-h-screen bg-gray-100">
         <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
@@ -327,6 +328,20 @@ export default function AdminUsersPage() {
                   {active.map((u) => {
                     const isSelf = u.id === user?.id;
                     const isBusy = deletingId === u.id;
+                    // Owner-only admin deletion (2026-08-10). Only the owner
+                    // may remove an admin-level account (admin OR owner
+                    // target); reps stay deletable by any admin. This mirrors
+                    // the server's guard in DELETE /api/admin/users/:id —
+                    // the SERVER is the real security boundary, this just
+                    // avoids offering a button that would always 403.
+                    const blockedByOwnerRule =
+                      hasAdminAccess(u.role) && !isOwner(user?.role);
+                    const disabled = isSelf || isBusy || blockedByOwnerRule;
+                    const disabledReason = isSelf
+                      ? "You can't delete your own account"
+                      : blockedByOwnerRule
+                        ? 'Only the owner can remove admin accounts'
+                        : 'Delete this account';
                     return (
                       <li key={u.id} className="py-3 flex items-center gap-3">
                         <div className="w-10 h-10 rounded-full bg-brand-600 flex items-center justify-center text-white font-bold flex-shrink-0">
@@ -337,22 +352,31 @@ export default function AdminUsersPage() {
                             {u.name} {isSelf && <span className="text-xs text-gray-400 font-normal">(you)</span>}
                           </p>
                           <p className="text-xs text-gray-500 truncate">{u.email}</p>
+                          {/* Owner renders distinctly (amber) from admin
+                              (brand) and rep (gray) so the elevated role is
+                              visually obvious at a glance. */}
                           <span
-                            className={`inline-block mt-0.5 text-[10px] font-medium px-2 py-0.5 rounded-full capitalize ${
-                              u.role === 'admin'
-                                ? 'bg-brand-100 text-brand-700'
-                                : 'bg-gray-100 text-gray-600'
+                            className={`inline-block mt-0.5 text-[10px] font-medium px-2 py-0.5 rounded-full ${
+                              u.role === 'owner'
+                                ? 'bg-amber-100 text-amber-800'
+                                : u.role === 'admin'
+                                  ? 'bg-brand-100 text-brand-700'
+                                  : 'bg-gray-100 text-gray-600'
                             }`}
                           >
-                            {u.role}
+                            {roleLabel(u.role)}
                           </span>
                         </div>
+                        {/* Disabled (not hidden) when the owner rule blocks
+                            it: a greyed button + tooltip explains WHY the
+                            action is unavailable, whereas hiding it would
+                            look like a bug to an admin who expects it. */}
                         <button
                           onClick={() => handleDelete(u)}
-                          disabled={isSelf || isBusy}
-                          title={isSelf ? "You can't delete your own account" : 'Delete this account'}
+                          disabled={disabled}
+                          title={disabledReason}
                           className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors ${
-                            isSelf
+                            isSelf || blockedByOwnerRule
                               ? 'text-gray-300 cursor-not-allowed'
                               : 'text-red-600 hover:bg-red-50'
                           } ${isBusy ? 'opacity-50' : ''}`}

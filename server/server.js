@@ -668,6 +668,31 @@ async function ensureSessionsTable() {
     ON invites (LOWER(email))
     WHERE status = 'pending'
   `);
+
+  // 'owner' role support (added 2026-08-10, Gabe's request — see the
+  // hasAdminAccess()/isOwner() comment block for the full role model).
+  //
+  // Postgres has no "ALTER CHECK CONSTRAINT ... ADD VALUE": a CHECK
+  // constraint (unlike a native ENUM type) must be dropped and recreated
+  // with the widened value list. This is metadata-only — no table rewrite,
+  // no row is touched — and is safe to run on a live table with rows
+  // present, matching the DROP/ADD CONSTRAINT pattern already used in
+  // migrations/2026-08-05-meeting-interrupted-status.sql.
+  //
+  // Runs on every boot and is fully idempotent: every existing row's role
+  // is already 'rep' or 'admin', both of which remain valid under the
+  // widened constraint, so this can never fail against existing data.
+  // Kept here (rather than SQL-file-only) because this repo has no
+  // migration runner — ensureSessionsTable() IS the de-facto migration
+  // path that guarantees the constraint matches what the code expects,
+  // so the deploy can't silently run ahead of the schema.
+  await pool.query(`
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check
+  `);
+  await pool.query(`
+    ALTER TABLE users
+      ADD CONSTRAINT users_role_check CHECK (role IN ('rep', 'admin', 'owner'))
+  `);
 }
 
 async function createSession(userId) {
@@ -784,6 +809,37 @@ async function requireAuth(request, reply) {
   if (!request.user) {
     reply.code(401).send({ error: 'Unauthorized' });
   }
+}
+
+// ─── Role helpers ───────────────────────────────────────────────────────────
+// Role model (2026-08-10, Gabe's request): 'rep' < 'admin' < 'owner'.
+//
+// 'owner' is a strict SUPERSET of 'admin' — it grants everything admin
+// grants, plus exactly one extra capability (deleting admin accounts, see
+// DELETE /api/admin/users/:id). It is NOT a separate parallel role, so
+// every pre-existing `role === 'admin'` access check in this file must
+// also accept 'owner' or the owner account would paradoxically have LESS
+// access than a plain admin.
+//
+// These two helpers exist so that distinction is expressed once, in one
+// place, instead of scattering `role === 'admin' || role === 'owner'`
+// across ~30 call sites where a single missed site is a silent
+// access-control bug. Rule of thumb for future edits:
+//   - hasAdminAccess()  → use for ALL admin-gated behavior (the default)
+//   - isOwner()         → use ONLY for the owner-exclusive capability
+//
+// There is exactly ONE owner (thacker@certapro.com) and the role is not
+// assignable through any route or UI — it is set by a one-time data
+// migration (see migrations/2026-08-10-owner-role.sql). Deliberately no
+// 'owner' option in the invite role picker: an invite-able owner role
+// would let any admin mint additional owners, contradicting the
+// "should be the only owner" requirement.
+function hasAdminAccess(role) {
+  return role === 'admin' || role === 'owner';
+}
+
+function isOwner(role) {
+  return role === 'owner';
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -1026,7 +1082,7 @@ fastify.patch('/api/account/password', { preHandler: [requireAuth] }, async (req
 // currently-signed-in deactivated user is booted on their next request.
 
 fastify.get('/api/admin/users', { preHandler: [requireAuth] }, async (request, reply) => {
-  if (request.user.role !== 'admin') {
+  if (!hasAdminAccess(request.user.role)) {
     return reply.code(403).send({ error: 'Admin access required' });
   }
   const result = await pool.query(
@@ -1038,7 +1094,7 @@ fastify.get('/api/admin/users', { preHandler: [requireAuth] }, async (request, r
 });
 
 fastify.delete('/api/admin/users/:id', { preHandler: [requireAuth] }, async (request, reply) => {
-  if (request.user.role !== 'admin') {
+  if (!hasAdminAccess(request.user.role)) {
     return reply.code(403).send({ error: 'Admin access required' });
   }
   const { id } = request.params;
@@ -1074,11 +1130,41 @@ fastify.delete('/api/admin/users/:id', { preHandler: [requireAuth] }, async (req
       return reply.code(400).send({ error: 'User is already deactivated' });
     }
 
-    // Guard 2: never let the last active admin be deactivated. Counted
+    // Guard 2 (added 2026-08-10, Gabe's request): only the OWNER may remove
+    // an admin-level account. A plain admin can still deactivate 'rep'
+    // accounts exactly as before — this restriction deliberately applies
+    // ONLY to admin-level targets, which is the specific thing that was
+    // asked for ("the only account that can delete admin accounts").
+    //
+    // Checked against the TARGET's role, and 'owner' is included in the
+    // protected set so that a plain admin cannot deactivate the owner
+    // account either (the owner outranks them; letting an admin delete
+    // their superior would invert the hierarchy). Note isOwner() — not
+    // hasAdminAccess() — on the requester: this is the one capability in
+    // the system that admin does NOT inherit.
+    //
+    // Ordering matters: this runs AFTER the target lookup (we need the
+    // target's role) and BEFORE the last-admin count guard, so an
+    // unauthorized caller gets the accurate 403 rather than leaking
+    // "last remaining admin" state. The self-delete guard above still
+    // applies first and independently — the owner cannot delete their own
+    // account via this route either.
+    if (hasAdminAccess(target.role) && !isOwner(request.user.role)) {
+      await client.query('ROLLBACK');
+      return reply.code(403).send({
+        error: 'Only the account owner can remove admin accounts'
+      });
+    }
+
+    // Guard 3: never let the last active admin be deactivated. Counted
     // BEFORE the update so an already-deactivated admin doesn't count.
-    if (target.role === 'admin') {
+    // Counts 'owner' alongside 'admin' since the owner IS an admin for
+    // every access-control purpose — excluding it here would let the
+    // last plain admin be removed while an active owner exists, wrongly
+    // reporting the tenant as admin-less.
+    if (hasAdminAccess(target.role)) {
       const adminCount = await client.query(
-        "SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin' AND deactivated_at IS NULL"
+        "SELECT COUNT(*)::int AS n FROM users WHERE role IN ('admin', 'owner') AND deactivated_at IS NULL"
       );
       if (adminCount.rows[0].n <= 1) {
         await client.query('ROLLBACK');
@@ -1096,7 +1182,7 @@ fastify.delete('/api/admin/users/:id', { preHandler: [requireAuth] }, async (req
 
     // Race-condition post-check (see comment above).
     const postCheck = await client.query(
-      "SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin' AND deactivated_at IS NULL"
+      "SELECT COUNT(*)::int AS n FROM users WHERE role IN ('admin', 'owner') AND deactivated_at IS NULL"
     );
     if (postCheck.rows[0].n < 1) {
       await client.query('ROLLBACK');
@@ -1152,7 +1238,7 @@ fastify.delete('/api/admin/users/:id', { preHandler: [requireAuth] }, async (req
 // send the actual email, and flip status to 'accepted' once the invitee
 // completes signup.
 fastify.post('/api/admin/invite', { preHandler: [requireAuth] }, async (request, reply) => {
-  if (request.user.role !== 'admin') {
+  if (!hasAdminAccess(request.user.role)) {
     return reply.code(403).send({ error: 'Admin access required' });
   }
 
@@ -1361,7 +1447,7 @@ fastify.get('/api/meetings', { preHandler: [requireAuth] }, async (request, repl
 
   let result;
 
-  if (role === 'admin') {
+  if (hasAdminAccess(role)) {
     result = await pool.query(
       `SELECT m.*, u.name as rep_name, c.name as customer_name
        FROM meetings m
@@ -1448,7 +1534,7 @@ fastify.get('/api/meetings/:id', { preHandler: [requireAuth] }, async (request, 
   const meeting = result.rows[0];
 
   // Reps can only see their own meetings
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -1473,7 +1559,7 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   }
 
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -1742,7 +1828,7 @@ fastify.get('/api/meetings/:id/coaching/latest', { preHandler: [requireAuth] }, 
   const { id } = request.params;
   const existing = await pool.query('SELECT rep_id FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
-  if (request.user.role !== 'admin' && existing.rows[0].rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && existing.rows[0].rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   // Get all snapshots and merge checklist — once done always done
@@ -1776,7 +1862,7 @@ fastify.post('/api/meetings/:id/coaching', { preHandler: [requireAuth] }, async 
     return reply.code(404).send({ error: 'Meeting not found' });
   }
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -1975,7 +2061,7 @@ fastify.get('/api/meetings/:id/analytics', { preHandler: [requireAuth] }, async 
   const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -2005,7 +2091,7 @@ fastify.post('/api/meetings/:id/bant', { preHandler: [requireAuth] }, async (req
   const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   if (!OPENROUTER_API_KEY) {
@@ -2057,7 +2143,7 @@ fastify.get('/api/meetings/:id/bant', { preHandler: [requireAuth] }, async (requ
   const existing = await pool.query('SELECT rep_id FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   const result = await pool.query('SELECT * FROM bant_scores WHERE meeting_id = $1', [id]);
@@ -2071,7 +2157,7 @@ fastify.post('/api/meetings/:id/insider-language', { preHandler: [requireAuth] }
   const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   if (!OPENROUTER_API_KEY) {
@@ -2116,7 +2202,7 @@ fastify.get('/api/meetings/:id/insider-language', { preHandler: [requireAuth] },
   const existing = await pool.query('SELECT rep_id FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   const result = await pool.query(
@@ -2132,7 +2218,7 @@ fastify.post('/api/meetings/:id/question-gaps', { preHandler: [requireAuth] }, a
   const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   if (!OPENROUTER_API_KEY) {
@@ -2177,7 +2263,7 @@ fastify.get('/api/meetings/:id/question-gaps', { preHandler: [requireAuth] }, as
   const existing = await pool.query('SELECT rep_id FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   const result = await pool.query(
@@ -2205,7 +2291,7 @@ fastify.get('/api/meetings/:id/coaching-report', { preHandler: [requireAuth] }, 
   );
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -2244,7 +2330,7 @@ fastify.delete('/api/meetings/:id', { preHandler: [requireAuth] }, async (reques
   const existing = await pool.query('SELECT rep_id FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   await pool.query('DELETE FROM transcript_segments WHERE meeting_id = $1', [id]);
@@ -2259,7 +2345,7 @@ fastify.get('/api/meetings/:id/segments', { preHandler: [requireAuth] }, async (
   const existing = await pool.query('SELECT rep_id FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) return reply.code(404).send({ error: 'Meeting not found' });
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
   const result = await pool.query(
@@ -2281,7 +2367,7 @@ fastify.post('/api/meetings/:id/consent', { preHandler: [requireAuth] }, async (
   }
 
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -2324,7 +2410,7 @@ fastify.post('/api/meetings/:id/speaker-lock', { preHandler: [requireAuth] }, as
     return reply.code(404).send({ error: 'Meeting not found' });
   }
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -2363,7 +2449,7 @@ fastify.post('/api/meetings/:id/summary', { preHandler: [requireAuth], config: {
   }
 
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -2506,7 +2592,7 @@ fastify.post('/api/meetings/:id/export-to-docs', { preHandler: [requireAuth] }, 
   }
 
   const meeting = existing.rows[0];
-  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -2593,7 +2679,7 @@ fastify.get('/api/customers', { preHandler: [requireAuth] }, async (request, rep
   const { role, id } = request.user;
   let result;
 
-  if (role === 'admin') {
+  if (hasAdminAccess(role)) {
     result = await pool.query('SELECT * FROM customers ORDER BY created_at DESC');
   } else {
     result = await pool.query(
@@ -2614,7 +2700,7 @@ fastify.get('/api/customers/:id', { preHandler: [requireAuth] }, async (request,
   }
 
   const customer = result.rows[0];
-  if (request.user.role !== 'admin' && customer.created_by !== request.user.id) {
+  if (!hasAdminAccess(request.user.role) && customer.created_by !== request.user.id) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
@@ -2769,7 +2855,7 @@ fastify.get('/meetings/:meetingId/observe', { websocket: true }, async (socket, 
       return;
     }
     meeting = res.rows[0];
-    if (user.role !== 'admin' && meeting.rep_id !== user.id) {
+    if (!hasAdminAccess(user.role) && meeting.rep_id !== user.id) {
       socket.close(4003, 'Forbidden');
       return;
     }
@@ -2836,7 +2922,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       return;
     }
     meeting = res.rows[0];
-    if (user.role !== 'admin' && meeting.rep_id !== user.id) {
+    if (!hasAdminAccess(user.role) && meeting.rep_id !== user.id) {
       socket.send(JSON.stringify({ type: 'error', error: 'Forbidden' }));
       socket.close(4003, 'Forbidden');
       return;

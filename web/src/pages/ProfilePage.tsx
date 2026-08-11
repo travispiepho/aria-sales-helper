@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { apiFetch, changePassword } from '../lib/api';
 import { extractVoiceFeatures, VoiceFeatures } from '../lib/voiceFeatures';
+import { roleLabel } from '../lib/roles';
 
 const ENROLL_DURATION_MS = 30000; // 30 seconds
 const SAMPLE_RATE = 16000;
@@ -219,8 +220,18 @@ export default function ProfilePage() {
           <div>
             <p className="text-lg font-semibold text-gray-900">{user?.name || '—'}</p>
             <p className="text-sm text-gray-500">{user?.email || '—'}</p>
-            <span className="inline-block mt-1 text-xs font-medium px-2 py-0.5 rounded-full bg-brand-100 text-brand-700 capitalize">
-              {user?.role || 'rep'}
+            {/* Role badge — uses the shared roleLabel() helper so the
+                'owner' role (added 2026-08-10, higher than admin) renders
+                as "Owner" with its own amber styling rather than falling
+                through to the generic admin badge. See lib/roles.ts. */}
+            <span
+              className={`inline-block mt-1 text-xs font-medium px-2 py-0.5 rounded-full ${
+                user?.role === 'owner'
+                  ? 'bg-amber-100 text-amber-800'
+                  : 'bg-brand-100 text-brand-700'
+              }`}
+            >
+              {roleLabel(user?.role)}
             </span>
           </div>
         </div>

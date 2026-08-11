@@ -210,7 +210,7 @@ export default function HomePage() {
   );
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-100">
       {/* Header */}
       <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
         <div className="flex items-center justify-between gap-4">

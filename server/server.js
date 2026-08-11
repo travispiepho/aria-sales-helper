@@ -31,6 +31,10 @@ import { analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebut
 // Item 5 (live rebuttal teleprompter) — STUB detection half. See
 // objectionDetection.js module docstring for real-vs-stubbed breakdown.
 import { detectObjection } from './objectionDetection.js';
+// Name-likelihood classifier for mid-call self-introduction detection
+// ("Hi, I'm John"). Replaces the old hand-picked STOPWORDS blocklist — see
+// nameHeuristics.js header for why (dictionary signal, not capitalization).
+import { isLikelyName, toDisplayName } from './nameHeuristics.js';
 
 const { Pool } = pg;
 
@@ -115,6 +119,33 @@ function unregisterMeetingSocket(meetingId, socket) {
   if (sockets) {
     sockets.delete(socket);
     if (sockets.size === 0) activeMeetingSockets.delete(meetingId);
+  }
+}
+
+// ─── Live speaker-lock controllers (2026-08-10, intro-window fix) ────────────
+// The mid-call name-introduction detector no longer silently auto-locks a
+// speaker to a guessed name. After a 15s collection window it emits a
+// `speaker_lock_suggestion` and waits for a human to confirm/reject via
+// POST /api/meetings/:id/speaker-lock. That REST route runs OUTSIDE the audio
+// WS handler closure where the per-connection `speakerLocks` map actually
+// lives, so it can't mutate the live lock state directly. This registry is
+// the bridge: the audio WS handler registers a small controller
+// ({ confirm, reject }) for its meetingId while connected; the REST route
+// looks it up and calls into the closure. Keyed by meetingId; a meeting has
+// at most one live audio connection at a time (enforced by the
+// owner_session_id check on the audio route), so a single controller per
+// meeting is correct. Unregistered on socket close.
+const activeMeetingSpeakerControllers = new Map();
+
+function registerSpeakerController(meetingId, controller) {
+  activeMeetingSpeakerControllers.set(meetingId, controller);
+}
+
+function unregisterSpeakerController(meetingId, controller) {
+  // Only delete if it's still OUR controller (guard against a reconnect having
+  // already replaced it).
+  if (activeMeetingSpeakerControllers.get(meetingId) === controller) {
+    activeMeetingSpeakerControllers.delete(meetingId);
   }
 }
 
@@ -757,6 +788,62 @@ async function requireAuth(request, reply) {
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
+// ── Event-loop lag monitoring (2026-08-10, post-8/9-incident hardening) ──────
+// WHY THIS EXISTS: the 8/9 outage produced a burst of 502s from Railway's
+// proxy that started ~32 min BEFORE Railway's own US-West regional incident
+// was declared, so the regional issue can't be the sole cause. The
+// app-level evidence pointed at "connection dial timeout" to the single
+// replica correlating with live-meeting load.
+//
+// The mechanism: this process does per-audio-word work (ring-buffer
+// slicing, voice feature extraction, speaker-merge comparisons) on the
+// SAME event loop that serves HTTP and relays the live meeting/Deepgram
+// WebSockets. Under concurrent live-meeting load that work can starve the
+// loop long enough that new connections — including Railway's own
+// healthcheck probe — aren't accepted in time, and the proxy reports the
+// replica as unreachable (502) even though the process is alive and the DB
+// is fine.
+//
+// The old /health only proved "the process can reach Postgres." That is
+// exactly the check that stays GREEN during this failure mode, because a
+// starved loop still eventually completes a trivial `SELECT 1`. So the
+// healthcheck could not distinguish "healthy" from "alive but too lagged to
+// serve traffic" — the precise condition that was taking the service down.
+//
+// This sampler measures actual loop responsiveness: schedule a timer for
+// EVENT_LOOP_SAMPLE_MS, then record how much LATER than that it actually
+// fired. That delta is time the loop spent blocked on synchronous work.
+// It is deliberately cheap (one timer, no allocation in the hot path) so
+// the monitor itself can never become the load problem it is watching for.
+const EVENT_LOOP_SAMPLE_MS = 500;
+// Degraded threshold. Rationale: normal lag on an idle/healthy Node process
+// is single-digit ms. Sustained lag above this means requests are already
+// queueing behind synchronous work and connection accepts are at risk —
+// i.e. this is the leading indicator of the 502 condition, caught while the
+// process is still able to answer. Not so tight that a routine GC pause or
+// a single heavy transcript segment trips it.
+const EVENT_LOOP_LAG_DEGRADED_MS = 1000;
+
+let eventLoopLagMs = 0;
+let eventLoopLagMaxMs = 0;
+
+function startEventLoopLagSampler() {
+  let expectedAt = Date.now() + EVENT_LOOP_SAMPLE_MS;
+  const timer = setInterval(() => {
+    const now = Date.now();
+    // How late this tick actually fired vs. when it was scheduled. Clamped
+    // at 0 because a timer can fire a hair early on some platforms.
+    eventLoopLagMs = Math.max(0, now - expectedAt);
+    if (eventLoopLagMs > eventLoopLagMaxMs) eventLoopLagMaxMs = eventLoopLagMs;
+    expectedAt = now + EVENT_LOOP_SAMPLE_MS;
+  }, EVENT_LOOP_SAMPLE_MS);
+  // Never hold the process open just for telemetry.
+  if (typeof timer.unref === 'function') timer.unref();
+  return timer;
+}
+
+startEventLoopLagSampler();
+
 // Root route for Railway health check
 fastify.get('/', async (request, reply) => {
   return reply.code(200).send({ ok: true });
@@ -765,10 +852,31 @@ fastify.get('/', async (request, reply) => {
 fastify.get('/health', async (request, reply) => {
   try {
     await pool.query('SELECT 1');
+
+    // Report the loop's health alongside the DB's. A lagged loop is
+    // reported as 'degraded' rather than 'error': the process IS still
+    // serving (this very response proves it), so failing the healthcheck
+    // outright would make Railway kill a replica that is merely busy —
+    // during a live meeting that would drop in-flight audio WebSockets and
+    // turn a slowdown into a hard outage. Surfacing it as degraded makes
+    // the condition observable (and alertable) without that self-inflicted
+    // restart loop. Deliberate call, flagged for Gabe/Troy: if we later
+    // want Railway to auto-restart on sustained lag, that is a separate
+    // decision requiring a second replica FIRST, otherwise a restart is a
+    // guaranteed outage rather than a failover.
+    const loopDegraded = eventLoopLagMs > EVENT_LOOP_LAG_DEGRADED_MS;
+
     return {
-      status: 'ok',
+      status: loopDegraded ? 'degraded' : 'ok',
       db: 'connected',
       ts: new Date().toISOString(),
+      eventLoop: {
+        lagMs: eventLoopLagMs,
+        maxLagMs: eventLoopLagMaxMs,
+        thresholdMs: EVENT_LOOP_LAG_DEGRADED_MS,
+        status: loopDegraded ? 'degraded' : 'ok',
+      },
+      activeMeetings: activeMeetingSockets.size,
       deepgram: DEEPGRAM_API_KEY ? 'configured' : 'missing',
       anthropic: ANTHROPIC_API_KEY ? 'configured' : 'missing (summary will stub)',
       pyannote: pyannote.isConfigured() ? 'configured' : 'missing (scaffolded, inactive)',

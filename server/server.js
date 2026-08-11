@@ -2293,6 +2293,63 @@ fastify.post('/api/meetings/:id/consent', { preHandler: [requireAuth] }, async (
   return { ok: true, consent_confirmed_at: result.rows[0].consent_confirmed_at };
 });
 
+// ─── Speaker-lock confirm/reject (2026-08-10, intro-window fix) ──────────────
+// POST /api/meetings/:id/speaker-lock
+// Client -> server half of the mid-call name-introduction confirmation flow.
+// The server first emits a `speaker_lock_suggestion` WS message ("We think
+// Speaker 2 is John — is that right?"); the user answers via this route:
+//   body { speakerId: "Speaker 2", action: "confirm", name: "John" }
+//     -> commits the lock (via the live speaker controller) and the server
+//        broadcasts the existing `speaker_lock` message so every synced
+//        client relabels. `name` may be an EDITED value (Yes/Edit UI).
+//   body { speakerId: "Speaker 2", action: "reject", name: "John" }
+//     -> records the rejection so the detector won't re-suggest that name and
+//        keeps listening for a better candidate (does NOT give up on the slot).
+// Auth: same owner/admin check as every other meeting route. A web observer
+// watching a mobile-originated meeting is the SAME user_id as the owner, so it
+// passes this check and can confirm from the synced view too.
+fastify.post('/api/meetings/:id/speaker-lock', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const { speakerId, action, name } = request.body || {};
+
+  if (!speakerId || (action !== 'confirm' && action !== 'reject')) {
+    return reply.code(400).send({ error: 'speakerId and action ("confirm"|"reject") are required' });
+  }
+  if (action === 'confirm' && (!name || !String(name).trim())) {
+    return reply.code(400).send({ error: 'name is required to confirm' });
+  }
+
+  const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
+  if (existing.rows.length === 0) {
+    return reply.code(404).send({ error: 'Meeting not found' });
+  }
+  const meeting = existing.rows[0];
+  if (request.user.role !== 'admin' && meeting.rep_id !== request.user.id) {
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+
+  const controller = activeMeetingSpeakerControllers.get(id);
+  if (!controller) {
+    // No live audio connection (meeting ended, or between reconnects). We can
+    // still honor a CONFIRM by broadcasting the lock so any open client view
+    // relabels; there's no live speakerLocks state to keep in sync anymore.
+    // A REJECT with no live detector is a no-op ack (nothing left listening).
+    if (action === 'confirm') {
+      const display = String(name).trim();
+      broadcastToMeeting(id, { type: 'speaker_lock', speakerId, name: display });
+      return { ok: true, committed: true, live: false, name: display };
+    }
+    return { ok: true, committed: false, live: false };
+  }
+
+  const res = action === 'confirm'
+    ? controller.confirm(speakerId, name)
+    : controller.reject(speakerId, name);
+
+  if (!res.ok) return reply.code(400).send({ error: res.error || 'speaker-lock action failed' });
+  return { ok: true, live: true, action, ...res };
+});
+
 // ─── Phase 2: Summary endpoint ────────────────────────────────────────────────
 // POST /api/meetings/:id/summary — generate + store AI summary
 
@@ -2895,6 +2952,80 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   const speakerChunks = {}; // canonical speaker id -> Float32Array[] (rep-voiceprint match)
   const speakerLocks = {};  // canonical speaker id (string) -> displayName
   let voiceMatchDone = false;
+
+  // ── Mid-call name-introduction: 15s collection window + confirm popup ─────
+  // (2026-08-10, Gabe Bass intro-window fix). Two-part behavior:
+  //   Part 1 (nameHeuristics.isLikelyName): reject common-word false positives
+  //           like "I'm starting this meeting" -> "Starting".
+  //   Part 2 (here): don't auto-lock at all anymore. Collect intro candidates
+  //           per speaker slot for the first INTRO_WINDOW_MS of that slot's
+  //           presence, THEN emit a `speaker_lock_suggestion` and wait for a
+  //           human to confirm/reject via POST /api/meetings/:id/speaker-lock
+  //           (bridged back into this closure by the speaker controller
+  //           registered below). Never touches the voice-print lock path.
+  const INTRO_WINDOW_MS = 15000;           // collect for 15s before guessing
+  const INTRO_SUGGEST_COOLDOWN_MS = 20000; // don't re-nag with the same slot faster than this
+  const speakerFirstSeen = {};             // si (string) -> ms slot first observed
+  const introCandidates = {};              // si -> Map(nameLower -> { name, count })
+  const rejectedIntroNames = {};           // si -> Set(nameLower) the user said "No" to
+  const pendingIntroSuggestion = {};       // si -> nameLower currently awaiting a user answer
+  const introSuggestCooldownUntil = {};    // si -> ms; suppress re-suggest until then
+
+  // Controller bridging the REST confirm/reject endpoint back into this
+  // closure's live `speakerLocks` state. Registered now, unregistered on close.
+  const speakerLockController = {
+    // Parse a client-facing "Speaker N" label back to the 0-based canonical si
+    // string used as the key in speakerLocks/introCandidates/etc.
+    _siFromLabel(speakerId) {
+      const m = /Speaker\s+(\d+)/i.exec(String(speakerId || ''));
+      if (!m) return null;
+      return String(parseInt(m[1], 10) - 1);
+    },
+    confirm(speakerId, name) {
+      const si = this._siFromLabel(speakerId);
+      if (si === null) return { ok: false, error: 'bad speakerId' };
+      const display = toDisplayName(name) || String(name || '').trim();
+      if (!display) return { ok: false, error: 'empty name' };
+      // Respect the invariant: never override an existing lock (voice-print or
+      // an already-confirmed intro). A confirm on an already-locked slot is a
+      // no-op success (idempotent for double-clicks / observer echoes).
+      if (!speakerLocks[si]) {
+        speakerLocks[si] = display;
+        fastify.log.info(`Speaker intro CONFIRMED by user: Speaker ${parseInt(si, 10) + 1} -> ${display}`);
+      }
+      delete pendingIntroSuggestion[si];
+      broadcastToMeeting(meetingId, {
+        type: 'speaker_lock',
+        speakerId: `Speaker ${parseInt(si, 10) + 1}`,
+        name: speakerLocks[si],
+      });
+      return { ok: true, locked: speakerLocks[si] };
+    },
+    reject(speakerId, name) {
+      const si = this._siFromLabel(speakerId);
+      if (si === null) return { ok: false, error: 'bad speakerId' };
+      const nameLower = String(name || '').trim().toLowerCase();
+      if (nameLower) {
+        if (!rejectedIntroNames[si]) rejectedIntroNames[si] = new Set();
+        rejectedIntroNames[si].add(nameLower);
+        // Drop the rejected name from the candidate tally so it can't win again.
+        if (introCandidates[si]) introCandidates[si].delete(nameLower);
+      }
+      delete pendingIntroSuggestion[si];
+      // Short cooldown so we don't instantly re-suggest the NEXT candidate in
+      // the same breath — give the call a moment. We keep listening (do NOT
+      // lock, do NOT give up on this speaker for the rest of the meeting).
+      introSuggestCooldownUntil[si] = Date.now() + INTRO_SUGGEST_COOLDOWN_MS;
+      fastify.log.info(`Speaker intro REJECTED by user: Speaker ${parseInt(si, 10) + 1} not "${name}" — still listening`);
+      // Let other synced clients dismiss their popup too.
+      broadcastToMeeting(meetingId, {
+        type: 'speaker_lock_suggestion_dismiss',
+        speakerId: `Speaker ${parseInt(si, 10) + 1}`,
+      });
+      return { ok: true };
+    },
+  };
+  registerSpeakerController(meetingId, speakerLockController);
   const MIN_MATCH_SAMPLES = 16000 * 5;  // 5s per speaker before a candidate is eligible
   const MATCH_THRESHOLD = 0.72;         // raised from 0.58 — tighter bar, fewer false positives
 
@@ -3293,31 +3424,59 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
             groupWordCount = groupText.split(/\s+/).filter(Boolean).length;
           }
 
-          // Mid-call name introduction detection: lock an unlocked speaker to a
-          // spoken name (e.g. "Hi, I'm John" / "This is Sarah"). Never overrides
-          // an existing lock (voice-print or prior introduction).
+          // ── Mid-call name introduction: collect-then-confirm (2026-08-10) ────
+          // Rewritten from the old "first sentence wins, auto-lock silently"
+          // behavior that produced Gabe's "I'm starting this meeting" ->
+          // "Starting" bug. Two changes:
+          //   1. Candidate words are validated with isLikelyName() (dictionary
+          //      signal), not a hand-picked stopword blocklist.
+          //   2. We do NOT auto-lock. We record the slot's first-seen time,
+          //      accumulate intro candidates for INTRO_WINDOW_MS, then emit a
+          //      `speaker_lock_suggestion` and wait for a human to confirm via
+          //      POST /api/meetings/:id/speaker-lock. Never overrides an
+          //      existing lock (voice-print or an already-confirmed intro).
+          const nowIntro = Date.now();
+          if (speakerFirstSeen[si] === undefined) speakerFirstSeen[si] = nowIntro;
+
           if (!speakerLocks[si]) {
-            const introMatch = groupText.match(
-              /\b(?:i'?m|i am|this is|my name is|name'?s)\s+([A-Za-z][A-Za-z'-]{1,20})\b/i
-            );
-            if (introMatch) {
-              const raw = introMatch[1];
-              const STOPWORDS = new Set([
-                'going', 'not', 'sure', 'here', 'ready', 'sorry', 'fine', 'good',
-                'great', 'okay', 'ok', 'trying', 'looking', 'just', 'also', 'still',
-                'actually', 'calling', 'gonna', 'kind', 'about', 'done', 'happy',
-              ]);
-              if (!STOPWORDS.has(raw.toLowerCase())) {
-                const name = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
-                speakerLocks[si] = name;
-                fastify.log.info(`Name introduction detected: Speaker ${si} -> ${name}`);
-                // 2026-08-05 live-sync fix: broadcastToMeeting(), not
-                // socket.send() — same reasoning as the other speaker_lock
-                // fix above (voice-fingerprint match path).
+            // Gather EVERY intro-trigger candidate in this segment (a rep may
+            // say "I'm John, and this is Sarah" — both are captured; the human
+            // confirmation step resolves any mis-attribution to the wrong slot).
+            const introRe = /\b(?:i'?m|i am|this is|my name is|name'?s)\s+([A-Za-z][A-Za-z'’-]{1,20})\b/gi;
+            let m;
+            while ((m = introRe.exec(groupText)) !== null) {
+              const raw = m[1];
+              if (!isLikelyName(raw)) continue;               // Part 1: reject "starting", "trying", ...
+              const display = toDisplayName(raw);
+              const nameLower = display.toLowerCase();
+              if (rejectedIntroNames[si] && rejectedIntroNames[si].has(nameLower)) continue; // user already said No
+              if (!introCandidates[si]) introCandidates[si] = new Map();
+              const prev = introCandidates[si].get(nameLower);
+              introCandidates[si].set(nameLower, { name: display, count: (prev ? prev.count : 0) + 1 });
+            }
+
+            // After the 15s collection window, if we have a candidate and no
+            // suggestion is currently pending (and we're past any cooldown),
+            // surface the best (most-repeated) candidate for confirmation.
+            const elapsed = nowIntro - speakerFirstSeen[si];
+            const cooldownOk = nowIntro >= (introSuggestCooldownUntil[si] || 0);
+            if (
+              elapsed >= INTRO_WINDOW_MS &&
+              !pendingIntroSuggestion[si] &&
+              cooldownOk &&
+              introCandidates[si] && introCandidates[si].size > 0
+            ) {
+              const best = [...introCandidates[si].values()].sort((a, b) => b.count - a.count)[0];
+              if (best) {
+                pendingIntroSuggestion[si] = best.name.toLowerCase();
+                introSuggestCooldownUntil[si] = nowIntro + INTRO_SUGGEST_COOLDOWN_MS;
+                fastify.log.info(`Speaker intro SUGGESTION: Speaker ${parseInt(si, 10) + 1} may be "${best.name}" (awaiting user confirm)`);
+                // New WS message type (server -> client). Mirrors the
+                // speaker_lock shape but is a QUESTION, not a committed lock.
                 broadcastToMeeting(meetingId, {
-                  type: 'speaker_lock',
+                  type: 'speaker_lock_suggestion',
                   speakerId: `Speaker ${parseInt(si, 10) + 1}`,
-                  name,
+                  name: best.name,
                 });
               }
             }
@@ -3494,6 +3653,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     fastify.log.info(`WS client disconnected: meeting ${meetingId}`);
     closed = true;
     unregisterMeetingSocket(meetingId, socket);
+    unregisterSpeakerController(meetingId, speakerLockController);
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
       try {

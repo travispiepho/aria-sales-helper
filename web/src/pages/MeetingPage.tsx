@@ -95,6 +95,12 @@ export default function MeetingPage() {
   // breakdown). This is a first-pass UI: a dismissible banner, not yet a
   // polished "teleprompter" UX — intentionally minimal per task scope.
   const [suggestedRebuttal, setSuggestedRebuttal] = useState<{ objectionCategory: string; rebuttal: string } | null>(null);
+  // Mid-call name-introduction confirmation (2026-08-10 intro-window fix).
+  // Set from the `speaker_lock_suggestion` WS message; cleared once the user
+  // answers (Yes/Edit/No) or another synced client answers first. Nothing is
+  // locked until the user confirms via POST /api/meetings/:id/speaker-lock.
+  const [speakerSuggestion, setSpeakerSuggestion] = useState<{ speakerId: string; name: string } | null>(null);
+  const [speakerSuggestionBusy, setSpeakerSuggestionBusy] = useState(false);
   const [title, setTitle] = useState<string>('');
   const [titleSaving, setTitleSaving] = useState(false);
 
@@ -288,6 +294,18 @@ export default function MeetingPage() {
         delete next[from];
         return next;
       });
+    } else if (msg.type === 'speaker_lock_suggestion') {
+      // Mid-call name-introduction GUESS (not a committed lock). Show a
+      // confirmation popup; the user's Yes/Edit/No answer drives
+      // POST /api/meetings/:id/speaker-lock (see confirmSpeakerSuggestion /
+      // rejectSpeakerSuggestion below). We do NOT relabel anything yet.
+      const { speakerId, name } = msg as { type: string; speakerId: string; name: string };
+      if (speakerId && name) setSpeakerSuggestion({ speakerId, name });
+    } else if (msg.type === 'speaker_lock_suggestion_dismiss') {
+      // Another synced client answered (or the server withdrew the guess) —
+      // close our popup if it was for the same speaker.
+      const { speakerId } = msg as { type: string; speakerId: string };
+      setSpeakerSuggestion(prev => (prev && prev.speakerId === speakerId ? null : prev));
     } else if (msg.type === 'suggested_rebuttal') {
       // Live rebuttal teleprompter (item 5) — first-pass scaffolding.
       const { objectionCategory, rebuttal } = msg as { type: string; objectionCategory: string; rebuttal: string };
@@ -986,6 +1004,49 @@ export default function MeetingPage() {
     }
   }
 
+  // ── Mid-call name-introduction confirmation handlers (2026-08-10) ────────
+  // The server emitted a `speaker_lock_suggestion` (a GUESS). These POST the
+  // user's answer to /api/meetings/:id/speaker-lock. Confirm commits the lock
+  // server-side (which then broadcasts the existing `speaker_lock` message,
+  // relabeling every synced client); reject tells the server to keep listening
+  // for a better candidate without locking. `name` on confirm may be edited.
+  async function confirmSpeakerSuggestion(speakerId: string, name: string) {
+    if (!meetingId || !name.trim()) return;
+    setSpeakerSuggestionBusy(true);
+    try {
+      const res = await apiFetch(`/api/meetings/${meetingId}/speaker-lock`, {
+        method: 'POST',
+        body: JSON.stringify({ speakerId, action: 'confirm', name: name.trim() }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Failed' }));
+        throw new Error(err.error || 'Failed to confirm');
+      }
+      // The server broadcasts `speaker_lock` on success, which drives the
+      // relabel + toast via applyLiveMessage(); nothing else to do here.
+      setSpeakerSuggestion(null);
+    } catch {
+      // Leave the popup open so the user can retry; a transient failure
+      // shouldn't silently drop the guess.
+    } finally {
+      setSpeakerSuggestionBusy(false);
+    }
+  }
+
+  async function rejectSpeakerSuggestion(speakerId: string, name: string) {
+    setSpeakerSuggestion(null); // optimistic dismiss — they said No
+    if (!meetingId) return;
+    try {
+      await apiFetch(`/api/meetings/${meetingId}/speaker-lock`, {
+        method: 'POST',
+        body: JSON.stringify({ speakerId, action: 'reject', name }),
+      });
+    } catch {
+      // Best-effort; if the reject POST fails the server just keeps its
+      // suggestion pending and may re-suggest after its cooldown.
+    }
+  }
+
   // Collect unique speaker keys from segments
   const uniqueSpeakers = Array.from(new Set(segments.map(s => s.speaker)));
 
@@ -1043,6 +1104,18 @@ export default function MeetingPage() {
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white text-sm font-medium px-4 py-2.5 rounded-full shadow-lg">
           {voiceToast}
         </div>
+      )}
+
+      {/* Mid-call name-introduction confirmation popup (2026-08-10). Asks the
+          user to confirm/edit/reject a guessed speaker name before it locks. */}
+      {speakerSuggestion && (
+        <SpeakerSuggestionModal
+          speakerId={speakerSuggestion.speakerId}
+          name={speakerSuggestion.name}
+          busy={speakerSuggestionBusy}
+          onConfirm={(editedName) => confirmSpeakerSuggestion(speakerSuggestion.speakerId, editedName)}
+          onReject={() => rejectSpeakerSuggestion(speakerSuggestion.speakerId, speakerSuggestion.name)}
+        />
       )}
 
       {/* Header */}
@@ -1490,6 +1563,68 @@ export default function MeetingPage() {
           onCancel={() => setShowEndMeetingConfirm(false)}
         />
       )}
+    </div>
+  );
+}
+
+// ─── SpeakerSuggestionModal ───────────────────────────────────
+// Confirmation popup for a mid-call name-introduction guess. "We think
+// Speaker 2 is John — is that right?" with Yes / edit-then-Yes / No. Nothing is
+// locked until the user confirms (see confirmSpeakerSuggestion). The name is
+// pre-filled into an editable field so "Yes, but it's spelled Jon" is one tap.
+function SpeakerSuggestionModal({
+  speakerId,
+  name,
+  busy,
+  onConfirm,
+  onReject,
+}: {
+  speakerId: string;
+  name: string;
+  busy: boolean;
+  onConfirm: (editedName: string) => void;
+  onReject: () => void;
+}) {
+  const [edited, setEdited] = useState(name);
+  // Re-seed the field if the server sends a fresh guess while the popup is up.
+  useEffect(() => { setEdited(name); }, [name]);
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6">
+        <div className="text-center mb-4">
+          <div className="text-4xl mb-2">👋</div>
+          <h2 className="text-lg font-bold text-gray-900">Is this {speakerId}?</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            We heard an introduction and think this speaker is:
+          </p>
+        </div>
+        <input
+          type="text"
+          value={edited}
+          onChange={(e) => setEdited(e.target.value)}
+          disabled={busy}
+          className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-center text-lg font-semibold text-gray-900 mb-5 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60"
+          onKeyDown={(e) => { if (e.key === 'Enter' && edited.trim() && !busy) onConfirm(edited.trim()); }}
+          autoFocus
+        />
+        <div className="flex gap-3">
+          <button
+            onClick={onReject}
+            disabled={busy}
+            className="flex-1 border border-gray-200 text-gray-600 font-semibold py-3 rounded-xl text-sm hover:bg-gray-50 transition-colors disabled:opacity-60"
+          >
+            No, not them
+          </button>
+          <button
+            onClick={() => onConfirm(edited.trim())}
+            disabled={busy || !edited.trim()}
+            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm transition-colors disabled:opacity-60"
+          >
+            {busy ? 'Saving…' : 'Yes, that’s right'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

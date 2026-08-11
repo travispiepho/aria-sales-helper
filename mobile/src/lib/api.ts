@@ -43,6 +43,8 @@
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
+import { VoiceFeatures } from '@/lib/voiceFeatures';
+
 const CACHED_USER_KEY = 'aria_cached_user';
 // Native-client WS-auth fallback (2026-08-03): confirmed on a real device that
 // RN's WebSocket upgrade request does not reliably carry the httpOnly
@@ -162,6 +164,40 @@ export async function getMe(): Promise<{ user: User; sessionId?: string }> {
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
   return request('PATCH', '/api/account/password', { currentPassword, newPassword });
+}
+
+// ─── Voice print (2026-08-10, mobile voice-recognition port) ──────────────
+// Mirrors app/web/src/pages/ProfilePage.tsx's inline `apiFetch('/api/profile/voice-print', ...)`
+// calls exactly — same EXISTING backend routes (app/server/server.js's
+// "Voice print routes" section), same request/response shapes. Not a new
+// API surface; just a typed wrapper matching this file's existing
+// request()-based pattern instead of web's raw apiFetch() calls.
+
+export interface VoicePrintStatus {
+  enrolled: boolean;
+  duration_ms?: number;
+  created_at?: string;
+}
+
+// GET /api/profile/voice-print — check enrollment status. Response shape
+// confirmed against server.js: `{ enrolled: false }` or
+// `{ enrolled: true, duration_ms, created_at }`.
+export async function getVoicePrintStatus(): Promise<VoicePrintStatus> {
+  return request('GET', '/api/profile/voice-print');
+}
+
+// POST /api/profile/voice-print — enroll or re-enroll (upsert, one print
+// per user). Body shape confirmed against server.js:
+// `const { features, duration_ms } = request.body` — `features` is the
+// VoiceFeatures object from voiceFeatures.ts's extractVoiceFeatures(),
+// stored as-is (`JSON.stringify(features)`), same object shape web sends.
+export async function saveVoicePrint(features: VoiceFeatures, durationMs: number): Promise<{ ok: boolean }> {
+  return request('POST', '/api/profile/voice-print', { features, duration_ms: durationMs });
+}
+
+// DELETE /api/profile/voice-print — remove enrollment.
+export async function deleteVoicePrint(): Promise<{ ok: boolean }> {
+  return request('DELETE', '/api/profile/voice-print');
 }
 
 export async function getCachedUser(): Promise<User | null> {

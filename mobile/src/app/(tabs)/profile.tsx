@@ -28,7 +28,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, TextInput } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAudioRecorder } from 'expo-audio';
@@ -251,7 +251,7 @@ export default function ProfileScreen() {
             ) : (
               <>
                 {vpStatus?.enrolled && !recording && (
-                  <ThemedView style={styles.vpEnrolledBanner} type="backgroundSelected">
+                  <View style={styles.vpEnrolledBanner}>
                     <ThemedView style={styles.vpEnrolledTextWrap}>
                       <ThemedText type="small" style={styles.vpEnrolledText}>
                         ✅ Voice enrolled
@@ -272,7 +272,7 @@ export default function ProfileScreen() {
                         Remove
                       </ThemedText>
                     </Pressable>
-                  </ThemedView>
+                  </View>
                 )}
 
                 {recording ? (
@@ -410,6 +410,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: Spacing.two,
+    backgroundColor: 'transparent',
   },
   vpEnrolledTextWrap: { gap: 2, flexShrink: 1 },
   vpEnrolledText: { color: '#16A34A', fontWeight: '600' },

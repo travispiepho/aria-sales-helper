@@ -7,6 +7,7 @@ import HomePage from './pages/HomePage';
 import MeetingPage from './pages/MeetingPage';
 import ProfilePage from './pages/ProfilePage';
 import AdminUsersPage from './pages/AdminUsersPage';
+import SettingsPage from './pages/SettingsPage';
 // 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
 // same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
 // live-testing it: "Instead of a popup, I would like an almost identical
@@ -134,6 +135,19 @@ export default function App() {
             element={
               <RequireAuth>
                 <AdminUsersPage />
+              </RequireAuth>
+            }
+          />
+          {/* Settings (2026-08-10). Open to all logged-in users — no
+              admin-only route guard here. The page itself conditionally
+              renders a link to /admin/users only when user?.role ===
+              'admin' (AdminUsersPage.tsx already enforces its own
+              admin check server-side + client-side). */}
+          <Route
+            path="/settings"
+            element={
+              <RequireAuth>
+                <SettingsPage />
               </RequireAuth>
             }
           />

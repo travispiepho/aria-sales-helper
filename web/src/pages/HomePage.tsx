@@ -218,13 +218,28 @@ export default function HomePage() {
             <h1 className="text-2xl font-bold leading-tight">ARIA</h1>
             <p className="text-brand-100 text-base leading-relaxed">Hey {user?.name?.split(' ')[0]} 👋</p>
           </div>
-          <button
-            onClick={() => navigate('/profile')}
-            className="w-11 h-11 rounded-full bg-brand-600 border-2 border-brand-400 hover:bg-brand-500 flex items-center justify-center text-white font-bold text-base transition-colors flex-shrink-0"
-            aria-label="Profile"
-          >
-            {user?.name?.charAt(0)?.toUpperCase() || '?'}
-          </button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {/* Settings icon — directly next to Profile per Gabe's request
+                (2026-08-10). Links to /settings, which itself surfaces
+                the /admin/users link for admin accounts only. */}
+            <button
+              onClick={() => navigate('/settings')}
+              className="w-11 h-11 rounded-full bg-brand-600 border-2 border-brand-400 hover:bg-brand-500 flex items-center justify-center text-white transition-colors flex-shrink-0"
+              aria-label="Settings"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1v0z" />
+              </svg>
+            </button>
+            <button
+              onClick={() => navigate('/profile')}
+              className="w-11 h-11 rounded-full bg-brand-600 border-2 border-brand-400 hover:bg-brand-500 flex items-center justify-center text-white font-bold text-base transition-colors flex-shrink-0"
+              aria-label="Profile"
+            >
+              {user?.name?.charAt(0)?.toUpperCase() || '?'}
+            </button>
+          </div>
         </div>
       </div>
 

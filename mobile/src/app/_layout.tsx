@@ -16,13 +16,19 @@ import { AuthProvider, useAuth } from '@/lib/auth';
 //                      (tabs)/_layout.tsx) to push /meeting instead of ever
 //                      actually rendering this route
 //   (tabs)/profile   — Profile tab: basic account info + sign out
-//   meeting          — UNCHANGED in-person recording screen (moved out of
+//   meeting-setup    — (2026-08-10) NEW pre-recording step: meeting-type
+//                      (in-person/phone) + device-selection, pushed by the
+//                      record tab's intercepted tabPress instead of jumping
+//                      straight to /meeting; pushes on to /meeting itself
+//                      once both choices are made (see meeting-setup.tsx)
+//   meeting          — UNCHANGED recording screen (moved out of
 //                      the tab group so it renders full-screen, without the
 //                      tab bar, exactly as it did before this restructure —
 //                      its internal logic was not touched, only its
 //                      reachability: previously the only screen pushed from
 //                      the old single index.tsx dashboard, now pushed from
-//                      the record tab's intercepted tabPress instead)
+//                      meeting-setup.tsx once channel/device selection is
+//                      done)
 //   meetings/[id]    — meeting detail/transcript view, reached from the
 //                      Home tab's history list
 //
@@ -56,6 +62,7 @@ function ThemedRoot() {
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Protected guard={!!user}>
           <Stack.Screen name="(tabs)" />
+          <Stack.Screen name="meeting-setup" />
           <Stack.Screen name="meeting" />
           <Stack.Screen name="meetings/[id]" />
         </Stack.Protected>

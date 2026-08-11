@@ -224,7 +224,20 @@ export interface Meeting {
   rep_name?: string;
   customer_name?: string;
   speaker_labels?: Record<string, string>;
+  // (2026-08-10) Existing backend column (see
+  // server/migrations/2026-08-04-phone-channel-columns.sql — despite that
+  // file's stale "PROPOSED / SKETCH ONLY — NOT APPLIED" header comment, it
+  // IS live in prod: verified via a direct DB query against the `meetings`
+  // table, column exists with `DEFAULT 'in_person'`). Mobile now sets this
+  // explicitly at meeting-creation time via the new pre-record
+  // meeting-type step (see meeting-setup.tsx) instead of always relying on
+  // the column default.
+  channel?: 'in_person' | 'phone';
 }
+
+// (2026-08-10) Meeting channel/type — reuses the EXISTING `channel` column
+// on the `meetings` table (see Meeting.channel above), not a new field.
+export type MeetingChannel = 'in_person' | 'phone';
 
 // 2026-08-05 (live meeting sync, mobile → web): tags every mobile-created
 // meeting with `origin_client: 'mobile'` so the backend's sync feature
@@ -237,8 +250,21 @@ export interface Meeting {
 // here). Web's createMeeting() (app/web/src/lib/api.ts) intentionally does
 // NOT send this field, so it defaults server-side to 'web' — v1 scope is
 // mobile-origin sync only, per this task's explicit instructions.
-export async function createMeeting(customerId?: string): Promise<Meeting> {
-  return request('POST', '/api/meetings', { customer_id: customerId, origin_client: 'mobile' });
+//
+// (2026-08-10) `channel` param added — the pre-record meeting-setup step
+// (meeting-setup.tsx) now collects an explicit In-Person/Over-the-Phone
+// choice from the user BEFORE this is called, and passes it straight
+// through here so the existing `meetings.channel` column (see Meeting.channel
+// doc above) is set from the user's real choice instead of always falling
+// through to its 'in_person' DB default. Optional + defaults to 'in_person'
+// server-side (see server.js) so this remains backwards compatible with any
+// other caller that doesn't pass it.
+export async function createMeeting(customerId?: string, channel?: MeetingChannel): Promise<Meeting> {
+  return request('POST', '/api/meetings', {
+    customer_id: customerId,
+    origin_client: 'mobile',
+    channel,
+  });
 }
 
 // 2026-08-07: GET /api/meetings now returns a paginated

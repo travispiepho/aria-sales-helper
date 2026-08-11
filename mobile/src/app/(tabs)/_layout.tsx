@@ -4,14 +4,20 @@
  * Three tabs per Troy's request:
  *   - Home (left)   → previous-transcripts / meeting history list (index.tsx)
  *   - Record (center) → visually prominent FAB-style button that launches
- *     the EXISTING meeting.tsx recording flow. It is NOT a real destination
- *     screen — its `tabPress` is intercepted (preventDefault) and redirected
- *     to `router.push('/meeting')`, which lives OUTSIDE this tab group (see
- *     root _layout.tsx) so the recording screen renders full-screen without
- *     the tab bar competing for space with the live transcript panel. This
- *     is the standard Expo Router / React Navigation pattern for a
- *     "launcher" tab (e.g. a camera-shutter center button) that opens a
- *     modal/full-screen flow rather than switching to a persisted tab.
+ *     the meeting flow. It is NOT a real destination screen — its
+ *     `tabPress` is intercepted (preventDefault) and redirected to
+ *     `router.push('/meeting-setup')`, which lives OUTSIDE this tab group
+ *     (see root _layout.tsx) so the recording screen renders full-screen
+ *     without the tab bar competing for space with the live transcript
+ *     panel. This is the standard Expo Router / React Navigation pattern
+ *     for a "launcher" tab (e.g. a camera-shutter center button) that opens
+ *     a modal/full-screen flow rather than switching to a persisted tab.
+ *     (2026-08-10) Changed from pushing straight to `/meeting` to pushing
+ *     to the new `/meeting-setup` pre-recording step (channel + device
+ *     selection) — see meeting-setup.tsx's header for the full design.
+ *     `/meeting-setup` itself pushes on to `/meeting` once the user has
+ *     made both choices there; the EXISTING recording screen/flow at
+ *     `/meeting` is otherwise completely unchanged.
  *   - Profile (right) → basic account screen (profile.tsx)
  *
  * The center button's distinct styling (larger, raised, colored) is done
@@ -65,9 +71,11 @@ export default function TabsLayout() {
         listeners={{
           tabPress: (e) => {
             // Never actually navigate to this tab's own (unreachable) screen
-            // — launch the existing full-screen meeting flow instead.
+            // — launch the pre-recording setup step instead (see file
+            // header: meeting-setup.tsx now sits in front of the existing
+            // full-screen meeting flow).
             e.preventDefault();
-            router.push('/meeting');
+            router.push('/meeting-setup');
           },
         }}
       />

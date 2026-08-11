@@ -99,7 +99,7 @@
  */
 
 import { useNavigation } from '@react-navigation/native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -118,7 +118,7 @@ import { requestRecordingPermissionsAsync, useAudioRecorder } from 'expo-audio';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
-import { createMeeting, getStoredSessionId, getWsBase, Meeting, updateMeeting } from '@/lib/api';
+import { createMeeting, getStoredSessionId, getWsBase, Meeting, MeetingChannel, updateMeeting } from '@/lib/api';
 import {
   armRecordingSession,
   ChunkedPcmStreamer,
@@ -153,6 +153,16 @@ type TranscriptSegment = {
 export default function MeetingScreen() {
   const router = useRouter();
   const navigation = useNavigation();
+  // (2026-08-10) Meeting channel chosen on the new pre-recording
+  // meeting-setup.tsx step, passed through as a route param and forwarded
+  // to createMeeting() below so the EXISTING `meetings.channel` column
+  // (see api.ts's Meeting.channel doc) is set from the user's real choice
+  // instead of always falling through to its 'in_person' DB default.
+  // Defensive fallback to 'in_person' covers the pre-existing fallback
+  // route into this screen (see (tabs)/record.tsx's Redirect) that never
+  // goes through meeting-setup.tsx and so never supplies this param.
+  const { channel: channelParam } = useLocalSearchParams<{ channel?: string }>();
+  const meetingChannel: MeetingChannel = channelParam === 'phone' ? 'phone' : 'in_person';
   const [stage, setStage] = useState<Stage>('idle');
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -357,7 +367,7 @@ export default function MeetingScreen() {
     setStage('creating-meeting');
     let created: Meeting;
     try {
-      [created] = await Promise.all([createMeeting(), armPromise]);
+      [created] = await Promise.all([createMeeting(undefined, meetingChannel), armPromise]);
       setMeeting(created);
     } catch (err) {
       setStage('ws-error');

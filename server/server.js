@@ -3057,7 +3057,70 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   const pendingIntroSuggestion = {};       // si -> nameLower currently awaiting a user answer
   const introSuggestCooldownUntil = {};    // si -> ms; suppress re-suggest until then
 
-  // Controller bridging the REST confirm/reject endpoint back into this
+  // ── ROOT-CAUSE FIX (2026-08-11, Gabe Bass: "no popup ever appears") ───────
+  // The `elapsed >= INTRO_WINDOW_MS` check was ONLY ever evaluated inside
+  // the per-segment `dgSocket.on('message', ...)` handler below, gated on a
+  // NEW final transcript segment landing on that exact speaker slot (`si`).
+  // That means the 15s window was measured correctly, but the check that
+  // compares elapsed-vs-window only RAN when the same speaker produced
+  // another final segment. Real calls overwhelmingly do not look like that:
+  // a customer says one line ("Hi, I'm John") and then goes quiet for the
+  // next 30-90s while the rep talks — the rep's finals never touch the
+  // customer's `si` key, so the customer's own elapsed-time check is never
+  // re-evaluated, and the window closing produces no suggestion at all
+  // unless/until that exact speaker happens to speak again. Confirmed live
+  // against prod transcript_segments (meetings d344ad78-... and aef1531a-...,
+  // 2026-08-12): both contain "I'm <name>" introductions that DID pass
+  // isLikelyName()/introRe (verified directly against nameHeuristics.js),
+  // yet neither meeting has ANY 'speaker_lock_suggestion' in the Railway
+  // runtime logs for that deployment — because in both transcripts the
+  // introducing speaker's very next segment already carries a DIFFERENT
+  // (already-resolved) canonical si after a dedup merge, or simply never
+  // produces a same-slot final again before the window would have closed.
+  // Fix: decouple the elapsed-time check from "did a final segment just
+  // land" by ALSO sweeping every known speaker slot on a fixed interval
+  // timer, independent of new transcript activity. `maybeSuggestIntro(si)`
+  // is the single shared implementation — the per-segment call site below
+  // now just accumulates candidates and delegates the elapsed-check/emit
+  // to this function, and the sweep timer calls the exact same function.
+  function maybeSuggestIntro(si, nowIntro) {
+    if (speakerLocks[si]) return;
+    const elapsed = nowIntro - (speakerFirstSeen[si] ?? nowIntro);
+    const cooldownOk = nowIntro >= (introSuggestCooldownUntil[si] || 0);
+    if (
+      elapsed >= INTRO_WINDOW_MS &&
+      !pendingIntroSuggestion[si] &&
+      cooldownOk &&
+      introCandidates[si] && introCandidates[si].size > 0
+    ) {
+      const best = [...introCandidates[si].values()].sort((a, b) => b.count - a.count)[0];
+      if (best) {
+        pendingIntroSuggestion[si] = best.name.toLowerCase();
+        introSuggestCooldownUntil[si] = nowIntro + INTRO_SUGGEST_COOLDOWN_MS;
+        fastify.log.info(`Speaker intro SUGGESTION: Speaker ${parseInt(si, 10) + 1} may be "${best.name}" (awaiting user confirm)`);
+        broadcastToMeeting(meetingId, {
+          type: 'speaker_lock_suggestion',
+          speakerId: `Speaker ${parseInt(si, 10) + 1}`,
+          name: best.name,
+        });
+      }
+    }
+  }
+
+  // Sweep every 3s so a suggestion fires ~on time even if the introducing
+  // speaker doesn't produce another final segment before the window closes
+  // (the actual bug — see comment above). Cheap: iterates a handful of
+  // speaker-slot keys, no I/O. Cleared on socket close alongside every other
+  // per-connection timer in this handler.
+  const INTRO_SWEEP_MS = 3000;
+  const introSweepTimer = setInterval(() => {
+    const nowSweep = Date.now();
+    for (const si of Object.keys(speakerFirstSeen)) {
+      maybeSuggestIntro(si, nowSweep);
+    }
+  }, INTRO_SWEEP_MS);
+  if (typeof introSweepTimer.unref === 'function') introSweepTimer.unref();
+  // 
   // closure's live `speakerLocks` state. Registered now, unregistered on close.
   const speakerLockController = {
     // Parse a client-facing "Speaker N" label back to the 0-based canonical si
@@ -3541,31 +3604,16 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
               introCandidates[si].set(nameLower, { name: display, count: (prev ? prev.count : 0) + 1 });
             }
 
-            // After the 15s collection window, if we have a candidate and no
-            // suggestion is currently pending (and we're past any cooldown),
-            // surface the best (most-repeated) candidate for confirmation.
-            const elapsed = nowIntro - speakerFirstSeen[si];
-            const cooldownOk = nowIntro >= (introSuggestCooldownUntil[si] || 0);
-            if (
-              elapsed >= INTRO_WINDOW_MS &&
-              !pendingIntroSuggestion[si] &&
-              cooldownOk &&
-              introCandidates[si] && introCandidates[si].size > 0
-            ) {
-              const best = [...introCandidates[si].values()].sort((a, b) => b.count - a.count)[0];
-              if (best) {
-                pendingIntroSuggestion[si] = best.name.toLowerCase();
-                introSuggestCooldownUntil[si] = nowIntro + INTRO_SUGGEST_COOLDOWN_MS;
-                fastify.log.info(`Speaker intro SUGGESTION: Speaker ${parseInt(si, 10) + 1} may be "${best.name}" (awaiting user confirm)`);
-                // New WS message type (server -> client). Mirrors the
-                // speaker_lock shape but is a QUESTION, not a committed lock.
-                broadcastToMeeting(meetingId, {
-                  type: 'speaker_lock_suggestion',
-                  speakerId: `Speaker ${parseInt(si, 10) + 1}`,
-                  name: best.name,
-                });
-              }
-            }
+            // 2026-08-11 root-cause fix: the elapsed-time check + suggestion
+            // emit used to live inline here, which meant it only ran when
+            // THIS speaker slot produced another final segment. Delegated to
+            // maybeSuggestIntro() so the SAME check also runs on the sweep
+            // timer above, independent of new transcript activity — see the
+            // fix comment near introSweepTimer's declaration for why that
+            // matters. Still called here too (not just from the sweep) so a
+            // suggestion can fire immediately on this segment if the window
+            // already elapsed, rather than waiting up to INTRO_SWEEP_MS.
+            maybeSuggestIntro(si, nowIntro);
           }
 
           const groupLabel = speakerLocks[si] || `Speaker ${group.si + 1}`;
@@ -3740,6 +3788,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     closed = true;
     unregisterMeetingSocket(meetingId, socket);
     unregisterSpeakerController(meetingId, speakerLockController);
+    clearInterval(introSweepTimer);
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
       try {

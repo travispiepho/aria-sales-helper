@@ -289,30 +289,32 @@ export async function resolveCustomerByPhone(pool, rawCallerNumber) {
 }
 
 /**
- * Find-or-create the `meetings` row for an inbound phone call, per the
- * "one continuous timeline" mandate (spec Section 5) — a phone call is just
- * another `meetings` row with channel='phone' and call_sid set, not a
- * parallel table.
+ * Find-or-create the `meetings` row for an inbound OR outbound phone call,
+ * per the "one continuous timeline" mandate (spec Section 5) — a phone call
+ * is just another `meetings` row with channel='phone' and call_sid set, not
+ * a parallel table.
  *
  * Idempotent on call_sid: if a meeting for this CallSid already exists
- * (e.g. Twilio retries the webhook), returns the existing row rather than
- * creating a duplicate.
+ * (e.g. Twilio retries the webhook, or the outbound-call route already
+ * created the row before the /telephony/outbound-answer callback fires),
+ * returns the existing row rather than creating a duplicate.
  *
  * customer_id is nullable (mirrors the existing in-person flow's
- * `customer_id || null` pattern) — an unresolved caller still gets a
+ * `customer_id || null` pattern) — an unresolved caller/callee still gets a
  * tracked meeting row, just without a customer link, matching Requirement
  * 10's "manual fallback" allowance in the spec.
  *
- * rep_id is intentionally left null here — no rep is known/authenticated at
- * inbound-call-webhook time in this v0 (no "Aria calls you" outbound flow
- * exists yet, so there's no calling rep session to attach). A future
- * outbound-call flow (once TWILIO_TWIML_APP_SID exists) would set this from
- * the rep-initiated call context instead.
+ * rep_id (added 2026-08-13 for the outbound "Aria calls the rep" flow, v0):
+ * inbound calls still pass null here (no rep is known/authenticated at
+ * inbound-call-webhook time). The outbound-call route below DOES know the
+ * authenticated rep (the app-session user placing the call) and passes
+ * their id through so the meeting is correctly attributed, exactly like the
+ * existing in-person `POST /api/meetings` flow's rep_id handling.
  *
  * @param {import('pg').Pool} pool
- * @param {{ callSid: string, customerId: string|null }} params
+ * @param {{ callSid: string, customerId: string|null, repId?: string|null }} params
  */
-export async function findOrCreatePhoneMeeting(pool, { callSid, customerId }) {
+export async function findOrCreatePhoneMeeting(pool, { callSid, customerId, repId = null }) {
   if (!callSid) throw new Error('findOrCreatePhoneMeeting requires callSid');
 
   const existing = await pool.query('SELECT * FROM meetings WHERE call_sid = $1', [callSid]);
@@ -322,9 +324,9 @@ export async function findOrCreatePhoneMeeting(pool, { callSid, customerId }) {
 
   const inserted = await pool.query(
     `INSERT INTO meetings (customer_id, rep_id, status, channel, call_sid)
-     VALUES ($1, NULL, 'active', 'phone', $2)
+     VALUES ($1, $2, 'active', 'phone', $3)
      RETURNING *`,
-    [customerId || null, callSid]
+    [customerId || null, repId || null, callSid]
   );
   return { meeting: inserted.rows[0], created: true };
 }
@@ -434,6 +436,185 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     }
 
     return reply.code(200).send({ ok: true });
+  });
+
+  // ── POST /telephony/outbound-call — APP-FACING route (called by aria-web,
+  // NOT by Twilio) — "Aria calls the rep" v0 ─────────────────────────────
+  // This is NOT a Twilio webhook: it is hit by our own authenticated web
+  // app, so it must go through the app's normal session-cookie auth (same
+  // `request.user` decorator the global preHandler hook in server.js sets
+  // on every request on this fastify instance) and must NOT be run through
+  // validateTwilioSignature() — there is no X-Twilio-Signature on a request
+  // that never came from Twilio.
+  //
+  // Flow (v0, BRIDGE ONLY — no Media Stream / audio forking, per this
+  // pass's explicit scope):
+  //   1. Rep (authenticated user) submits their own phone + the customer's
+  //      phone via aria-web.
+  //   2. This route normalizes both numbers, resolves the customer by the
+  //      CUSTOMER number (not the rep's — the rep is already known via
+  //      request.user), creates the `meetings` row up front (channel='phone',
+  //      rep_id=request.user.id) so call_sid linkage exists even if the rep
+  //      never answers, then places a REST call via getRestClient() FROM
+  //      TWILIO_PHONE_NUMBER TO the rep's number.
+  //   3. Twilio calls the rep. When the rep answers, Twilio hits
+  //      /telephony/outbound-answer (below, Twilio-facing, signature-
+  //      validated) which plays the consent disclosure then <Dial>s the
+  //      customer.
+  //   4. The customer's number is stashed as the Call resource's
+  //      `machineDetection`-free plain outbound call; the outbound-answer
+  //      callback reads it back via a `?customer=` querystring param on the
+  //      answer-webhook URL (Twilio echoes the URL's querystring back on the
+  //      webhook request) rather than a second DB round-trip keyed only on
+  //      CallSid at answer-time — simpler and avoids a race if the answer
+  //      webhook fires before this route's own DB write would otherwise be
+  //      visible.
+  fastify.post('/telephony/outbound-call', async (request, reply) => {
+    if (!request.user) {
+      return reply.code(401).send({ error: 'Unauthorized' });
+    }
+
+    // Gate on isConfigured() ONLY. The original code also required
+    // TWILIO_APP_SID here while its own comment admitted the SID isn't
+    // needed to place a plain REST call — a false dependency that would
+    // 503 this route over a TwiML-App value it never uses. This flow calls
+    // restClient.calls.create({ url: answerUrl }) with an explicit TwiML
+    // URL; a TwiML App is an alternative way to supply that URL, not a
+    // prerequisite for it. isConfigured() already covers the credentials
+    // and TWILIO_PHONE_NUMBER this route actually depends on.
+    if (!isConfigured()) {
+      return notConfiguredReply(reply);
+    }
+
+    const { repPhone, customerPhone, customerId: customerIdHint } = request.body || {};
+    const normalizedRepPhone = normalizePhoneNumber(repPhone);
+    const normalizedCustomerPhone = normalizePhoneNumber(customerPhone);
+
+    if (!normalizedRepPhone) {
+      return reply.code(400).send({ error: 'Invalid or missing repPhone', field: 'repPhone' });
+    }
+    if (!normalizedCustomerPhone) {
+      return reply.code(400).send({ error: 'Invalid or missing customerPhone', field: 'customerPhone' });
+    }
+
+    let customer = null;
+    try {
+      const resolved = await resolveCustomerByPhone(pool, normalizedCustomerPhone);
+      customer = resolved.customer;
+    } catch (err) {
+      fastify.log.error(`/telephony/outbound-call customer lookup failed: ${err.message}`);
+    }
+    const customerId = customer ? customer.id : (customerIdHint || null);
+
+    const restClient = getRestClient();
+    if (!restClient) {
+      return reply.code(503).send({ error: 'Twilio REST client unavailable (missing credentials)' });
+    }
+
+    const forwardedProto = request.headers['x-forwarded-proto'];
+    const protocol = (forwardedProto ? forwardedProto.split(',')[0].trim() : null) || 'https';
+    const host = request.headers['x-forwarded-host'] || request.headers.host || request.hostname;
+    const answerUrl = `${protocol}://${host}/telephony/outbound-answer?customer=${encodeURIComponent(normalizedCustomerPhone)}`;
+    const statusCallbackUrl = `${protocol}://${host}/telephony/status-callback`;
+
+    let call;
+    try {
+      call = await restClient.calls.create({
+        to: normalizedRepPhone,
+        from: TWILIO_PHONE_NUMBER,
+        url: answerUrl,
+        statusCallback: statusCallbackUrl,
+        statusCallbackEvent: ['completed'],
+      });
+    } catch (err) {
+      fastify.log.error(`/telephony/outbound-call Twilio REST call failed: ${err.message}`);
+      return reply.code(502).send({ error: 'Failed to place outbound call via Twilio', detail: err.message });
+    }
+
+    let meeting = null;
+    try {
+      const { meeting: m, created } = await findOrCreatePhoneMeeting(pool, {
+        callSid: call.sid,
+        customerId,
+        repId: request.user.id,
+      });
+      meeting = m;
+      fastify.log.info(
+        `/telephony/outbound-call: CallSid=${call.sid} rep=${request.user.id} repPhone=${normalizedRepPhone} ` +
+        `customerPhone=${normalizedCustomerPhone} customerMatch=${customer ? customer.id : 'none'} ` +
+        `meeting=${meeting.id} created=${created}`
+      );
+    } catch (err) {
+      // A DB failure here must not undo the already-placed real call — log
+      // loudly and still return the CallSid so the rep-side UI can show call
+      // state; meeting linkage can be reconciled after the fact via call_sid.
+      fastify.log.error(`/telephony/outbound-call meeting create failed: ${err.message}`);
+    }
+
+    return reply.code(200).send({
+      callSid: call.sid,
+      meetingId: meeting ? meeting.id : null,
+      status: call.status,
+    });
+  });
+
+  // ── POST /telephony/outbound-answer — TWILIO-FACING TwiML callback for the
+  // outbound "Aria calls the rep" call, hit when the REP answers ─────────
+  // Unlike /telephony/outbound-call above, this route IS hit by Twilio
+  // directly, so it MUST be signature-validated exactly like the existing
+  // /telephony/voice and /telephony/status-callback routes above.
+  //
+  // ⚠️ CONSENT: reuses the SAME CONSENT_DISCLOSURE_TWIML_SAY placeholder
+  // constant defined above — see the REQUIRED-DECISION comment block by its
+  // definition. Do not invent new disclosure wording here. The same
+  // pre-launch legal/consent sign-off requirement that applies to the
+  // inbound flow applies equally to this outbound flow: this call is a
+  // three-way rep/Aria/customer conversation and the customer being <Dial>'d
+  // in has had NO opportunity to hang up before the disclosure plays (unlike
+  // inbound, where the caller dialed in voluntarily) — if anything this path
+  // deserves EXTRA scrutiny before a real customer number is ever dialed
+  // through it. Do not remove or soften this warning.
+  //
+  // NO <Stream>/audio forking in this pass, per explicit task scope — this
+  // is bridge-only: <Say> disclosure, then <Dial> the customer, full stop.
+  fastify.post('/telephony/outbound-answer', async (request, reply) => {
+    if (!isConfigured()) return notConfiguredReply(reply);
+
+    const signatureCheck = validateTwilioSignature(request);
+    if (!signatureCheck.ok) {
+      fastify.log.warn(`Twilio signature validation failed for /telephony/outbound-answer: ${signatureCheck.reason}`);
+      return reply.code(403).send({ error: 'Invalid Twilio signature', reason: signatureCheck.reason });
+    }
+
+    const { CallSid } = request.body || {};
+    const rawCustomerParam = request.query?.customer;
+    // HARD-FAIL on anything normalizePhoneNumber() rejects. Do NOT fall back
+    // to the raw querystring value (the original code did `normalize(raw) ||
+    // raw`): that defeated normalization entirely and interpolated arbitrary
+    // unescaped text straight into the <Dial> body below, so a malformed
+    // number produced broken/injected XML instead of a clean error. The only
+    // value that may ever reach the TwiML is a validated E.164 string from
+    // normalizePhoneNumber(), which can only return `+` followed by digits.
+    const customerNumber = normalizePhoneNumber(rawCustomerParam);
+
+    if (!customerNumber) {
+      fastify.log.error(`/telephony/outbound-answer CallSid=${CallSid} missing/invalid customer querystring param — cannot <Dial>`);
+      const errorTwiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Sorry, we could not complete this call. Goodbye.</Say>
+  <Hangup/>
+</Response>`;
+      return reply.type('text/xml').send(errorTwiml);
+    }
+
+    fastify.log.info(`/telephony/outbound-answer: rep answered, CallSid=${CallSid}, dialing customer=${customerNumber}`);
+
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${CONSENT_DISCLOSURE_TWIML_SAY}</Say>
+  <Dial callerId="${TWILIO_PHONE_NUMBER}">${customerNumber}</Dial>
+</Response>`;
+    return reply.type('text/xml').send(twiml);
   });
 
   // ── GET /telephony/stream — Twilio Media Streams WebSocket handler ──────

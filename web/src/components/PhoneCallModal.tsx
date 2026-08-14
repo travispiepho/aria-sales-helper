@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { startOutboundCall } from '../lib/api';
+import { useAuth } from '../lib/auth';
 
 interface Props {
   onClose: () => void;
@@ -29,7 +30,13 @@ function looksLikePhoneNumber(raw: string): boolean {
 }
 
 export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
-  const [repPhone, setRepPhone] = useState('');
+  const { user } = useAuth();
+  // Prefill from the rep's saved profile number (added 2026-08-13, see
+  // ProfilePage.tsx's "Your Phone Number" field / PATCH /api/profile) so a
+  // rep who has already saved a number never has to retype it. Still fully
+  // editable — this is only a default, not a lock — and falls back to an
+  // empty string if the rep hasn't saved one yet (unchanged old behavior).
+  const [repPhone, setRepPhone] = useState(user?.phone || '');
   const [customerPhone, setCustomerPhone] = useState('');
   const [repPhoneError, setRepPhoneError] = useState('');
   const [customerPhoneError, setCustomerPhoneError] = useState('');

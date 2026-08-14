@@ -1,0 +1,39 @@
+-- 2026-08-13-users-phone.sql
+--
+-- Adds a nullable `phone` column to `users` so a rep's own phone number can
+-- be stored on their profile and used to prefill the "Your Phone Number"
+-- field in PhoneCallModal.tsx (the outbound "Call a Customer" flow shipped
+-- in commit adba96d), instead of asking the rep to retype it on every call.
+--
+-- Non-destructive
+-- ---------------
+-- ADD COLUMN IF NOT EXISTS on a nullable TEXT column with no default: safe
+-- to re-run, no rewrite of existing rows (all get NULL, i.e. "no phone on
+-- file yet" — same idempotent pattern as
+-- migrations/2026-08-10-users-deactivated-at.sql). Does NOT touch
+-- users.role or its CHECK constraint (users_role_check) — untouched here.
+--
+-- Format
+-- ------
+-- Stored normalized (E.164, e.g. "+16165551234") by the backend's PATCH
+-- /api/profile handler using the same normalizePhoneNumber() helper
+-- telephony.js already exports/uses for caller-ID matching. No CHECK
+-- constraint added here — validation happens application-side so an
+-- unparsable-but-not-empty value can still be rejected with a clear 400
+-- rather than a opaque constraint-violation 500.
+--
+-- Boot-time parity
+-- -----------------
+-- Also applied via server.js's ensureSessionsTable() (same idempotent
+-- ALTER), matching this repo's existing convention (see the
+-- 2026-08-10-users-deactivated-at.sql note) so a Railway/Vercel redeploy
+-- alone is sufficient to bring prod schema in sync; this file exists for
+-- parity + fresh-install (migrate.js) coverage.
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+
+-- Verification query (reference for hand-testing):
+--   SELECT column_name, data_type, is_nullable
+--   FROM information_schema.columns
+--   WHERE table_name = 'users' AND column_name = 'phone';
+--   -- expected: phone | text | YES

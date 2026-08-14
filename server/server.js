@@ -24,7 +24,7 @@ import { createMeetingDoc } from './googleDocs.js';
 // TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_PHONE_NUMBER) are set. See
 // voicePrint.js / telephony.js module-level docs for full context.
 import * as pyannote from './voicePrint.js';
-import { registerTelephonyRoutes, isConfigured as isTwilioConfigured, configStatus as twilioConfigStatus } from './telephony.js';
+import { registerTelephonyRoutes, isConfigured as isTwilioConfigured, configStatus as twilioConfigStatus, normalizePhoneNumber } from './telephony.js';
 // ARIA Priority 1 roadmap (2026-08-05): BANT/closing-certainty, insider-
 // language flagger, question-listening gaps. See coachingAnalysis.js.
 import { analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebuttal } from './coachingAnalysis.js';
@@ -644,6 +644,15 @@ async function ensureSessionsTable() {
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ
   `);
+  // Rep phone number on file (added 2026-08-13, see
+  // migrations/2026-08-13-users-phone.sql for the full rationale). Nullable
+  // TEXT, stored E.164-normalized by the PATCH /api/profile handler below.
+  // Lets PhoneCallModal.tsx prefill the "Your Phone Number" field from the
+  // logged-in rep's saved number instead of asking them to retype it every
+  // call.
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT
+  `);
   // Invites table (added 2026-08-10, part of the admin "invite a new user"
   // feature — POST /api/admin/invite). This is a STUB persistence layer
   // only: no email is actually sent by this route yet (see the route
@@ -796,7 +805,7 @@ fastify.addHook('preHandler', async (request, reply) => {
   const session = await getSession(sessionId);
   if (session) {
     const result = await pool.query(
-      'SELECT id, name, email, role FROM users WHERE id = $1 AND deactivated_at IS NULL',
+      'SELECT id, name, email, role, phone FROM users WHERE id = $1 AND deactivated_at IS NULL',
       [session.userId]
     );
     if (result.rows.length > 0) {
@@ -1063,6 +1072,40 @@ fastify.patch('/api/account/password', { preHandler: [requireAuth] }, async (req
   await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, user.id]);
 
   return { ok: true };
+});
+
+// PATCH /api/profile — self-service profile fields. Currently just `phone`
+// (added 2026-08-13 so PhoneCallModal.tsx can prefill the rep's own number
+// instead of asking them to retype it every call — see
+// migrations/2026-08-13-users-phone.sql). Same self-service pattern as
+// PATCH /api/account/password above: any authenticated user (rep or admin)
+// can update their OWN row, no role check needed.
+//
+// Validation is loose by design: accept E.164 ("+16165551234") or common
+// US-formatted input ("(616) 555-1234", "616-555-1234", "6165551234") via
+// telephony.js's normalizePhoneNumber() (libphonenumber-js, US default
+// region) — the SAME normalizer already used for caller-ID matching, so
+// there's exactly one phone-parsing implementation in this codebase, not
+// two. An empty string or null clears the field (rep hasn't set one / wants
+// to unset it) rather than erroring. A non-empty value that fails to parse
+// is a 400, not a silent store of garbage.
+fastify.patch('/api/profile', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { phone } = request.body || {};
+
+  let normalizedPhone = null;
+  if (phone !== undefined && phone !== null && String(phone).trim() !== '') {
+    normalizedPhone = normalizePhoneNumber(String(phone));
+    if (!normalizedPhone) {
+      return reply.code(400).send({ error: 'Enter a valid phone number, e.g. (616) 555-1234' });
+    }
+  }
+
+  const result = await pool.query(
+    'UPDATE users SET phone = $1 WHERE id = $2 RETURNING id, name, email, role, phone',
+    [normalizedPhone, request.user.id]
+  );
+
+  return { user: result.rows[0] };
 });
 
 // ─── Admin: user management ─────────────────────────────────────────────────

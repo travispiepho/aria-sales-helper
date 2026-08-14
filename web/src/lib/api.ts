@@ -43,6 +43,10 @@ export interface User {
   name: string;
   email: string;
   role: Role;
+  // Rep's own phone number on file (added 2026-08-13), E.164-normalized by
+  // the server. Null/undefined if the rep hasn't saved one yet. Used to
+  // prefill PhoneCallModal.tsx's "Your Phone Number" field.
+  phone?: string | null;
 }
 
 export async function login(email: string, password: string): Promise<{ user: User }> {
@@ -59,6 +63,12 @@ export async function getMe(): Promise<{ user: User }> {
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
   return request('PATCH', '/api/account/password', { currentPassword, newPassword });
+}
+
+// Profile: self-service phone number (added 2026-08-13). Pass '' or null to
+// clear a previously saved number. See server.js's PATCH /api/profile.
+export async function updateProfile(phone: string | null): Promise<{ user: User }> {
+  return request('PATCH', '/api/profile', { phone });
 }
 
 // Admin: user management (2026-08-10). Currently list + soft-delete only;

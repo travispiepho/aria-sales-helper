@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
-import { apiFetch, changePassword } from '../lib/api';
+import { apiFetch, changePassword, updateProfile } from '../lib/api';
 import { extractVoiceFeatures, VoiceFeatures } from '../lib/voiceFeatures';
 import { roleLabel } from '../lib/roles';
 
@@ -17,6 +17,14 @@ interface VoicePrintStatus {
 export default function ProfilePage() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+
+  // Phone number (added 2026-08-13) — lets a rep save their own number once
+  // so PhoneCallModal.tsx's "Your Phone Number" field prefills from it
+  // instead of asking them to retype it on every call. Seeded from the
+  // logged-in user's stored value and kept editable.
+  const [phone, setPhone] = useState(user?.phone || '');
+  const [phoneSaving, setPhoneSaving] = useState(false);
+  const [phoneMsg, setPhoneMsg] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
   const [vpStatus, setVpStatus] = useState<VoicePrintStatus | null>(null);
   const [recording, setRecording] = useState(false);
@@ -45,6 +53,13 @@ export default function ProfilePage() {
       .catch(() => setVpStatus({ enrolled: false }));
     return () => stopRecording();
   }, []);
+
+  // user loads asynchronously (getMe() in AuthProvider) — sync the local
+  // phone input once it resolves, so a fresh page load doesn't show a
+  // blank field while `user` is still null on the first render.
+  useEffect(() => {
+    setPhone(user?.phone || '');
+  }, [user?.phone]);
 
   async function startRecording() {
     setVpMsg('');
@@ -158,6 +173,29 @@ export default function ProfilePage() {
     await apiFetch('/api/profile/voice-print', { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
     setVpStatus({ enrolled: false });
     setVpMsg('');
+  }
+
+  async function handleSavePhone(e: React.FormEvent) {
+    e.preventDefault();
+    setPhoneMsg(null);
+    setPhoneSaving(true);
+    try {
+      // NOTE: this updates the DB and this page's local `phone` state
+      // immediately, but the shared AuthContext `user` object (see
+      // lib/auth.tsx) is only refreshed on next app load/getMe() call —
+      // out of scope for this change to touch auth.tsx's context-update
+      // wiring. PhoneCallModal.tsx's prefill therefore picks up a freshly
+      // saved number on the rep's NEXT app session, not instantly within
+      // the same one, unless they've already reloaded since saving.
+      const { user: updated } = await updateProfile(phone.trim());
+      setPhone(updated.phone || '');
+      setPhoneMsg({ type: 'success', text: '✅ Phone number saved.' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to save phone number.';
+      setPhoneMsg({ type: 'error', text: msg });
+    } finally {
+      setPhoneSaving(false);
+    }
   }
 
   async function handleChangePassword(e: React.FormEvent) {
@@ -310,6 +348,42 @@ export default function ProfilePage() {
               {vpMsg}
             </p>
           )}
+        </div>
+
+        {/* Phone Number — added 2026-08-13 so "Call a Customer" can
+            prefill the rep's own number instead of asking them to retype
+            it every time (see PhoneCallModal.tsx). */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-lg">📞</span>
+            <h2 className="font-semibold text-gray-900">Your Phone Number</h2>
+          </div>
+          <p className="text-sm text-gray-500 mb-4">
+            Saved here so the "Call a Customer" screen can prefill your number automatically.
+          </p>
+          <form onSubmit={handleSavePhone} className="space-y-3">
+            <div>
+              <input
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="(616) 555-1234"
+                className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+            </div>
+            {phoneMsg && (
+              <p className={`text-sm ${phoneMsg.type === 'success' ? 'text-green-700' : 'text-red-600'}`}>
+                {phoneMsg.text}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={phoneSaving}
+              className="w-full bg-brand-700 hover:bg-brand-800 disabled:opacity-50 text-white font-semibold py-3 rounded-xl text-sm transition-colors"
+            >
+              {phoneSaving ? 'Saving…' : 'Save Phone Number'}
+            </button>
+          </form>
         </div>
 
         {/* Change Password */}

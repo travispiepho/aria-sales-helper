@@ -402,3 +402,34 @@ export interface ActiveSyncMeeting {
 export async function getActiveSyncMeeting(): Promise<{ active: ActiveSyncMeeting | null }> {
   return request('GET', '/api/meetings/active-sync');
 }
+
+// ─── Outbound phone meetings ("Aria calls the rep, then bridges the
+// customer"), 2026-08-13 — rep-facing web UI wiring only. This hits
+// server/telephony.js's POST /telephony/outbound-call (a top-level route,
+// NOT under /api — same auth/session cookie as every other call here since
+// request() always sends credentials: 'include'). The endpoint places a
+// REAL Twilio call: it rings the rep's own phone first, and once answered
+// plays a recorded-call disclosure and bridges the customer in. See
+// server/telephony.js's route-level comment block for the full flow and
+// PhoneCallModal.tsx (web/src/components) for the calling UI + required
+// on-screen recording notice. NOTE: server may return 503 until Twilio
+// account setup (phone number / TwiML App SID) finishes on the backend
+// side — that is expected and the UI below surfaces it as a real error,
+// not a fake success.
+
+export interface OutboundCallResult {
+  callSid: string;
+  meetingId: string | null;
+}
+
+export async function startOutboundCall(
+  repPhone: string,
+  customerPhone: string,
+  customerId?: string
+): Promise<OutboundCallResult> {
+  return request('POST', '/telephony/outbound-call', {
+    repPhone,
+    customerPhone,
+    ...(customerId ? { customerId } : {}),
+  });
+}

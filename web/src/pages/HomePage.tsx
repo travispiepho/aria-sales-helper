@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { listMeetings, createMeeting, deleteMeeting, getMeeting, getMeetingSegments, updateMeeting, Meeting } from '../lib/api';
 import CustomerIntakeModal from '../components/CustomerIntakeModal';
+import PhoneCallModal from '../components/PhoneCallModal';
 
 function formatDate(iso: string) {
   const d = new Date(iso);
@@ -37,6 +38,7 @@ export default function HomePage() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [loading, setLoading] = useState(true);
   const [showIntake, setShowIntake] = useState(false);
+  const [showPhoneCall, setShowPhoneCall] = useState(false);
   const [starting, setStarting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
@@ -258,6 +260,21 @@ export default function HomePage() {
           >
             {starting ? 'Starting…' : '▶ Start Meeting'}
           </button>
+          {/* 2026-08-13: "Aria calls me, then bridges the customer in" phone
+              meeting entry point — modeled on the in-person Start Meeting
+              flow above but opens PhoneCallModal instead, which collects
+              rep/customer numbers and calls POST /telephony/outbound-call
+              (see api.ts's startOutboundCall). Server may still return 503
+              if Twilio isn't fully provisioned yet — PhoneCallModal itself
+              surfaces that as a real, visible error rather than pretending
+              to succeed. */}
+          <button
+            onClick={() => setShowPhoneCall(true)}
+            disabled={starting}
+            className="w-full mt-2 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
+          >
+            📞 Call a Customer
+          </button>
         </div>
 
         {/* Today's Meetings */}
@@ -408,6 +425,17 @@ export default function HomePage() {
           onCreated={(customerId, title) => {
             setShowIntake(false);
             handleStartMeeting(customerId, title);
+          }}
+        />
+      )}
+
+      {/* Phone Meeting Modal ("Aria calls me, then bridges the customer in") */}
+      {showPhoneCall && (
+        <PhoneCallModal
+          onClose={() => setShowPhoneCall(false)}
+          onMeetingReady={(meetingId) => {
+            setShowPhoneCall(false);
+            navigate(`/meetings/${meetingId}`);
           }}
         />
       )}

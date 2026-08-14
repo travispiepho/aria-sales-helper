@@ -70,6 +70,9 @@
 import twilio from 'twilio';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { twilioPayloadToLinear16Buffer } from './audioCodec.js';
+import { createDeepgramSession } from './deepgramSession.js';
+
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 // API Key auth (current state — no legacy Auth Token exists for this
@@ -342,7 +345,7 @@ export async function findOrCreatePhoneMeeting(pool, { callSid, customerId, repI
  * handle that content-type). This was a real, flagged gap in the prior
  * scaffolding pass — fixed here, not deferred again.
  */
-export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket } = {}) {
+export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting } = {}) {
   const formbody = (await import('@fastify/formbody')).default;
   await fastify.register(formbody);
 
@@ -609,9 +612,26 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
 
     fastify.log.info(`/telephony/outbound-answer: rep answered, CallSid=${CallSid}, dialing customer=${customerNumber}`);
 
+    // ── Media Stream for outbound calls (added for phone-channel live
+    // transcription — see /telephony/stream below) ─────────────────────────
+    // Host derivation mirrors /telephony/voice above (x-forwarded-proto /
+    // x-forwarded-host aware, same pattern used by /telephony/outbound-call
+    // for its answerUrl) — not hardcoded. The <Say> disclosure stays FIRST
+    // and UNCHANGED, exactly as required; <Start><Stream> is added
+    // immediately after it, same relative position as the inbound
+    // /telephony/voice TwiML above, before the <Dial> that actually
+    // connects the customer.
+    const forwardedProto = request.headers['x-forwarded-proto'];
+    const protocol = (forwardedProto ? forwardedProto.split(',')[0].trim() : null) || 'https';
+    const host = request.headers['x-forwarded-host'] || request.headers.host || request.hostname;
+    const wsProtocol = protocol === 'http' ? 'ws' : 'wss';
+
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>${CONSENT_DISCLOSURE_TWIML_SAY}</Say>
+  <Start>
+    <Stream url="${wsProtocol}://${host}/telephony/stream" />
+  </Start>
   <Dial callerId="${TWILIO_PHONE_NUMBER}">${customerNumber}</Dial>
 </Response>`;
     return reply.type('text/xml').send(twiml);
@@ -649,6 +669,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     let streamSid = null;
     let callSid = null;
     let meetingId = null;
+    let dgSession = null;
 
     socket.on('message', async (raw) => {
       let msg;
@@ -686,22 +707,72 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
             }
           }
 
-          // ⚠️ NOT WIRED IN THIS PASS — Deepgram connection for phone-channel
-          // audio. Per the task's write-scope, the shared Deepgram-connection
-          // helper factored out of server.js's in-person handler is real
-          // engineering work (extracting ~150 lines of connection/reconnect/
-          // message-handling logic into something both routes call) that
-          // touches server.js's working in-person pipeline — explicitly
-          // flagged for a follow-up pass rather than risking destabilizing
-          // the proven in-person flow inside this same change. See the build
-          // report's "remaining once phone number arrives" list. The exact
-          // call site is below in the `media` case.
-          //
+          // ── Open Deepgram live-transcription connection for this call ──
+          // Uses the standalone deepgramSession.js module (see its header
+          // comment for why this duplicates, rather than shares, the
+          // in-person handler's Deepgram connection logic in server.js —
+          // that file is explicitly NOT touched in this pass). Opened here
+          // on `start` (not on WS connect) so it's tied to a specific
+          // Twilio call/streamSid, matching the in-person handler's
+          // per-connection lifecycle.
+          if (!DEEPGRAM_API_KEY) {
+            fastify.log.warn(`Twilio stream: DEEPGRAM_API_KEY not set — phone call ${callSid} will not be transcribed`);
+          } else if (!dgSession) {
+            const dgMeetingId = meetingId; // captured now; stable for this connection's lifetime
+            dgSession = createDeepgramSession({
+              apiKey: DEEPGRAM_API_KEY,
+              log: (msg2) => fastify.log.info(`[callSid=${callSid}] ${msg2}`),
+              onError: (err) => fastify.log.error(`Twilio stream Deepgram error (callSid=${callSid}): ${err.message}`),
+              onCircuitOpen: (reason) => {
+                fastify.log.error(`Twilio stream Deepgram circuit breaker OPEN (callSid=${callSid}): ${reason}`);
+                if (dgMeetingId && broadcastToMeeting) {
+                  broadcastToMeeting(dgMeetingId, {
+                    type: 'error',
+                    error: 'Live transcription temporarily unavailable (Deepgram reconnect limit reached) for this call.',
+                  });
+                }
+              },
+              onTranscript: (result) => {
+                if (!dgMeetingId) return; // no meeting row resolved yet — nothing to persist/broadcast against
+                const speakerLabel = `Speaker ${result.speaker + 1}`;
+                if (result.isFinal) {
+                  if (pool) {
+                    const wordCount = result.words.length > 0
+                      ? result.words.length
+                      : result.text.split(/\s+/).filter(Boolean).length;
+                    let durationMs = null;
+                    const timedWords = result.words.filter((w) => w.start !== undefined && w.end !== undefined);
+                    if (timedWords.length > 0) {
+                      const firstStart = timedWords[0].start;
+                      const lastEnd = timedWords[timedWords.length - 1].end;
+                      if (lastEnd > firstStart) durationMs = Math.round((lastEnd - firstStart) * 1000);
+                    }
+                    pool.query(
+                      `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id`,
+                      [dgMeetingId, speakerLabel, result.text, wordCount, durationMs]
+                    ).then((insertResult) => {
+                      const insertedSegmentId = insertResult.rows[0]?.id;
+                      if (broadcastToMeeting) {
+                        broadcastToMeeting(dgMeetingId, { type: 'final', id: insertedSegmentId, text: result.text, speaker: speakerLabel });
+                      }
+                    }).catch((dbErr) => {
+                      fastify.log.error(`Twilio stream transcript_segments insert error (callSid=${callSid}): ${dbErr.message}`);
+                    });
+                  }
+                } else if (broadcastToMeeting) {
+                  broadcastToMeeting(dgMeetingId, { type: 'interim', text: result.text, speaker: speakerLabel });
+                }
+              },
+            });
+            fastify.log.info(`Twilio stream: Deepgram session opened for callSid=${callSid} meetingId=${meetingId}`);
+          }
+
           // If PYANNOTE_API_KEY is set, a real implementation would also
           // start a PyannoteStreamClient (voicePrint.js) in parallel for
           // diarization + eventual /identify calls — mirrors the
           // alongside-Deepgram pattern already used in server.js's in-person
-          // handler.
+          // handler. Not implemented in this pass (same scope note as
+          // deepgramSession.js's header).
           break;
         }
 
@@ -710,14 +781,11 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
           // media.payload (base64 mulaw, 8kHz, mono)
           if (msg.media?.payload) {
             // Codec conversion is real and tested (audioCodec.js, untouched
-            // by this pass — see scripts/test-audio-codec.js). Nothing
-            // downstream consumes the output yet because there is no live
-            // Deepgram connection wired for this route (see the `start`
-            // case above for why that's explicitly deferred rather than
-            // silently duplicated).
+            // by this pass — see scripts/test-audio-codec.js).
             const linear16Buf = twilioPayloadToLinear16Buffer(msg.media.payload);
-            // dgSocket.send(linear16Buf); // once a shared Deepgram-connection helper exists for this call
-            void linear16Buf; // referenced to make the real call-site obvious, not a no-op placeholder comment only
+            if (dgSession) {
+              dgSession.send(linear16Buf);
+            }
           }
           break;
         }
@@ -725,6 +793,10 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
         case 'stop':
           // Confirmed shape: stop.accountSid, stop.callSid
           fastify.log.info(`Twilio stream stopped: streamSid=${streamSid}`);
+          if (dgSession) {
+            dgSession.close();
+            dgSession = null;
+          }
           if (meetingId && unregisterMeetingSocket) {
             unregisterMeetingSocket(meetingId, socket);
           }
@@ -743,6 +815,10 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
 
     socket.on('close', () => {
       fastify.log.info(`Twilio Media Stream WS closed: streamSid=${streamSid}`);
+      if (dgSession) {
+        dgSession.close();
+        dgSession = null;
+      }
       if (meetingId && unregisterMeetingSocket) {
         unregisterMeetingSocket(meetingId, socket);
       }

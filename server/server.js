@@ -787,7 +787,11 @@ await fastify.register(websocketPlugin);
 // Aria Phone Channel (Twilio) scaffolding — routes are registered
 // unconditionally but self-gate on env vars internally (503/clear-close if
 // unconfigured), same pattern as the existing Deepgram-gated WS route below.
-await registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket });
+// broadcastToMeeting is passed through unchanged (not modified, not
+// wrapped) so phone-channel transcript/segment broadcasts fan out to the
+// exact same owner + observer socket sets as the in-person flow, with zero
+// changes to broadcastToMeeting() itself or the in-person audio handler.
+await registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting });
 
 // ─── Auth middleware (decorator) ──────────────────────────────────────────────
 

@@ -64,6 +64,30 @@ export default function SettingsPage() {
           </button>
         </div>
 
+        {/* Schedule Ahead (2026-08-17 Phase 1) — entry point to the new
+            schedule-ahead-of-time flow (SchedulePage.tsx: "Schedule a
+            Call" / "Schedule a Visit"). Living under Settings for now
+            since there's no dedicated nav slot yet; Phase 2 may promote
+            this to a more prominent home-screen entry point once the
+            full flow exists. */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide px-5 pt-4 pb-2">
+            Meetings
+          </p>
+          <button
+            onClick={() => navigate('/schedule')}
+            className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors border-t border-gray-100 text-left"
+          >
+            <div>
+              <span className="text-sm font-medium text-gray-900">Schedule Ahead</span>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Schedule a call or visit for later
+              </p>
+            </div>
+            <span className="text-gray-400">›</span>
+          </button>
+        </div>
+
         {/* Admin — only rendered for admin accounts */}
         {isAdmin && (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">

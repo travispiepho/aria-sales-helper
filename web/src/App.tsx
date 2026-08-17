@@ -8,6 +8,9 @@ import MeetingPage from './pages/MeetingPage';
 import ProfilePage from './pages/ProfilePage';
 import AdminUsersPage from './pages/AdminUsersPage';
 import SettingsPage from './pages/SettingsPage';
+import SchedulePage from './pages/SchedulePage';
+import ScheduleCallPage from './pages/ScheduleCallPage';
+import ScheduleVisitPage from './pages/ScheduleVisitPage';
 // 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
 // same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
 // live-testing it: "Instead of a popup, I would like an almost identical
@@ -148,6 +151,36 @@ export default function App() {
             element={
               <RequireAuth>
                 <SettingsPage />
+              </RequireAuth>
+            }
+          />
+          {/* Schedule-ahead flow (2026-08-17 Phase 1). Entry screen with
+              two buttons ("Schedule a Call" / "Schedule a Visit") plus
+              one placeholder destination per branch. See SchedulePage.tsx
+              for the full context — no scheduling persistence yet, this
+              is intentionally just the navigable entry point Gabe asked
+              to see first. */}
+          <Route
+            path="/schedule"
+            element={
+              <RequireAuth>
+                <SchedulePage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/schedule/call"
+            element={
+              <RequireAuth>
+                <ScheduleCallPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/schedule/visit"
+            element={
+              <RequireAuth>
+                <ScheduleVisitPage />
               </RequireAuth>
             }
           />

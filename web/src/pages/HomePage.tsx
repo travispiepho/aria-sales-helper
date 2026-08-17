@@ -275,6 +275,19 @@ export default function HomePage() {
           >
             📞 Call a Customer
           </button>
+          {/* Schedule Ahead (2026-08-17 rework) — entry point to the
+              schedule-a-call / schedule-a-visit flow (SchedulePage.tsx).
+              Promoted here from Settings so a rep looking to plan ahead
+              finds it right next to the two "do it now" actions above,
+              instead of buried behind the gear icon. Styled to match the
+              "Call a Customer" secondary button above it. */}
+          <button
+            onClick={() => navigate('/schedule')}
+            disabled={starting}
+            className="w-full mt-2 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
+          >
+            🗓️ Schedule Ahead
+          </button>
         </div>
 
         {/* Today's Meetings */}

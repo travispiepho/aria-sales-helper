@@ -61,6 +61,20 @@ export default function MeetingPage() {
   const [elapsedSec, setElapsedSec] = useState(0);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
 
+  // 2026-08-17 (ARIA meeting UI by type, Part 1) — REAL server-side Twilio
+  // recording state for phone-call meetings, NOT a client guess/optimistic
+  // flag. Seeded from meeting.recording_status on load (covers a page
+  // refresh/re-open mid-call), then kept live by the 'recording_state' WS
+  // message (see applyLiveMessage below), which the server broadcasts the
+  // instant /telephony/recording-status reports a change — see
+  // server/telephony.js's recordingStatusCallback handler for the
+  // broadcastToMeeting() call and its rationale for reusing this existing
+  // per-meeting WS channel instead of a new poll/channel. 'in-progress' is
+  // the only value that means "actually recording right now" per Twilio's
+  // recordingStatusCallbackEvent semantics; 'completed'/'absent'/'failed'
+  // all mean not-currently-recording for the purposes of this indicator.
+  const [phoneRecordingStatus, setPhoneRecordingStatus] = useState<string | null>(null);
+
   // Consent state
   const [showConsentPrompt, setShowConsentPrompt] = useState(false);
   const [consentConfirmed, setConsentConfirmed] = useState(false);
@@ -152,6 +166,11 @@ export default function MeetingPage() {
       .then(([m, { segments: saved }, { coaching }]) => {
         setMeeting(m);
         setTitle(m.title || m.customer_name || '');
+        // 2026-08-17: seed the recording indicator from the DB snapshot so a
+        // page refresh mid-call shows correct state immediately, not just
+        // after the next WS push (which may be seconds/minutes away if
+        // Twilio's recordingStatusCallback already fired before this load).
+        setPhoneRecordingStatus(m.recording_status ?? null);
         // Restore persisted speaker labels
         if (m.speaker_labels && Object.keys(m.speaker_labels).length > 0) {
           setSpeakerLabels(m.speaker_labels);
@@ -323,6 +342,15 @@ export default function MeetingPage() {
       }
       // Store raw coaching data (lockedChecked handles sticky state at render time)
       setCoachingData(incoming);
+    } else if (msg.type === 'recording_state') {
+      // 2026-08-17 (ARIA meeting UI by type, Part 1) — pushed by server/
+      // telephony.js's /telephony/recording-status handler the instant
+      // Twilio reports a recording-lifecycle change (in-progress on
+      // customer-answer, completed/absent/failed on hangup). This is the
+      // ONLY thing that flips the phone-call recording indicator on/off —
+      // no client timer, no optimistic flip on "we placed the call".
+      const { status } = msg as { type: string; status: string | null };
+      setPhoneRecordingStatus(status ?? null);
     } else if (msg.type === 'meeting_ended') {
       // Observer-only in practice (the owner learns the meeting ended via its
       // own updateMeeting() response, not this message) — the mobile device
@@ -1076,6 +1104,24 @@ export default function MeetingPage() {
   // this page won't start/stop anything audio-related on this device.
   const isSyncedFromMobile = isActive && !isOwnerSession;
 
+  // 2026-08-17 (ARIA meeting UI by type) — THE discriminator this task's
+  // diagnose-before-building step asked for. `meeting.channel === 'phone'`
+  // ALONE is not enough: mobile also writes channel='phone' for its own
+  // local-mic-capture phone-call meetings (see mobile/src/app/meeting-
+  // setup.tsx), which have NO Twilio call behind them at all — those must
+  // keep today's in-person-shaped behavior (functional End Meeting, no
+  // server recording indicator to show). The one field that is ONLY ever
+  // set on a real Twilio-bridged call is `call_sid` (written by
+  // findOrCreatePhoneMeeting() in server/telephony.js, for both the
+  // outbound "Aria calls the rep" flow and the inbound /telephony/voice
+  // webhook) — so `channel === 'phone' && !!call_sid` is the compound
+  // check that actually means "this meeting is a live Twilio call with
+  // server-side dual-channel recording", which is what both Part 1 and
+  // Part 2 need to branch on. Flagged in this task's report: if mobile
+  // gains its own Twilio-bridged calling path in the future, this same
+  // compound check keeps working with zero changes here.
+  const isTwilioPhoneCall = meeting.channel === 'phone' && !!meeting.call_sid;
+
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col">
       {/* Recording banner — owner-only; an observer session never captures
@@ -1174,7 +1220,38 @@ export default function MeetingPage() {
                 same pulsing visual, but it can no longer diverge from the
                 meeting's actual lifecycle. */}
             <div className="flex flex-col items-center py-6">
-              {isSyncedFromMobile ? (
+              {isTwilioPhoneCall ? (
+                // 2026-08-17 (ARIA meeting UI by type, Part 1) — phone-call
+                // meeting: this is now a LIVE INDICATOR of real server-side
+                // Twilio recording state (phoneRecordingStatus, seeded from
+                // meeting.recording_status and kept live by the
+                // 'recording_state' WS push — see applyLiveMessage()), NOT a
+                // client-controlled record button. It is NON-INTERACTIVE (no
+                // onClick) per Gabe's explicit answer that tapping should not
+                // stop recording — the only recorder for a phone call is
+                // Twilio's dual-channel <Dial record>
+                // (record-from-answer-dual, commit cbfce4b), and there is no
+                // client-initiated stop-recording path for phone calls by
+                // design. It turns red/pulsing automatically the instant
+                // Twilio's recordingStatusCallback reports 'in-progress'
+                // (i.e. the customer answered) — no rep tap required, no
+                // optimistic timer.
+                <div
+                  aria-live="polite"
+                  className={`w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg flex items-center justify-center ${
+                    phoneRecordingStatus === 'in-progress'
+                      ? 'bg-red-600 ring-4 ring-red-300 animate-pulse'
+                      : 'bg-gray-400 ring-4 ring-gray-200'
+                  }`}
+                >
+                  <span className="flex flex-col items-center gap-1">
+                    <span className="text-3xl">{phoneRecordingStatus === 'in-progress' ? '🔴' : '📞'}</span>
+                    <span className="text-sm">
+                      {phoneRecordingStatus === 'in-progress' ? 'Recording (Twilio)' : 'Waiting to record…'}
+                    </span>
+                  </span>
+                </div>
+              ) : isSyncedFromMobile ? (
                 // 2026-08-05 (live meeting sync full-page rebuild): observer
                 // session — there is nothing to tap here. No Record button
                 // (this device has no mic role in this meeting at all), and
@@ -1525,7 +1602,33 @@ export default function MeetingPage() {
         className="fixed bottom-0 left-0 right-0 px-4 pb-4 bg-white border-t border-gray-100 shadow-lg"
         style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
       >
-        {isActive && isOwnerSession ? (
+        {isActive && isOwnerSession && isTwilioPhoneCall ? (
+          // 2026-08-17 (ARIA meeting UI by type, Part 2) — Gabe, verbatim:
+          // "For phone calls I want the end meeting button to say hang up to
+          // end the meeting and just make it visual and not functional. Make
+          // sure this doesn't mess up the in-person version that needs this
+          // button to be functional." The rep ends a phone meeting by
+          // hanging up the ACTUAL phone — Twilio's status-callback webhook
+          // (server/telephony.js's /telephony/status-callback, unchanged
+          // logic, now also broadcasts 'meeting_ended' live — see that
+          // file) is what finalizes the meeting row when that happens, not
+          // this button. Rendered as a plain <div>, not a <button>: no
+          // onClick, no hover/active states, no button semantics at all —
+          // deliberately non-actionable rather than a tappable-looking dead
+          // button (the "UX smell" this task explicitly flagged). Paired
+          // with an explicit one-line hint so a rep isn't left wondering why
+          // nothing happens if they do tap it.
+          <div
+            role="status"
+            aria-live="polite"
+            className="w-full bg-gray-100 border border-gray-200 text-gray-500 font-semibold py-4 rounded-2xl text-lg text-center select-none"
+          >
+            <span className="block">📞 Hang Up</span>
+            <span className="block text-xs font-normal text-gray-400 mt-1">
+              Hang up your phone to end this meeting.
+            </span>
+          </div>
+        ) : isActive && isOwnerSession ? (
           <button
             onClick={handleEndMeetingButtonClick}
             className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-4 rounded-2xl text-lg transition-colors"

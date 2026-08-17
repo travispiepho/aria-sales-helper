@@ -428,11 +428,31 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
 
     if (CallSid && (CallStatus === 'completed' || CallStatus === 'failed' || CallStatus === 'busy' || CallStatus === 'no-answer' || CallStatus === 'canceled')) {
       try {
-        await pool.query(
+        // 2026-08-17 (ARIA meeting UI by type, Part 2 — "Hang Up" is visual-
+        // only for phone calls; the REAL end-of-meeting trigger for a phone
+        // call is the rep hanging up the actual phone, which lands here as
+        // this Twilio call-status webhook, not a client button tap). Added
+        // `RETURNING id` + a broadcastToMeeting('meeting_ended') push so any
+        // currently-open MeetingPage session for this meeting (the owner's
+        // OWN phone-call tab, which per this same pass now also opens the
+        // /meetings/:id/observe socket — see server.js's owner-vs-observer
+        // effect) flips itself to the post-meeting view live, the same way
+        // an in-person meeting's PATCH /api/meetings/:id already does via
+        // broadcastToObservers()/notifyUserSyncMeetingEnded(). Without this,
+        // a phone-call meeting would finalize correctly in the DB but the
+        // rep's own open tab would keep showing "active"/"Hang Up" until a
+        // manual navigate-away-and-back refetch — a real gap directly
+        // relevant to this button's honesty, not a separate feature.
+        const result = await pool.query(
           `UPDATE meetings SET status = 'completed', ended_at = COALESCE(ended_at, NOW())
-           WHERE call_sid = $1 AND status = 'active'`,
+           WHERE call_sid = $1 AND status = 'active'
+           RETURNING id`,
           [CallSid]
         );
+        const endedMeetingId = result.rows[0]?.id;
+        if (endedMeetingId && broadcastToMeeting) {
+          broadcastToMeeting(endedMeetingId, { type: 'meeting_ended', meetingId: endedMeetingId, status: 'completed' });
+        }
       } catch (err) {
         fastify.log.error(`status-callback meeting update failed: ${err.message}`);
       }
@@ -768,14 +788,42 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     // meetings.call_sid directly — no extra parent-lookup needed.
     if (CallSid) {
       try {
-        await pool.query(
+        // 2026-08-17 (ARIA meeting UI by type, Part 1) — added `RETURNING id`
+        // + a broadcastToMeeting('recording_state') push right after the DB
+        // write, so the ARIA recording button can flip ON the instant the
+        // customer answers with NO client poll/guess in between. This is the
+        // transport decision for getting real Twilio recording state to the
+        // client: reuse the EXISTING per-meeting WebSocket fan-out
+        // (broadcastToMeeting(), the same function every transcript/
+        // coaching/speaker message already rides — see server.js) rather
+        // than inventing a new channel or a poll. Justification: a phone-
+        // call meeting's owner tab is ALREADY connected to this exact
+        // channel from the moment the call starts (server.js's audio-
+        // adjacent /meetings/:id WS registration triggered by /telephony/
+        // stream's `start` event registers the socket by meetingId before
+        // any transcript exists), so this is zero new infrastructure, zero
+        // new connection, and delivers the state change with the same
+        // sub-second latency the live transcript already has. A poll would
+        // add latency (poll interval) and be strictly worse for a UI whose
+        // whole point is "looks toggled on while the recording is running"
+        // in near-real-time; a new SSE/WS channel would duplicate
+        // machinery that already exists and is already proven live.
+        const result = await pool.query(
           `UPDATE meetings
            SET recording_sid = COALESCE($2, recording_sid),
                recording_url = COALESCE($3, recording_url),
                recording_status = COALESCE($4, recording_status)
-           WHERE call_sid = $1`,
+           WHERE call_sid = $1
+           RETURNING id`,
           [CallSid, RecordingSid || null, RecordingUrl || null, RecordingStatus || null]
         );
+        const recMeetingId = result.rows[0]?.id;
+        if (recMeetingId && broadcastToMeeting) {
+          broadcastToMeeting(recMeetingId, {
+            type: 'recording_state',
+            status: RecordingStatus || null,
+          });
+        }
       } catch (err) {
         fastify.log.error(`/telephony/recording-status meeting update failed: ${err.message}`);
       }

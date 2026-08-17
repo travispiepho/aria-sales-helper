@@ -201,6 +201,36 @@ export interface Meeting {
   // Drives MeetingPage's owner-vs-observer render branches: only an owner
   // session sees the Record button / mic capture / End Meeting control.
   is_owner_session?: boolean;
+  // 2026-08-17 (ARIA meeting UI by type). Existing DB column (see
+  // migrations/2026-08-04-phone-channel-columns.sql) reused as the
+  // meeting-type discriminator this task needed — MeetingPage.tsx branches
+  // its recording-button and End Meeting/Hang-Up rendering on this field.
+  // 'phone' = a Twilio-bridged "Aria calls the rep" call (server.js's
+  // /telephony/outbound-call flow); anything else (including undefined,
+  // for pre-channel-column legacy rows) is treated as 'in_person'.
+  channel?: 'phone' | 'in_person';
+  // Set only for meetings actually linked to a Twilio call (both the web
+  // outbound "Aria calls the rep" bridge and an inbound customer call);
+  // null for mobile's local-mic-capture 'phone'-channel meetings (those are
+  // created via plain POST /api/meetings with no Twilio involvement at all
+  // — see mobile/src/app/meeting-setup.tsx). `channel === 'phone'` ALONE is
+  // NOT a reliable signal that a meeting is Twilio-server-recorded —
+  // `channel === 'phone' && !!call_sid` is (see MeetingPage.tsx's
+  // isTwilioPhoneCall). Flagged in this task's report as a real
+  // discriminator gap that this compound check works around.
+  call_sid?: string | null;
+  // 2026-08-17 (ARIA meeting UI by type, Part 1). Existing DB columns (see
+  // migrations/2026-08-17-meeting-recording-columns.sql), already returned
+  // by every `SELECT * FROM meetings` route via shapeMeetingForClient()'s
+  // spread — just newly consumed here. `recording_status` mirrors Twilio's
+  // recordingStatusCallbackEvent values ('in-progress' | 'completed' |
+  // 'absent' | 'failed'), last reported by /telephony/recording-status.
+  // This is the REAL server-side recording state; the recording indicator
+  // must derive from this (or the live 'recording_state' WS push below),
+  // never from an optimistic client timer.
+  recording_status?: string | null;
+  recording_sid?: string | null;
+  recording_url?: string | null;
 }
 
 export async function createMeeting(customerId?: string): Promise<Meeting> {

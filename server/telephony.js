@@ -616,23 +616,67 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     // transcription — see /telephony/stream below) ─────────────────────────
     // Host derivation mirrors /telephony/voice above (x-forwarded-proto /
     // x-forwarded-host aware, same pattern used by /telephony/outbound-call
-    // for its answerUrl) — not hardcoded. The <Say> disclosure stays FIRST
-    // and UNCHANGED, exactly as required; <Start><Stream> is added
-    // immediately after it, same relative position as the inbound
-    // /telephony/voice TwiML above, before the <Dial> that actually
-    // connects the customer.
+    // for its answerUrl) — not hardcoded.
+    //
+    // ⚠️ CONSENT LEG FIX (2026-08-17, per Gabe Bass): the top-level <Say>
+    // that used to sit here played on the REP'S leg only (the rep already
+    // answered this call before this TwiML executes — this whole route only
+    // runs after the rep picks up), so the customer being <Dial>'d in next
+    // NEVER heard the recording-disclosure at all. A plain <Dial>number</Dial>
+    // has no mechanism to play anything to the dialed leg specifically — it
+    // just bridges audio both ways once the callee answers. The fix: use
+    // <Dial><Number url="..."> (a Twilio "whisper" URL) instead of a bare
+    // <Number>. Twilio requests that url ONLY on the newly-answered dialed
+    // (customer) leg, before bridging it to the rep, and plays whatever
+    // TwiML that URL returns to ONLY that leg — see
+    // https://www.twilio.com/docs/voice/twiml/number#attributes-url. The
+    // consent <Say> now lives in the new /telephony/consent-whisper route
+    // below and is REMOVED from this top-level response, so it plays
+    // exclusively to the customer, not the rep (per Gabe: "move it to the
+    // other side", not duplicate it).
     const forwardedProto = request.headers['x-forwarded-proto'];
     const protocol = (forwardedProto ? forwardedProto.split(',')[0].trim() : null) || 'https';
     const host = request.headers['x-forwarded-host'] || request.headers.host || request.hostname;
     const wsProtocol = protocol === 'http' ? 'ws' : 'wss';
+    const consentWhisperUrl = `${protocol}://${host}/telephony/consent-whisper`;
+
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Start>
+    <Stream url="${wsProtocol}://${host}/telephony/stream" />
+  </Start>
+  <Dial callerId="${TWILIO_PHONE_NUMBER}">
+    <Number url="${consentWhisperUrl}">${customerNumber}</Number>
+  </Dial>
+</Response>`;
+    return reply.type('text/xml').send(twiml);
+  });
+
+  // ── POST /telephony/consent-whisper — TWILIO-FACING "whisper" TwiML,
+  // requested by Twilio ONLY on the customer leg of the outbound "Aria calls
+  // the rep" flow, right after the customer answers and before that leg is
+  // bridged to the rep (see the <Number url="..."> attribute on
+  // /telephony/outbound-answer above). This is where the recording-consent
+  // disclosure now plays — exclusively to the customer, per Gabe Bass's
+  // 2026-08-17 request ("there is no consent message playing for the
+  // customer ... take the consent message that plays for the rep and move
+  // it to the other side"). Signature-validated exactly like the other
+  // Twilio-facing webhooks in this file.
+  fastify.post('/telephony/consent-whisper', async (request, reply) => {
+    if (!isConfigured()) return notConfiguredReply(reply);
+
+    const signatureCheck = validateTwilioSignature(request);
+    if (!signatureCheck.ok) {
+      fastify.log.warn(`Twilio signature validation failed for /telephony/consent-whisper: ${signatureCheck.reason}`);
+      return reply.code(403).send({ error: 'Invalid Twilio signature', reason: signatureCheck.reason });
+    }
+
+    const { CallSid } = request.body || {};
+    fastify.log.info(`/telephony/consent-whisper: playing consent disclosure to customer leg, CallSid=${CallSid}`);
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>${CONSENT_DISCLOSURE_TWIML_SAY}</Say>
-  <Start>
-    <Stream url="${wsProtocol}://${host}/telephony/stream" />
-  </Start>
-  <Dial callerId="${TWILIO_PHONE_NUMBER}">${customerNumber}</Dial>
 </Response>`;
     return reply.type('text/xml').send(twiml);
   });

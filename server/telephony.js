@@ -640,12 +640,63 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     const wsProtocol = protocol === 'http' ? 'ws' : 'wss';
     const consentWhisperUrl = `${protocol}://${host}/telephony/consent-whisper`;
 
+    // ⚠️ AUTO-RECORD-ON-CUSTOMER-ANSWER (2026-08-17, per Gabe Bass: "I want
+    // recording to automatically start on ARIA when the customer answers
+    // their phone") ───────────────────────────────────────────────────────
+    // MECHANISM CHOSEN: record="record-from-answer-dual" on THIS <Dial>
+    // (not a <Record>/REST-initiated recording fired from the whisper
+    // handler). Per Twilio's <Dial> docs (twilio.com/docs/voice/twiml/dial#record),
+    // record-from-answer-dual "will start the recording as soon as the call
+    // is answered" — "the call" here is the dialed <Number> leg, i.e. the
+    // CUSTOMER. That is Twilio's own first-class trigger for exactly the
+    // event Gabe asked for (customer answers → recording starts), with no
+    // extra REST round-trip and therefore no window where recording start
+    // could race behind real audio the way a <Record>-verb-from-whisper-
+    // handler approach would (that approach requires the whisper handler's
+    // TwiML response to return, Twilio to process it, and a subsequent REST
+    // call to actually begin capturing — an avoidable extra hop). "dual"
+    // (not mono) keeps rep and customer on separate channels, matching
+    // recordingTrack default "both" and staying consistent with how this
+    // module already keeps Twilio's raw per-track Media Stream frames
+    // separate before Deepgram (see /telephony/stream below) — Deepgram's
+    // nova-3 diarize_model=latest pipeline is unaffected either way since it
+    // consumes the live Media Stream, not this Dial recording; this
+    // recording is the durable/legal audit artifact, a separate contract.
+    //
+    // CONSENT-ORDERING PROOF (why this does not reintroduce the bug
+    // 8b8a966 just fixed): <Dial>'s record attribute governs the ENTIRE
+    // <Dial> verb's lifetime for the customer leg, which includes the
+    // pre-bridge whisper interval AND the post-bridge two-way conversation
+    // — but those are structurally sequential, not overlapping. Twilio does
+    // not bridge the rep and customer legs together until the whisper URL's
+    // TwiML response (the consent <Say> at /telephony/consent-whisper)
+    // finishes executing — see twilio.com/docs/voice/twiml/number#attributes-url
+    // ("a URL that will return a TwiML response to be run on the called
+    // party's end, after they answer, but before the parties are
+    // connected"). So: recorded audio during the whisper interval is ONLY
+    // the consent disclosure itself being played to the customer (which is
+    // a FEATURE — an audible, timestamped record that consent was in fact
+    // given before anything else happened, not a violation of it); no
+    // bridged rep↔customer conversation audio can exist yet at that point
+    // because the legs are not yet connected. The two-way "recorded
+    // conversation" only exists after the bridge, which only happens after
+    // consent has already played. Ordering is preserved by construction,
+    // not by timing luck.
+    //
+    // recordingStatusCallback → new /telephony/recording-status route below
+    // persists recording_sid/url/status onto the `meetings` row (see
+    // migrations/2026-08-17-meeting-recording-columns.sql) once Twilio
+    // reports the recording as available; recordingStatusCallbackEvent
+    // covers both the completed recording and the in-progress-start event
+    // so a stuck/never-completed call still leaves an audit trail.
+    const recordingStatusCallbackUrl = `${protocol}://${host}/telephony/recording-status`;
+
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
     <Stream url="${wsProtocol}://${host}/telephony/stream" />
   </Start>
-  <Dial callerId="${TWILIO_PHONE_NUMBER}">
+  <Dial callerId="${TWILIO_PHONE_NUMBER}" record="record-from-answer-dual" recordingStatusCallback="${recordingStatusCallbackUrl}" recordingStatusCallbackEvent="in-progress completed absent">
     <Number url="${consentWhisperUrl}">${customerNumber}</Number>
   </Dial>
 </Response>`;
@@ -679,6 +730,60 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
   <Say>${CONSENT_DISCLOSURE_TWIML_SAY}</Say>
 </Response>`;
     return reply.type('text/xml').send(twiml);
+  });
+
+  // ── POST /telephony/recording-status — TWILIO-FACING recordingStatusCallback
+  // for the outbound "Aria calls the rep" <Dial record="record-from-answer-dual">
+  // added 2026-08-17 (see /telephony/outbound-answer above for the full
+  // consent-ordering + mechanism-choice rationale). Twilio POSTs this on
+  // in-progress / completed / absent recording-lifecycle events (per
+  // recordingStatusCallbackEvent="in-progress completed absent" set on that
+  // <Dial>). Persists onto the existing `meetings` row via call_sid — see
+  // migrations/2026-08-17-meeting-recording-columns.sql for the
+  // recording_sid/recording_url/recording_status columns. Signature-
+  // validated exactly like every other Twilio-facing webhook in this file.
+  fastify.post('/telephony/recording-status', async (request, reply) => {
+    if (!isConfigured()) return notConfiguredReply(reply);
+
+    const signatureCheck = validateTwilioSignature(request);
+    if (!signatureCheck.ok) {
+      fastify.log.warn(`Twilio signature validation failed for /telephony/recording-status: ${signatureCheck.reason}`);
+      return reply.code(403).send({ error: 'Invalid Twilio signature', reason: signatureCheck.reason });
+    }
+
+    const { CallSid, RecordingSid, RecordingUrl, RecordingStatus } = request.body || {};
+    fastify.log.info(
+      `/telephony/recording-status: CallSid=${CallSid} RecordingSid=${RecordingSid} ` +
+      `RecordingStatus=${RecordingStatus}`
+    );
+
+    // CallSid on this callback is the DIALED (customer) leg's CallSid, not
+    // the parent/rep-leg CallSid that `meetings.call_sid` was populated with
+    // at /telephony/outbound-call time — Twilio's Dial recordingStatusCallback
+    // parameters mirror the Recording resource's own CallSid, which "will
+    // always refer to the parent leg of a two-leg call" per Twilio's
+    // Recordings resource docs (twilio.com/docs/voice/api/recording). The
+    // parent leg IS the original rep-facing call created in
+    // /telephony/outbound-call, so CallSid here is expected to match
+    // meetings.call_sid directly — no extra parent-lookup needed.
+    if (CallSid) {
+      try {
+        await pool.query(
+          `UPDATE meetings
+           SET recording_sid = COALESCE($2, recording_sid),
+               recording_url = COALESCE($3, recording_url),
+               recording_status = COALESCE($4, recording_status)
+           WHERE call_sid = $1`,
+          [CallSid, RecordingSid || null, RecordingUrl || null, RecordingStatus || null]
+        );
+      } catch (err) {
+        fastify.log.error(`/telephony/recording-status meeting update failed: ${err.message}`);
+      }
+    } else {
+      fastify.log.warn('/telephony/recording-status webhook missing CallSid — cannot persist recording metadata');
+    }
+
+    return reply.code(200).send({ ok: true });
   });
 
   // ── GET /telephony/stream — Twilio Media Streams WebSocket handler ──────

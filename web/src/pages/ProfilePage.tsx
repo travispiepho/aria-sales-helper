@@ -15,7 +15,7 @@ interface VoicePrintStatus {
 }
 
 export default function ProfilePage() {
-  const { user, logout } = useAuth();
+  const { user, logout, updateUser } = useAuth();
   const navigate = useNavigate();
 
   // Phone number (added 2026-08-13) — lets a rep save their own number once
@@ -180,15 +180,12 @@ export default function ProfilePage() {
     setPhoneMsg(null);
     setPhoneSaving(true);
     try {
-      // NOTE: this updates the DB and this page's local `phone` state
-      // immediately, but the shared AuthContext `user` object (see
-      // lib/auth.tsx) is only refreshed on next app load/getMe() call —
-      // out of scope for this change to touch auth.tsx's context-update
-      // wiring. PhoneCallModal.tsx's prefill therefore picks up a freshly
-      // saved number on the rep's NEXT app session, not instantly within
-      // the same one, unless they've already reloaded since saving.
       const { user: updated } = await updateProfile(phone.trim());
       setPhone(updated.phone || '');
+      // Push the saved phone into the shared AuthContext user object so
+      // PhoneCallModal's prefill (useAuth().user.phone) reflects it
+      // immediately in this same session — no reload/re-login required.
+      updateUser({ phone: updated.phone });
       setPhoneMsg({ type: 'success', text: '✅ Phone number saved.' });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to save phone number.';

@@ -14,6 +14,7 @@ import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 import MeetingScoreCard from '../components/MeetingScoreCard';
 import CoachingReportCard from '../components/CoachingReportCard';
 import { getWsBase } from '../lib/wsBase';
+import { createReconnectTracker, ReconnectTracker } from '../lib/reconnectPolicy';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,15 @@ interface TranscriptSegment {
   text: string;
   isFinal: boolean;
   ts?: number;
+  // 2026-08-18 (Deepgram reconnect hardening): 'text' (default, omitted) is
+  // a normal transcript line. The other three render as inline system
+  // notices in the transcript itself — NOT a silent gap — per Gabe's
+  // explicit requirement that any lapse >2s be visible with its duration,
+  // that recovery show a matching boundary marker, and that the 60s-budget
+  // exhaustion show an unambiguous terminal notice (that truthfully states
+  // the RECORDING is still being captured — only the live feed stopped).
+  kind?: 'lapse-start' | 'lapse-end' | 'lapse-stopped';
+  lapseDurationMs?: number;
 }
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
@@ -33,6 +43,46 @@ function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function formatLapseDuration(ms?: number): string {
+  if (ms === undefined || ms === null || !Number.isFinite(ms)) return '';
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}m ${s}s`;
+}
+
+// 2026-08-18 (Deepgram reconnect hardening) — renders a transcript-inline
+// system notice for a connection lapse/recovery/terminal-stop, per Gabe's
+// explicit requirement that this be VISIBLE IN THE TRANSCRIPT itself, not a
+// silent gap or just a connection-status pill. Shared between the live and
+// post-meeting transcript panels below so both stay in sync.
+function TranscriptLapseNotice({ seg }: { seg: TranscriptSegment }) {
+  if (seg.kind === 'lapse-start') {
+    return (
+      <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 my-1">
+        ⚠️ Connection lost — live transcription paused. Recording continues.
+      </div>
+    );
+  }
+  if (seg.kind === 'lapse-end') {
+    const dur = formatLapseDuration(seg.lapseDurationMs);
+    return (
+      <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5 my-1">
+        ✅ Reconnected{dur ? ` — live transcription was paused for ${dur}` : ''}.
+      </div>
+    );
+  }
+  if (seg.kind === 'lapse-stopped') {
+    return (
+      <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-1.5 my-1">
+        🛑 Live transcription has stopped for this meeting. The recording is still being captured — the transcript can be backfilled afterward.
+      </div>
+    );
+  }
+  return null;
 }
 
 function formatDuration(startIso: string, endIso?: string): string {
@@ -180,6 +230,29 @@ export default function MeetingPage() {
   const isActiveRef = useRef(false);
   const isOwnerSessionRef = useRef(true);
 
+  // ── Transcription lapse visibility (2026-08-18 hardening) ────────────────
+  // Gabe's explicit requirement: any live-connection lapse >2s must be
+  // visible IN THE TRANSCRIPT (not just a connection-status pill), with a
+  // matching recovery marker showing the boundaries of what was missed, and
+  // an unambiguous terminal notice once the server's reconnect budget (60s)
+  // is exhausted. CRITICAL: do NOT rely solely on the server pushing a
+  // notice — on 2026-08-17 the server broadcast correctly to a tab whose
+  // socket had never actually connected, and the rep saw a silent stall.
+  // The client tracks its OWN socket state below (see the reconnect timers'
+  // own onclose logic) and can raise the same notice independently. Both
+  // sources funnel through pushLapseNotice(), which dedupes so the rep sees
+  // ONE notice per real lapse, not two, regardless of whether the server,
+  // the client, or both detect it first.
+  const dgLapseActiveRef = useRef(false); // true once a 'lapse-start' notice has been shown and not yet resolved
+  const dgLapseTerminalRef = useRef(false); // true once the 60s-budget-exhaustion terminal notice has been shown for this connection
+  const dgLapseStartedAtRef = useRef<number | null>(null); // client-observed lapse start time, for a client-computed duration on recovery
+  // Client-side reconnect trackers (owner audio socket + observer socket),
+  // one each, replacing the old no-jitter/no-budget reconnect loops below.
+  // See web/src/lib/reconnectPolicy.ts header for why this is a client-side
+  // twin rather than a shared import of the server's tracker.
+  const wsReconnectTrackerRef = useRef<ReconnectTracker | null>(null);
+  const observeReconnectTrackerRef = useRef<ReconnectTracker | null>(null);
+
   // ─── Load meeting ──────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -252,6 +325,8 @@ export default function MeetingPage() {
       if (observeReconnectTimerRef.current) clearTimeout(observeReconnectTimerRef.current);
       observeWsRef.current?.close();
       observeWsRef.current = null;
+      wsReconnectTrackerRef.current?.dispose();
+      observeReconnectTrackerRef.current?.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -278,6 +353,33 @@ export default function MeetingPage() {
     wakeLockRef.current?.release().catch(() => {});
     wakeLockRef.current = null;
   }
+
+  // ─── Lapse notice de-dup (server-detected AND client-detected raise the same UI) ──
+  // Either detection path calls this; whichever fires first wins and the
+  // other becomes a no-op for that same lapse, so the rep sees exactly one
+  // start notice and exactly one matching recovery/terminal notice.
+  const pushLapseStartNotice = useCallback((startedAtMs?: number) => {
+    if (dgLapseActiveRef.current || dgLapseTerminalRef.current) return; // already showing/shown for this lapse
+    dgLapseActiveRef.current = true;
+    dgLapseStartedAtRef.current = startedAtMs ?? Date.now();
+    setSegments(prev => [...prev, { speaker: '', text: '', isFinal: true, ts: Date.now(), kind: 'lapse-start' }]);
+  }, []);
+
+  const pushLapseEndNotice = useCallback((durationMs?: number) => {
+    if (!dgLapseActiveRef.current) return; // no active lapse notice to resolve (e.g. blip never crossed 2s)
+    dgLapseActiveRef.current = false;
+    const observedDuration = durationMs ?? (dgLapseStartedAtRef.current ? Date.now() - dgLapseStartedAtRef.current : undefined);
+    dgLapseStartedAtRef.current = null;
+    setSegments(prev => [...prev, { speaker: '', text: '', isFinal: true, ts: Date.now(), kind: 'lapse-end', lapseDurationMs: observedDuration }]);
+  }, []);
+
+  const pushLapseStoppedNotice = useCallback(() => {
+    if (dgLapseTerminalRef.current) return; // already shown the terminal notice for this connection
+    dgLapseTerminalRef.current = true;
+    dgLapseActiveRef.current = false;
+    dgLapseStartedAtRef.current = null;
+    setSegments(prev => [...prev, { speaker: '', text: '', isFinal: true, ts: Date.now(), kind: 'lapse-stopped' }]);
+  }, []);
 
   // ─── Shared live-message handler (owner audio socket AND observer socket) ──
   // 2026-08-05 (live meeting sync full-page rebuild): extracted from the
@@ -368,6 +470,17 @@ export default function MeetingPage() {
       }
       // Store raw coaching data (lockedChecked handles sticky state at render time)
       setCoachingData(incoming);
+    } else if (msg.type === 'transcription_lapse') {
+      // Server-detected lapse/recovery/terminal notice (server/server.js's
+      // in-person handler or server/telephony.js's phone handler, both via
+      // the shared dgReconnectPolicy tracker). This is one of TWO detection
+      // paths that can raise this notice — see pushLapseStartNotice's own
+      // comment for why client-side detection also exists and how the two
+      // are deduped to a single visible notice.
+      const { state, durationMs } = msg as { type: string; state: 'started' | 'recovered' | 'stopped'; durationMs?: number };
+      if (state === 'started') pushLapseStartNotice();
+      else if (state === 'recovered') pushLapseEndNotice(durationMs);
+      else if (state === 'stopped') pushLapseStoppedNotice();
     } else if (msg.type === 'recording_state') {
       // 2026-08-17 (ARIA meeting UI by type, Part 1) — pushed by server/
       // telephony.js's /telephony/recording-status handler the instant
@@ -389,7 +502,7 @@ export default function MeetingPage() {
         getMeeting(meetingId).then(setMeeting).catch(() => {});
       }
     }
-  }, [meetingId]);
+  }, [meetingId, pushLapseStartNotice, pushLapseEndNotice, pushLapseStoppedNotice]);
 
   // ─── WebSocket connection (owner: audio streaming) ───────────────────────
 
@@ -404,9 +517,30 @@ export default function MeetingPage() {
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
 
+    if (!wsReconnectTrackerRef.current) {
+      // Lazily created once, reused across reconnects on this ref (mirrors
+      // reconnectAttemptsRef's own lifetime before this pass) so lapse
+      // state ("how long has THIS outage been going") persists correctly
+      // across repeated connectWebSocket() calls from onclose below.
+      wsReconnectTrackerRef.current = createReconnectTracker({
+        // CLIENT-SIDE lapse detection — this is the second of the two
+        // required detection paths (see pushLapseStartNotice's own comment):
+        // the client knows its OWN socket state and can raise this notice
+        // even if the server never gets a chance to broadcast one (e.g. the
+        // server process itself is what's unreachable). Deduped against the
+        // server-detected path via dgLapseActiveRef/dgLapseTerminalRef so
+        // the rep sees one notice regardless of which side notices first.
+        onLapseStart: (startedAtMs) => pushLapseStartNotice(startedAtMs),
+        onLapseEnd: (durationMs) => pushLapseEndNotice(durationMs),
+        onGiveUp: () => pushLapseStoppedNotice(),
+      });
+    }
+    const tracker = wsReconnectTrackerRef.current;
+
     ws.onopen = () => {
       setConnectionStatus('connected');
       reconnectAttemptsRef.current = 0;
+      tracker.onConnected();
 
       // Flush buffered audio
       const buffered = audioBufferRef.current.splice(0);
@@ -434,17 +568,23 @@ export default function MeetingPage() {
         setConnectionStatus('disconnected');
         return;
       }
-      // Auto-reconnect with exponential backoff, cap at 30s buffer
+      // 2026-08-18 hardening: jittered backoff (250ms→8s) with a real ~60s
+      // time budget as the primary give-up control (was: no-jitter 1s→10s
+      // with no budget/ceiling at all — would retry forever). See
+      // web/src/lib/reconnectPolicy.ts for the full rationale.
       setConnectionStatus('reconnecting');
-      const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 10000);
-      reconnectAttemptsRef.current += 1;
+      const result = tracker.onDisconnect();
+      if ('giveUp' in result) {
+        setConnectionStatus('disconnected');
+        return; // tracker already invoked onGiveUp (pushLapseStoppedNotice) above
+      }
       reconnectTimerRef.current = setTimeout(() => {
         if (isRecordingRef.current) {
           connectWebSocket();
         }
-      }, delay);
+      }, result.delayMs);
     };
-  }, [meetingId]);
+  }, [meetingId, pushLapseStartNotice, pushLapseEndNotice, pushLapseStoppedNotice]);
 
   // ─── WebSocket connection (observer: read-only mobile-meeting sync) ───────
   // 2026-08-05 (live meeting sync full-page rebuild). Opened INSTEAD of the
@@ -466,8 +606,18 @@ export default function MeetingPage() {
     const ws = new WebSocket(`${getWsBase()}/meetings/${meetingId}/observe`);
     observeWsRef.current = ws;
 
+    if (!observeReconnectTrackerRef.current) {
+      observeReconnectTrackerRef.current = createReconnectTracker({
+        onLapseStart: (startedAtMs) => pushLapseStartNotice(startedAtMs),
+        onLapseEnd: (durationMs) => pushLapseEndNotice(durationMs),
+        onGiveUp: () => pushLapseStoppedNotice(),
+      });
+    }
+    const observeTracker = observeReconnectTrackerRef.current;
+
     ws.onopen = () => {
       setConnectionStatus('connected');
+      observeTracker.onConnected();
     };
 
     ws.onmessage = (evt) => {
@@ -520,11 +670,15 @@ export default function MeetingPage() {
       // the owner audio socket's own reconnect-while-recording behavior
       // above. isActiveRef (declared further below, tracks meeting.status)
       // lets this closure see current status without re-subscribing.
+      // 2026-08-18 hardening: jittered backoff + ~60s budget (was: a flat
+      // 3000ms retry forever) — same reasoning as the owner socket above.
       if (isActiveRef.current && !isOwnerSessionRef.current) {
-        observeReconnectTimerRef.current = setTimeout(connectObserverSocket, 3000);
+        const result = observeTracker.onDisconnect();
+        if ('giveUp' in result) return; // tracker already invoked onGiveUp (pushLapseStoppedNotice) above
+        observeReconnectTimerRef.current = setTimeout(connectObserverSocket, result.delayMs);
       }
     };
-  }, [meetingId, applyLiveMessage]);
+  }, [meetingId, applyLiveMessage, pushLapseStartNotice, pushLapseEndNotice, pushLapseStoppedNotice]);
 
   // ─── Owner vs. observer: which live socket (if any) should be open ──────
   // 2026-08-05 (live meeting sync full-page rebuild) — THE core routing
@@ -708,6 +862,10 @@ export default function MeetingPage() {
     wsRef.current?.close();
     wsRef.current = null;
     setConnectionStatus('disconnected');
+    // Intentional stop (rep tapped End/stop), not a failure — dispose the
+    // reconnect tracker quietly so no stray give-up/lapse notice fires
+    // after the rep deliberately ended the session.
+    wsReconnectTrackerRef.current?.dispose();
 
     // Stop AudioWorklet
     workletNodeRef.current?.disconnect();
@@ -1163,7 +1321,9 @@ export default function MeetingPage() {
   }
 
   // Collect unique speaker keys from segments
-  const uniqueSpeakers = Array.from(new Set(segments.map(s => s.speaker)));
+  // 2026-08-18: filter out lapse-notice pseudo-segments (speaker: '') so
+  // they never show up as a renameable "speaker" in the Rename Speakers list.
+  const uniqueSpeakers = Array.from(new Set(segments.filter(s => !s.kind).map(s => s.speaker)));
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -1462,12 +1622,20 @@ export default function MeetingPage() {
                     // the ts+speaker+text composite from a8d21ed only for the
                     // genuine remaining edge case: a live 'final' segment
                     // whose server-side INSERT failed (msg.id undefined).
+                    //
+                    // 2026-08-18: a lapse/recovery/terminal notice (seg.kind
+                    // set) renders as an inline system banner instead of a
+                    // speaker line — see TranscriptLapseNotice above.
+                    seg.kind ? (
+                      <TranscriptLapseNotice key={`${seg.ts ?? i}-${seg.kind}`} seg={seg} />
+                    ) : (
                     <div key={seg.id ?? `${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
                       <span className="font-semibold text-blue-700">
                         {getDisplayLabel(seg.speaker)}:
                       </span>{' '}
                       <span className="text-gray-800">{seg.text}</span>
                     </div>
+                    )
                   ))}
                   {/* Interim result */}
                   {interimText && (
@@ -1502,13 +1670,20 @@ export default function MeetingPage() {
                 <div className="space-y-2 max-h-96 overflow-y-auto">
                   {segments.map((seg, i) => (
                     // 2026-08-09: see live-view comment above — same real-id
-                    // preference, same genuine fallback edge case.
+                    // preference, same genuine fallback edge case. 2026-08-18:
+                    // same lapse-notice rendering as the live view above, so
+                    // the post-meeting record still shows where a lapse
+                    // occurred.
+                    seg.kind ? (
+                      <TranscriptLapseNotice key={`${seg.ts ?? i}-${seg.kind}`} seg={seg} />
+                    ) : (
                     <div key={seg.id ?? `${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
                       <span className="font-semibold text-blue-700">
                         {getDisplayLabel(seg.speaker)}:
                       </span>{' '}
                       <span className="text-gray-800">{seg.text}</span>
                     </div>
+                    )
                   ))}
                   <div ref={transcriptEndRef} />
                 </div>

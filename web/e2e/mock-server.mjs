@@ -100,18 +100,66 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  const pushMatch = url.pathname.match(/^\/test\/push\/([^/]+)$/);
+  if (pushMatch && req.method === 'POST') {
+    handleTestPush(req, res, pushMatch[1]);
+    return;
+  }
+
   res.writeHead(404);
   res.end('{}');
 });
 
 const wss = new WebSocketServer({ noServer: true });
+
+// 2026-08-18 (Deepgram reconnect hardening) — registry of live sockets per
+// meeting id so a test script can POST /test/push/:meetingId to inject a
+// server-pushed message (e.g. transcription_lapse) into an already-open
+// /meetings/:id/observe or /meetings/:id/audio connection, exactly like the
+// real broadcastToMeeting() the production server uses. This lets the
+// Playwright test behaviorally verify the transcript UI renders a real
+// pushed WS message, not just a code-path trace.
+const socketsByMeeting = new Map();
+
 server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
-    // no-op socket: never sends anything unless told to; MeetingPage's
-    // sync_snapshot handling only fires on an actual message.
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const match = url.pathname.match(/^\/meetings\/([^/]+)\/(observe|audio)$/);
+    const meetingId = match ? match[1] : null;
+    if (meetingId) {
+      if (!socketsByMeeting.has(meetingId)) socketsByMeeting.set(meetingId, new Set());
+      socketsByMeeting.get(meetingId).add(ws);
+      ws.on('close', () => socketsByMeeting.get(meetingId)?.delete(ws));
+    }
+    // no-op socket otherwise: never sends anything unless told to via
+    // /test/push; MeetingPage's sync_snapshot handling only fires on an
+    // actual message.
     ws.on('message', () => {});
   });
 });
+
+// Re-wrap the http server's request handler so /test/push/:meetingId is
+// available without restructuring the createServer() call above (Node's
+// http server only supports one 'request' listener via createServer's
+// callback param, so this hooks the SAME handler by intercepting before it
+// runs — see the requestListener reassignment at the bottom of this file).
+function handleTestPush(req, res, meetingId) {
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', () => {
+    let msg;
+    try { msg = JSON.parse(body); } catch { res.writeHead(400); res.end('bad json'); return; }
+    const sockets = socketsByMeeting.get(meetingId);
+    let sent = 0;
+    if (sockets) {
+      for (const ws of sockets) {
+        if (ws.readyState === ws.OPEN) { ws.send(JSON.stringify(msg)); sent += 1; }
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ sent }));
+  });
+}
 
 server.listen(PORT, () => {
   console.log(`mock ARIA backend listening on ${PORT}`);

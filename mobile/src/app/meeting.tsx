@@ -119,6 +119,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { createMeeting, getStoredSessionId, getWsBase, Meeting, MeetingChannel, updateMeeting } from '@/lib/api';
+import { createReconnectTracker, ReconnectTracker } from '@/lib/reconnectPolicy';
 import {
   armRecordingSession,
   ChunkedPcmStreamer,
@@ -148,6 +149,13 @@ type TranscriptSegment = {
   text: string;
   isFinal: boolean;
   key: string;
+  // 2026-08-18 (Deepgram reconnect hardening, mobile equivalent of the web
+  // PWA's TranscriptSegment.kind) — set for an inline lapse/recovery/
+  // terminal-stop system notice instead of a normal speaker line. See
+  // web/src/pages/MeetingPage.tsx's TranscriptLapseNotice for the shared
+  // rationale/copy this mirrors.
+  kind?: 'lapse-start' | 'lapse-end' | 'lapse-stopped';
+  lapseDurationMs?: number;
 };
 
 export default function MeetingScreen() {
@@ -221,9 +229,14 @@ export default function MeetingScreen() {
   // screen retrying indefinitely in the background; 8 attempts at the
   // capped 10s delay is a few minutes of retry coverage, comfortably
   // longer than the ~35min 8/9 outage window's individual gap durations.
-  const RECONNECT_BASE_MS = 1000;
-  const RECONNECT_MAX_MS = 10000;
-  const MAX_RECONNECT_ATTEMPTS = 8;
+  // 2026-08-18 hardening: superseded by the shared jittered-backoff +
+  // ~60s-budget tracker (see @/lib/reconnectPolicy.ts) — kept only as
+  // historical context for the comment above; the tracker owns these
+  // numbers now (250ms→8s jittered, ~60s budget, ~14-attempt seatbelt).
+  const reconnectTrackerRef = useRef<ReconnectTracker | null>(null);
+  const dgLapseActiveRef = useRef(false);
+  const dgLapseTerminalRef = useRef(false);
+  const dgLapseStartedAtRef = useRef<number | null>(null);
   // Set synchronously by handleEnd() BEFORE ws.close() is called, so that by
   // the time the resulting onclose event fires, we can distinguish an
   // intentional user-initiated close (WS close code 1000, expected/normal)
@@ -250,6 +263,9 @@ export default function MeetingScreen() {
       clearTimeout(leaveWarningTimerRef.current);
       leaveWarningTimerRef.current = null;
     }
+    // Intentional stop (End Meeting / unmount), not a failure — dispose
+    // quietly so no stray lapse/give-up notice fires after the fact.
+    reconnectTrackerRef.current?.dispose();
   }, []);
 
   useEffect(() => cleanup, [cleanup]);
@@ -397,6 +413,40 @@ export default function MeetingScreen() {
   // SAME wsUrl (same meeting id, same session-id query param) — this only
   // re-establishes the transport, it never re-creates the meeting or
   // re-requests mic permission.
+  // 2026-08-18 (Deepgram reconnect hardening) — pushes an inline transcript
+  // notice for a lapse-start/lapse-end/terminal-stop, deduped exactly like
+  // web/src/pages/MeetingPage.tsx's pushLapseStartNotice/pushLapseEndNotice/
+  // pushLapseStoppedNotice (same refs, same guard logic) so a rep sees one
+  // notice per real lapse regardless of detection path. This screen only
+  // has CLIENT-side detection (no server-pushed transcription_lapse handler
+  // yet for the in-person WS route in this pass — see report), which is
+  // still a real, independent detection path per the task's dedup design.
+  function pushLapseStartNotice(startedAtMs?: number) {
+    if (dgLapseActiveRef.current || dgLapseTerminalRef.current) return;
+    dgLapseActiveRef.current = true;
+    dgLapseStartedAtRef.current = startedAtMs ?? Date.now();
+    segmentCounter.current += 1;
+    setSegments((prev) => [...prev, { speaker: '', text: '', isFinal: true, key: `lapse-${segmentCounter.current}`, kind: 'lapse-start' }]);
+  }
+
+  function pushLapseEndNotice(durationMs?: number) {
+    if (!dgLapseActiveRef.current) return;
+    dgLapseActiveRef.current = false;
+    const observedDuration = durationMs ?? (dgLapseStartedAtRef.current ? Date.now() - dgLapseStartedAtRef.current : undefined);
+    dgLapseStartedAtRef.current = null;
+    segmentCounter.current += 1;
+    setSegments((prev) => [...prev, { speaker: '', text: '', isFinal: true, key: `lapse-${segmentCounter.current}`, kind: 'lapse-end', lapseDurationMs: observedDuration }]);
+  }
+
+  function pushLapseStoppedNotice() {
+    if (dgLapseTerminalRef.current) return;
+    dgLapseTerminalRef.current = true;
+    dgLapseActiveRef.current = false;
+    dgLapseStartedAtRef.current = null;
+    segmentCounter.current += 1;
+    setSegments((prev) => [...prev, { speaker: '', text: '', isFinal: true, key: `lapse-${segmentCounter.current}`, kind: 'lapse-stopped' }]);
+  }
+
   function connectWebSocket(wsUrl: string) {
     const wsBase = getWsBase();
     wsUrlRef.current = wsUrl;
@@ -404,8 +454,18 @@ export default function MeetingScreen() {
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
+    if (!reconnectTrackerRef.current) {
+      reconnectTrackerRef.current = createReconnectTracker({
+        onLapseStart: (startedAtMs) => pushLapseStartNotice(startedAtMs),
+        onLapseEnd: (durationMs) => pushLapseEndNotice(durationMs),
+        onGiveUp: () => pushLapseStoppedNotice(),
+      });
+    }
+    const tracker = reconnectTrackerRef.current;
+
     ws.onopen = () => {
       reconnectAttemptsRef.current = 0;
+      tracker.onConnected();
       setStage('connected');
       setErrorMsg(null);
 
@@ -481,29 +541,35 @@ export default function MeetingScreen() {
         );
         return;
       }
-      if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
-        // Give up — same terminal 'ws-error' UI as before this change, just
-        // reached after retrying instead of immediately.
-        setStage('ws-error');
-        setErrorMsg(
-          `Lost connection and could not reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts ` +
-            `(last code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
-        );
-        return;
-      }
-      // Auto-reconnect with exponential backoff, cap at 10s — same formula
-      // as web's connectWebSocket()/ws.onclose (see file header).
+      // 2026-08-18 hardening: jittered backoff (250ms→8s) with a real ~60s
+      // time budget as the primary give-up control (was: no-jitter
+      // 1s→10s with a flat 8-attempt ceiling). Also raises the >2s
+      // lapse-start notice (via the tracker's internal timer) and the
+      // terminal give-up notice inline in the transcript — see
+      // pushLapseStartNotice/pushLapseStoppedNotice above.
       setStage('reconnecting');
       setErrorMsg(
         `Connection lost (code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Reconnecting…`
       );
-      const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttemptsRef.current), RECONNECT_MAX_MS);
+      const result = tracker.onDisconnect();
+      if ('giveUp' in result) {
+        // Give up — same terminal 'ws-error' UI as before this change, just
+        // reached via the time-budget/attempt-seatbelt tracker instead of a
+        // flat attempt count. pushLapseStoppedNotice() already fired above
+        // via onGiveUp.
+        setStage('ws-error');
+        setErrorMsg(
+          `Lost connection and could not reconnect (${result.reason}) ` +
+            `(last code ${evt?.code ?? 'unknown'}${evt?.reason ? `: ${evt.reason}` : ''}). Base: ${wsBase}.`
+        );
+        return;
+      }
       reconnectAttemptsRef.current += 1;
       reconnectTimerRef.current = setTimeout(() => {
         if (isRecordingRef.current && wsUrlRef.current) {
           connectWebSocket(wsUrlRef.current);
         }
-      }, delay);
+      }, result.delayMs);
     };
     ws.onmessage = (evt) => {
       handleWsMessage(evt.data);
@@ -734,12 +800,22 @@ export default function MeetingScreen() {
                     {stage === 'connected' ? 'Listening…' : 'No transcript yet.'}
                   </ThemedText>
                 )}
-                {segments.map((seg) => (
-                  <ThemedText key={seg.key} type="small" style={styles.transcriptLine}>
-                    <ThemedText type="smallBold">{seg.speaker}: </ThemedText>
-                    {seg.text}
-                  </ThemedText>
-                ))}
+                {segments.map((seg) =>
+                  // 2026-08-18 (Deepgram reconnect hardening) — a lapse/
+                  // recovery/terminal-stop notice renders as an inline
+                  // system banner instead of a speaker line. Mirrors web's
+                  // TranscriptLapseNotice copy/behavior.
+                  seg.kind ? (
+                    <ThemedText key={seg.key} type="small" style={styles.lapseNotice}>
+                      {lapseNoticeText(seg)}
+                    </ThemedText>
+                  ) : (
+                    <ThemedText key={seg.key} type="small" style={styles.transcriptLine}>
+                      <ThemedText type="smallBold">{seg.speaker}: </ThemedText>
+                      {seg.text}
+                    </ThemedText>
+                  )
+                )}
                 {interim && (
                   <ThemedText type="small" style={[styles.transcriptLine, styles.interimText]}>
                     <ThemedText type="smallBold" style={styles.interimText}>
@@ -761,6 +837,24 @@ export default function MeetingScreen() {
       </SafeAreaView>
     </ThemedView>
   );
+}
+
+// 2026-08-18 (Deepgram reconnect hardening) — lapse-notice copy, same
+// wording/intent as web/src/pages/MeetingPage.tsx's TranscriptLapseNotice,
+// so a rep sees the same message on mobile or web regardless of platform.
+function lapseNoticeText(seg: TranscriptSegment): string {
+  if (seg.kind === 'lapse-start') return '⚠️ Connection lost — live transcription paused. Recording continues.';
+  if (seg.kind === 'lapse-end') {
+    const ms = seg.lapseDurationMs;
+    if (ms === undefined || !Number.isFinite(ms)) return '✅ Reconnected.';
+    const totalSeconds = Math.max(0, Math.round(ms / 1000));
+    const dur = totalSeconds < 60 ? `${totalSeconds}s` : `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+    return `✅ Reconnected — live transcription was paused for ${dur}.`;
+  }
+  if (seg.kind === 'lapse-stopped') {
+    return '🛑 Live transcription has stopped for this meeting. The recording is still being captured — the transcript can be backfilled afterward.';
+  }
+  return '';
 }
 
 function stageLabel(stage: Stage): string {
@@ -843,6 +937,7 @@ const styles = StyleSheet.create({
   transcriptScroll: { flexGrow: 0 },
   transcriptLine: { marginBottom: Spacing.two },
   interimText: { color: '#9CA3AF', fontStyle: 'italic' },
+  lapseNotice: { marginBottom: Spacing.two, color: '#B45309', fontStyle: 'italic' },
   button: {
     borderRadius: Spacing.two,
     paddingVertical: Spacing.three,

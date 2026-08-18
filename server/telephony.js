@@ -71,6 +71,8 @@ import twilio from 'twilio';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { twilioPayloadToLinear16Buffer } from './audioCodec.js';
 import { createDeepgramSession } from './deepgramSession.js';
+import { isLikelyName, toDisplayName } from './nameHeuristics.js';
+import { createIntroDetector } from './introDetection.js';
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 
@@ -345,7 +347,7 @@ export async function findOrCreatePhoneMeeting(pool, { callSid, customerId, repI
  * handle that content-type). This was a real, flagged gap in the prior
  * scaffolding pass — fixed here, not deferred again.
  */
-export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting } = {}) {
+export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController } = {}) {
   const formbody = (await import('@fastify/formbody')).default;
   await fastify.register(formbody);
 
@@ -868,6 +870,27 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     let meetingId = null;
     let dgSession = null;
 
+    // ── Mid-call name-introduction detector (2026-08-18, THIRD PASS ROOT-
+    // CAUSE FIX) ──────────────────────────────────────────────────────────
+    // This is the piece that never existed on the phone-call path — see
+    // introDetection.js's header for the full root-cause writeup. Created
+    // now (WS-connect time) rather than inside the `start` case so its
+    // sweep timer's lifetime matches this socket's lifetime regardless of
+    // whether/when a `start` event ever arrives — mirrors the in-person
+    // handler's introSweepTimer, which is also tied to socket lifetime, not
+    // to any inner per-call event. broadcastToMeeting resolves the CURRENT
+    // meetingId via this closure at call time, so it's safe to reference
+    // meetingId here even though it's only set once `start` fires below.
+    const introDetector = createIntroDetector({
+      log: (m) => fastify.log.info(`[callSid=${callSid ?? 'pending'}] ${m}`),
+      broadcast: (payload) => { if (meetingId && broadcastToMeeting) broadcastToMeeting(meetingId, payload); },
+      isLikelyName,
+      toDisplayName,
+    });
+    const INTRO_SWEEP_MS = 3000;
+    const introSweepTimer = setInterval(() => introDetector.sweep(), INTRO_SWEEP_MS);
+    if (typeof introSweepTimer.unref === 'function') introSweepTimer.unref();
+
     socket.on('message', async (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -895,6 +918,10 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
               if (res.rows.length > 0) {
                 meetingId = res.rows[0].id;
                 if (registerMeetingSocket) registerMeetingSocket(meetingId, socket);
+                // Bridge the intro-detector's confirm/reject into the SAME
+                // POST /api/meetings/:id/speaker-lock route the in-person
+                // path already uses — no web-client change needed at all.
+                if (registerSpeakerController) registerSpeakerController(meetingId, introDetector.speakerLockController);
                 fastify.log.info(`Twilio stream linked to meeting ${meetingId}`);
               } else {
                 fastify.log.warn(`Twilio stream: no meeting row found for callSid=${callSid} — voice webhook may not have run yet`);
@@ -920,19 +947,49 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
               apiKey: DEEPGRAM_API_KEY,
               log: (msg2) => fastify.log.info(`[callSid=${callSid}] ${msg2}`),
               onError: (err) => fastify.log.error(`Twilio stream Deepgram error (callSid=${callSid}): ${err.message}`),
+              // 2026-08-18 hardening: this callback now fires when the shared
+              // dgReconnectPolicy tracker gives up (60s time budget or ~14
+              // attempt seatbelt), not the old ad hoc 8-failures/5-min
+              // circuit breaker. Broadcasts a terminal, truthful notice —
+              // recording (Twilio record-from-answer-dual on the customer
+              // leg) is unaffected and keeps capturing audio; only the LIVE
+              // feed stops for this call.
               onCircuitOpen: (reason) => {
-                fastify.log.error(`Twilio stream Deepgram circuit breaker OPEN (callSid=${callSid}): ${reason}`);
+                fastify.log.error(`Twilio stream Deepgram reconnect give-up (callSid=${callSid}): ${reason}`);
                 if (dgMeetingId && broadcastToMeeting) {
                   broadcastToMeeting(dgMeetingId, {
-                    type: 'error',
-                    error: 'Live transcription temporarily unavailable (Deepgram reconnect limit reached) for this call.',
+                    type: 'transcription_lapse',
+                    state: 'stopped',
+                    message: 'Live transcription has stopped for this call. The call recording is still being captured and the transcript can be backfilled afterward.',
                   });
+                }
+              },
+              // >2s lapse / recovery notices — see dgReconnectPolicy.js. A
+              // sub-2s blip never reaches these callbacks (no perceptible
+              // stall to announce).
+              onLapseStart: (startedAtMs) => {
+                fastify.log.warn(`Twilio stream Deepgram lapse (>2s) (callSid=${callSid}), started ${new Date(startedAtMs).toISOString()}`);
+                if (dgMeetingId && broadcastToMeeting) {
+                  broadcastToMeeting(dgMeetingId, { type: 'transcription_lapse', state: 'started', startedAt: startedAtMs });
+                }
+              },
+              onLapseEnd: (durationMs) => {
+                fastify.log.info(`Twilio stream Deepgram lapse recovered (callSid=${callSid}) after ${durationMs}ms`);
+                if (dgMeetingId && broadcastToMeeting) {
+                  broadcastToMeeting(dgMeetingId, { type: 'transcription_lapse', state: 'recovered', durationMs });
                 }
               },
               onTranscript: (result) => {
                 if (!dgMeetingId) return; // no meeting row resolved yet — nothing to persist/broadcast against
                 const speakerLabel = `Speaker ${result.speaker + 1}`;
                 if (result.isFinal) {
+                  // Feed the mid-call intro detector on every final segment,
+                  // same as the in-person handler does — THIS is the actual
+                  // fix (see introDetection.js header). result.speaker is
+                  // already the canonical per-call 0-based index Deepgram
+                  // assigns; no merge/dedup step exists on this path (unlike
+                  // server.js's resolveSpeaker), so it's used directly.
+                  introDetector.onFinalSegment(result.speaker, result.text);
                   if (pool) {
                     const wordCount = result.words.length > 0
                       ? result.words.length
@@ -997,6 +1054,10 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
           if (meetingId && unregisterMeetingSocket) {
             unregisterMeetingSocket(meetingId, socket);
           }
+          if (meetingId && unregisterSpeakerController) {
+            unregisterSpeakerController(meetingId, introDetector.speakerLockController);
+          }
+          clearInterval(introSweepTimer);
           break;
 
         case 'dtmf':
@@ -1019,6 +1080,10 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
       if (meetingId && unregisterMeetingSocket) {
         unregisterMeetingSocket(meetingId, socket);
       }
+      if (meetingId && unregisterSpeakerController) {
+        unregisterSpeakerController(meetingId, introDetector.speakerLockController);
+      }
+      clearInterval(introSweepTimer);
     });
 
     socket.on('error', (err) => {

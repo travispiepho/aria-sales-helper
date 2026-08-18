@@ -44,3 +44,51 @@ test('in-person meeting: keeps functional End Meeting button, Record button, gen
   await expect(page.getByRole('button', { name: /Record/ })).toBeVisible();
   await expect(page.getByText('Start recording to see live transcript')).toBeVisible();
 });
+
+// 2026-08-18 (Deepgram reconnect hardening) — BEHAVIORAL verification (not
+// a code-path trace) that a server-pushed transcription_lapse message
+// actually renders the lapse/recovery/terminal notices inline in the
+// transcript UI. Uses the mock server's /test/push/:meetingId endpoint
+// (see mock-server.mjs) to inject the exact WS message shape
+// broadcastToMeeting() sends in production, over an ALREADY-CONNECTED
+// socket — this is the same class of check the 8/17 postmortem says was
+// missing (a subagent traced code instead of exercising the UI and was
+// wrong about what the rep actually saw).
+const PUSH_BASE = process.env.MOCK_BASE_URL || 'http://localhost:4100';
+
+test('phone call: >2s lapse notice, recovery notice, and terminal stopped notice all render inline in the transcript', async ({ page }) => {
+  await page.goto(`${BASE}/meetings/phone-recording`);
+  // Give the owner audio WebSocket a moment to actually open (this is the
+  // exact condition the 8/17 postmortem flags: pushing to a socket that
+  // never connected produces a silent stall). Poll the mock server's
+  // socket registry indirectly by waiting for the connection status pill.
+  await expect(page.getByText(/Recording ·|Active ·/)).toBeVisible({ timeout: 5000 });
+
+  // Push a lapse-start notice, exactly as server/telephony.js's
+  // onLapseStart callback broadcasts it.
+  const startRes = await fetch(`${PUSH_BASE}/test/push/phone-recording`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'transcription_lapse', state: 'started', startedAt: Date.now() }),
+  });
+  expect((await startRes.json()).sent).toBeGreaterThan(0);
+  await expect(page.getByText('Connection lost — live transcription paused. Recording continues.')).toBeVisible();
+
+  // Push the matching recovery notice with an observed duration.
+  const endRes = await fetch(`${PUSH_BASE}/test/push/phone-recording`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'transcription_lapse', state: 'recovered', durationMs: 4300 }),
+  });
+  expect((await endRes.json()).sent).toBeGreaterThan(0);
+  await expect(page.getByText(/Reconnected.*live transcription was paused for 4s/)).toBeVisible();
+
+  // Push the terminal 60s-budget-exhaustion notice.
+  const stopRes = await fetch(`${PUSH_BASE}/test/push/phone-recording`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'transcription_lapse', state: 'stopped' }),
+  });
+  expect((await stopRes.json()).sent).toBeGreaterThan(0);
+  await expect(page.getByText(/Live transcription has stopped for this meeting\. The recording is still being captured/)).toBeVisible();
+});

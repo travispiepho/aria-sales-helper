@@ -35,6 +35,7 @@ import { detectObjection } from './objectionDetection.js';
 // ("Hi, I'm John"). Replaces the old hand-picked STOPWORDS blocklist — see
 // nameHeuristics.js header for why (dictionary signal, not capitalization).
 import { isLikelyName, toDisplayName } from './nameHeuristics.js';
+import { createReconnectTracker } from './dgReconnectPolicy.js';
 
 const { Pool } = pg;
 
@@ -791,7 +792,13 @@ await fastify.register(websocketPlugin);
 // wrapped) so phone-channel transcript/segment broadcasts fan out to the
 // exact same owner + observer socket sets as the in-person flow, with zero
 // changes to broadcastToMeeting() itself or the in-person audio handler.
-await registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting });
+// 2026-08-18 root-cause fix: pass the speaker-lock controller registry
+// through too, so the phone-channel intro detector (telephony.js, wired up
+// this pass — see introDetection.js header for why it never existed there
+// before) can bridge its confirm/reject into the SAME
+// POST /api/meetings/:id/speaker-lock route the in-person path already
+// uses, with zero web-client changes required.
+await registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController });
 
 // ─── Auth middleware (decorator) ──────────────────────────────────────────────
 
@@ -3388,29 +3395,51 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   const audioQueue = [];
   let closed = false;
   let reconnectTimer = null;
-  let reconnectAttempts = 0;
 
-  // 2026-08-10 hardening: the reconnect loop below used to retry
-  // immediately-ish forever with no ceiling on total attempts. During the
-  // 8/9 outage (48x 502s while the backend replica was intermittently
-  // unreachable) this loop was actively churning and is suspected to have
-  // added event-loop/connection pressure on top of the reachability issue.
-  // Two changes: (1) exponential backoff now starts at 1s and caps at 30s
-  // (was capped at 10s with no attempt ceiling), and (2) a circuit breaker —
-  // if DG_CIRCUIT_MAX_FAILURES reconnects fail within DG_CIRCUIT_WINDOW_MS,
-  // stop retrying entirely for this session, log it clearly, and tell the
-  // client transcription is degraded instead of spinning forever. This does
-  // NOT change behavior on a successful connection (reconnectAttempts and
-  // the failure-timestamp window both reset to empty on 'open').
-  const DG_RECONNECT_BASE_MS = 1000;
-  const DG_RECONNECT_MAX_MS = 30000;
-  const DG_CIRCUIT_MAX_FAILURES = 8;
-  const DG_CIRCUIT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-  let circuitOpen = false;
-  const dgFailureTimestamps = [];
+  // 2026-08-18 hardening (this pass, root cause of 8/4 + 8/9 outages): the
+  // reconnect loop below used to retry immediately-ish forever (previously
+  // hardened 2026-08-10 to 1s→30s + an 8-failures/5-min circuit breaker,
+  // but STILL with no jitter and no real time budget). No jitter meant
+  // many concurrent meetings failing at the same moment (e.g. a shared
+  // backend blip) would all retry on the exact same schedule — a
+  // synchronized stampede against the single backend replica, which is
+  // suspected to have made the 8/9 outage worse, not just a symptom of it.
+  // Delegated to the shared dgReconnectPolicy.js tracker: 250ms→8s
+  // jittered backoff, a ~60s time budget as the PRIMARY give-up control,
+  // and a ~14-attempt seatbelt as a backstop. Also now emits >2s
+  // lapse/reconnect notices to the transcript (see onLapseStart/onLapseEnd
+  // below) — the old code only ever spoke up once the ENTIRE breaker
+  // tripped (up to 8 failures across 5 minutes = minutes of silent dead
+  // air), never on the first user-perceptible stall.
+  const dgTracker = createReconnectTracker({
+    log: (m) => fastify.log.info(`[meeting ${meetingId}] ${m}`),
+    onLapseStart: (startedAtMs) => {
+      fastify.log.warn(`Deepgram lapse (>2s) for meeting ${meetingId}, started ${new Date(startedAtMs).toISOString()}`);
+      broadcastToMeeting(meetingId, { type: 'transcription_lapse', state: 'started', startedAt: startedAtMs });
+    },
+    onLapseEnd: (durationMs) => {
+      fastify.log.info(`Deepgram lapse recovered for meeting ${meetingId} after ${durationMs}ms`);
+      broadcastToMeeting(meetingId, { type: 'transcription_lapse', state: 'recovered', durationMs });
+    },
+    onGiveUp: (reason) => {
+      fastify.log.error(
+        `Deepgram reconnect give-up for meeting ${meetingId}: ${reason}. ` +
+        `Giving up on Deepgram reconnects for this session; live transcription is degraded.`
+      );
+      try {
+        broadcastToMeeting(meetingId, {
+          type: 'transcription_lapse',
+          state: 'stopped',
+          message: 'Live transcription has stopped for this meeting. The call recording is still being captured and the transcript can be backfilled afterward.',
+        });
+      } catch (e) {
+        fastify.log.error(`Failed to broadcast Deepgram give-up notice for meeting ${meetingId}: ${e.message}`);
+      }
+    },
+  });
 
   function connectDeepgram() {
-    if (closed || circuitOpen) return;
+    if (closed || dgTracker.isGivenUp()) return;
 
     dgSocket = new WebSocket(dgUrl, {
       headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
@@ -3418,8 +3447,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
     dgSocket.on('open', () => {
       dgReady = true;
-      reconnectAttempts = 0;
-      dgFailureTimestamps.length = 0;
+      dgTracker.onConnected();
       fastify.log.info(`Deepgram connected for meeting ${meetingId}`);
       const queued = audioQueue.splice(0);
       queued.forEach(buf => {
@@ -3774,36 +3802,9 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       fastify.log.warn(`Deepgram closed (code=${code}) for meeting ${meetingId}`);
       if (closed) return;
 
-      const now = Date.now();
-      dgFailureTimestamps.push(now);
-      // Trim timestamps outside the circuit window as we go, so a slow
-      // trickle of failures over hours never trips the breaker — only a
-      // burst within DG_CIRCUIT_WINDOW_MS does.
-      while (dgFailureTimestamps.length && now - dgFailureTimestamps[0] > DG_CIRCUIT_WINDOW_MS) {
-        dgFailureTimestamps.shift();
-      }
-
-      if (dgFailureTimestamps.length >= DG_CIRCUIT_MAX_FAILURES) {
-        circuitOpen = true;
-        fastify.log.error(
-          `Deepgram circuit breaker OPEN for meeting ${meetingId}: ` +
-          `${dgFailureTimestamps.length} reconnect failures within ${DG_CIRCUIT_WINDOW_MS / 1000}s. ` +
-          `Giving up on Deepgram reconnects for this session; transcription is degraded.`
-        );
-        try {
-          broadcastToMeeting(meetingId, {
-            type: 'error',
-            error: 'Live transcription temporarily unavailable (Deepgram reconnect limit reached). Audio recording continues; transcription will resume on next meeting.',
-          });
-        } catch (e) {
-          fastify.log.error(`Failed to broadcast Deepgram circuit-open notice for meeting ${meetingId}: ${e.message}`);
-        }
-        return;
-      }
-
-      const delay = Math.min(DG_RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts), DG_RECONNECT_MAX_MS);
-      reconnectAttempts += 1;
-      reconnectTimer = setTimeout(connectDeepgram, delay);
+      const result = dgTracker.onDisconnect();
+      if (result.giveUp) return; // dgTracker already invoked onGiveUp above
+      reconnectTimer = setTimeout(connectDeepgram, result.delayMs);
     });
 
     dgSocket.on('error', (err) => {
@@ -3837,6 +3838,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     unregisterSpeakerController(meetingId, speakerLockController);
     clearInterval(introSweepTimer);
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    dgTracker.dispose();
     if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
       try {
         dgSocket.send(JSON.stringify({ type: 'CloseStream' }));

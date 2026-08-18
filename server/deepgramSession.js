@@ -48,11 +48,16 @@
  */
 
 import WebSocket from 'ws';
+import { createReconnectTracker } from './dgReconnectPolicy.js';
 
-const DG_RECONNECT_BASE_MS = 1000;
-const DG_RECONNECT_MAX_MS = 30000;
-const DG_CIRCUIT_MAX_FAILURES = 8;
-const DG_CIRCUIT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+// 2026-08-18 hardening: replaced this module's own 1s→30s no-jitter
+// backoff + 8-failures/5-min circuit breaker with the shared
+// dgReconnectPolicy.js tracker (250ms→8s jittered backoff, ~60s time
+// budget as the primary give-up control, ~14-attempt seatbelt). See that
+// module's header for the full rationale (jitter is mandatory to avoid the
+// synchronized-stampede failure mode from the 8/9 outage) and
+// onLapseStart/onLapseEnd for the new >2s lapse-notice / recovery-notice
+// behavior this task also requires.
 
 /**
  * Build the Deepgram live-transcription WS URL with the same params as the
@@ -111,26 +116,39 @@ export function parseDeepgramResult(raw) {
 /**
  * Create a self-contained Deepgram live-transcription session.
  *
- * Reconnect/circuit-breaker behavior mirrors the in-person handler's
- * hardening (exponential backoff 1s→30s, circuit breaker after 8 failures
- * within a 5-minute window) — same constants, independently implemented
- * per the duplication note above.
+ * Reconnect/lapse behavior now delegates to the shared
+ * dgReconnectPolicy.js tracker (see this file's import comment above):
+ * jittered exponential backoff 250ms→8s, a ~60s time budget as the
+ * PRIMARY give-up control, and a ~14-attempt seatbelt as a backstop only.
+ * Give-up/degraded-state is scoped to THIS session/connection instance
+ * only — it never touches any other meeting's or call's tracker, timers,
+ * or process state.
  *
  * @param {object} opts
  * @param {string} opts.apiKey — DEEPGRAM_API_KEY
  * @param {(result: {isFinal: boolean, text: string, speaker: number, words: any[]}) => void} opts.onTranscript
  *   Called for every non-empty transcript result (both interim and final —
  *   caller checks `isFinal`).
- * @param {(reason: string) => void} [opts.onCircuitOpen] — called once if
- *   the reconnect circuit breaker trips (transcription permanently
- *   degraded for this session).
+ * @param {(reason: string) => void} [opts.onCircuitOpen] — called once when
+ *   the reconnect time budget (or attempt seatbelt) is exhausted
+ *   (transcription permanently degraded for this session). Kept the same
+ *   name as before this pass for caller compatibility (telephony.js).
+ * @param {(startedAtMs: number) => void} [opts.onLapseStart] — called once
+ *   per lapse, only if the connection has been down for MORE than 2
+ *   seconds (dgReconnectPolicy's DG_LAPSE_NOTICE_THRESHOLD_MS). A blip that
+ *   recovers within 2s never fires this — no silent-gap notice needed for
+ *   something the rep would never perceive as a stall.
+ * @param {(durationMs: number) => void} [opts.onLapseEnd] — called once on
+ *   recovery, ONLY if onLapseStart had previously fired for that lapse, so
+ *   the caller can emit a matching "reconnected" marker with the observed
+ *   duration.
  * @param {(err: Error) => void} [opts.onError]
  * @param {(code: number) => void} [opts.onClose] — called on every close
  *   (including ones that will reconnect); NOT called again after the
  *   session's own .close() is invoked.
  * @param {(msg: string) => void} [opts.log]
  */
-export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onError, onClose, log }) {
+export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onLapseStart, onLapseEnd, onError, onClose, log }) {
   const logFn = log || (() => {});
   const dgUrl = buildDeepgramUrl();
 
@@ -139,12 +157,25 @@ export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onE
   const audioQueue = [];
   let closed = false;
   let reconnectTimer = null;
-  let reconnectAttempts = 0;
-  let circuitOpen = false;
-  const dgFailureTimestamps = [];
+
+  const tracker = createReconnectTracker({
+    log: logFn,
+    onLapseStart: (startedAtMs) => {
+      logFn(`deepgramSession: lapse notice (down > 2s), started at ${new Date(startedAtMs).toISOString()}`);
+      if (onLapseStart) { try { onLapseStart(startedAtMs); } catch (e) { logFn(`onLapseStart handler threw: ${e.message}`); } }
+    },
+    onLapseEnd: (durationMs) => {
+      logFn(`deepgramSession: lapse recovered after ${durationMs}ms`);
+      if (onLapseEnd) { try { onLapseEnd(durationMs); } catch (e) { logFn(`onLapseEnd handler threw: ${e.message}`); } }
+    },
+    onGiveUp: (reason) => {
+      logFn(`deepgramSession: reconnect give-up (${reason})`);
+      if (onCircuitOpen) { try { onCircuitOpen(reason); } catch { /* ignore handler errors */ } }
+    },
+  });
 
   function connect() {
-    if (closed || circuitOpen) return;
+    if (closed || tracker.isGivenUp()) return;
 
     dgSocket = new WebSocket(dgUrl, {
       headers: { Authorization: `Token ${apiKey}` },
@@ -152,8 +183,7 @@ export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onE
 
     dgSocket.on('open', () => {
       dgReady = true;
-      reconnectAttempts = 0;
-      dgFailureTimestamps.length = 0;
+      tracker.onConnected();
       logFn('deepgramSession: connected');
       const queued = audioQueue.splice(0);
       queued.forEach((buf) => {
@@ -179,25 +209,9 @@ export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onE
       }
       if (closed) return;
 
-      const now = Date.now();
-      dgFailureTimestamps.push(now);
-      while (dgFailureTimestamps.length && now - dgFailureTimestamps[0] > DG_CIRCUIT_WINDOW_MS) {
-        dgFailureTimestamps.shift();
-      }
-
-      if (dgFailureTimestamps.length >= DG_CIRCUIT_MAX_FAILURES) {
-        circuitOpen = true;
-        const reason = `${dgFailureTimestamps.length} reconnect failures within ${DG_CIRCUIT_WINDOW_MS / 1000}s`;
-        logFn(`deepgramSession: circuit breaker OPEN (${reason})`);
-        if (onCircuitOpen) {
-          try { onCircuitOpen(reason); } catch { /* ignore handler errors */ }
-        }
-        return;
-      }
-
-      const delay = Math.min(DG_RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts), DG_RECONNECT_MAX_MS);
-      reconnectAttempts += 1;
-      reconnectTimer = setTimeout(connect, delay);
+      const result = tracker.onDisconnect();
+      if (result.giveUp) return; // tracker already invoked onGiveUp above
+      reconnectTimer = setTimeout(connect, result.delayMs);
     });
 
     dgSocket.on('error', (err) => {
@@ -230,6 +244,7 @@ export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onE
       if (closed) return;
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      tracker.dispose();
       if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
         try {
           dgSocket.send(JSON.stringify({ type: 'CloseStream' }));

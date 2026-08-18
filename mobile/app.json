@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "ARIA Sales Helper",
+    "slug": "ariasaleshelper",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
@@ -47,9 +47,14 @@
       "policy": "appVersion"
     },
     "updates": {
-      "url": "https://u.expo.dev/REPLACE_WITH_EAS_PROJECT_ID",
+      "url": "https://u.expo.dev/b52623c5-f2ea-473f-b87b-149f4324063b",
       "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 0
+    },
+    "extra": {
+      "eas": {
+        "projectId": "b52623c5-f2ea-473f-b87b-149f4324063b"
+      }
     }
   }
 }

@@ -128,17 +128,36 @@ async function run() {
     await client.query(schema);
     console.log('Schema migration complete.');
 
-    // Seed admin user for Troy with real bcrypt hash
-    const tempPassword = 'TempPass123!';
-    const passwordHash = await bcrypt.hash(tempPassword, 10);
+    // Seed admin user for Troy.
+    //
+    // Email corrected 2026-08-18: this previously seeded
+    // 'troy@certaprograndhaven.com', which is NOT a real account. Troy's
+    // actual account is thacker@certapro.com — confirmed by Gabe Bass, and
+    // consistent with migrations/2026-08-10-owner-role.sql, which promoted
+    // that exact address to 'owner' in production on 2026-08-10. The old
+    // address existed only here and sent people debugging a phantom login.
+    //
+    // The password is env-driven. It previously hardcoded a known literal
+    // alongside a known email, which is harmless against a throwaway local
+    // DB and dangerous anywhere else. If SEED_ADMIN_PASSWORD is unset we
+    // seed nothing rather than silently planting guessable credentials.
+    const seedPassword = process.env.SEED_ADMIN_PASSWORD;
+    if (!seedPassword) {
+      console.log(
+        'Skipping admin seed: SEED_ADMIN_PASSWORD not set. ' +
+        'Set it to seed thacker@certapro.com for local development.'
+      );
+    } else {
+      const passwordHash = await bcrypt.hash(seedPassword, 10);
 
-    await client.query(`
-      INSERT INTO users (name, email, password_hash, role)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (email) DO NOTHING
-    `, ['Troy Hacker', 'troy@certaprograndhaven.com', passwordHash, 'admin']);
+      await client.query(`
+        INSERT INTO users (name, email, password_hash, role)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (email) DO NOTHING
+      `, ['Troy Hacker', 'thacker@certapro.com', passwordHash, 'admin']);
 
-    console.log('Admin user seeded (or already existed).');
+      console.log('Admin user seeded (or already existed).');
+    }
 
     // Verify all 8 tables exist
     const tables = [

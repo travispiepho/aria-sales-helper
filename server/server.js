@@ -703,6 +703,41 @@ async function ensureSessionsTable() {
     ALTER TABLE users
       ADD CONSTRAINT users_role_check CHECK (role IN ('rep', 'admin', 'owner'))
   `);
+
+  // Objections/Rebuttals library (added 2026-08-18, see
+  // migrations/2026-08-18-objections-rebuttals.sql for the full schema
+  // rationale). Mirrored here per this repo's established convention
+  // (this whole function IS the de-facto migration runner, per the
+  // 2026-08-10 owner-role comment above) so a plain deploy-from-main
+  // brings the schema in sync automatically — this is the safety net the
+  // 2026-08-17 recording-columns incident was missing (that migration's
+  // ALTER TABLE was never mirrored here, so it silently never ran).
+  // CREATE TABLE IF NOT EXISTS / IF NOT EXISTS index: fully idempotent,
+  // non-destructive, safe on a live table with rows present or absent.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS objections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      text TEXT NOT NULL,
+      category TEXT,
+      created_by UUID REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS rebuttals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      objection_id UUID NOT NULL REFERENCES objections(id) ON DELETE CASCADE,
+      text TEXT NOT NULL,
+      created_by UUID REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS rebuttals_objection_id_created_at_idx
+    ON rebuttals (objection_id, created_at ASC)
+  `);
 }
 
 async function createSession(userId) {
@@ -2759,6 +2794,176 @@ fastify.get('/api/customers/:id', { preHandler: [requireAuth] }, async (request,
   }
 
   return customer;
+});
+
+// ─── Objections / Rebuttals library ──────────────────────────────────────────
+// Added 2026-08-18, Troy Hacker's request (business owner, end user —
+// tracked as the "Rebuttal list to objections" line in HighPriorityTodos).
+// A standalone reference library: reps browse a shared list of customer
+// objections, each holding one or more rebuttals other reps have found
+// effective. Deliberately NOT wired into the live meeting/coaching pipeline
+// (that's objectionDetection.js / coachingAnalysis.js's generateRebuttal(),
+// an unrelated in-call stub) — this is a standalone aria-web tab only, per
+// the task's explicit scope.
+//
+// Auth model: unlike /api/customers (scoped to created_by — each rep's own
+// leads), objections/rebuttals are a SHARED team knowledge base — the
+// entire point is pooling field-tested rebuttals across the whole sales
+// team, so every route below is visible to and writable by ANY
+// authenticated rep, not just admins and not just the row's own creator.
+// This is an explicit product choice, not an oversight — flagged in this
+// task's report for Gabe to overrule if he'd rather creation/editing be
+// admin-gated.
+//
+// ⚠️ Requires migrations/2026-08-18-objections-rebuttals.sql to have been
+// applied by hand against the DB first (this repo's migrations are NOT
+// auto-run on deploy) — every route below will 500 with a "relation
+// \"objections\" does not exist" error until that migration is run.
+
+fastify.post('/api/objections', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { text, category } = request.body || {};
+
+  if (!text || !String(text).trim()) {
+    return reply.code(400).send({ error: 'text is required' });
+  }
+
+  const result = await pool.query(
+    `INSERT INTO objections (text, category, created_by)
+     VALUES ($1, $2, $3)
+     RETURNING *`,
+    [String(text).trim(), category ? String(category).trim() : null, request.user.id]
+  );
+
+  return reply.code(201).send(result.rows[0]);
+});
+
+fastify.get('/api/objections', { preHandler: [requireAuth] }, async (request, reply) => {
+  // Shared library — every authenticated rep sees every objection,
+  // regardless of who created it (see auth-model comment above).
+  const result = await pool.query(
+    `SELECT o.*,
+            COALESCE(r.rebuttal_count, 0) AS rebuttal_count
+     FROM objections o
+     LEFT JOIN (
+       SELECT objection_id, COUNT(*)::int AS rebuttal_count
+       FROM rebuttals
+       GROUP BY objection_id
+     ) r ON r.objection_id = o.id
+     ORDER BY o.created_at DESC`
+  );
+  return result.rows;
+});
+
+fastify.get('/api/objections/:id', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const objResult = await pool.query('SELECT * FROM objections WHERE id = $1', [id]);
+
+  if (objResult.rows.length === 0) {
+    return reply.code(404).send({ error: 'Objection not found' });
+  }
+
+  const rebuttalsResult = await pool.query(
+    'SELECT * FROM rebuttals WHERE objection_id = $1 ORDER BY created_at ASC',
+    [id]
+  );
+
+  return { ...objResult.rows[0], rebuttals: rebuttalsResult.rows };
+});
+
+fastify.patch('/api/objections/:id', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const { text, category } = request.body || {};
+
+  const existing = await pool.query('SELECT * FROM objections WHERE id = $1', [id]);
+  if (existing.rows.length === 0) {
+    return reply.code(404).send({ error: 'Objection not found' });
+  }
+
+  if (text !== undefined && !String(text).trim()) {
+    return reply.code(400).send({ error: 'text cannot be empty' });
+  }
+
+  const result = await pool.query(
+    `UPDATE objections
+     SET text = COALESCE($1, text),
+         category = $2,
+         updated_at = NOW()
+     WHERE id = $3
+     RETURNING *`,
+    [
+      text !== undefined ? String(text).trim() : null,
+      category !== undefined ? (category ? String(category).trim() : null) : existing.rows[0].category,
+      id,
+    ]
+  );
+
+  return result.rows[0];
+});
+
+fastify.delete('/api/objections/:id', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  // ON DELETE CASCADE on rebuttals.objection_id takes care of the children.
+  const result = await pool.query('DELETE FROM objections WHERE id = $1 RETURNING id', [id]);
+
+  if (result.rows.length === 0) {
+    return reply.code(404).send({ error: 'Objection not found' });
+  }
+
+  return { ok: true };
+});
+
+fastify.post('/api/objections/:id/rebuttals', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const { text } = request.body || {};
+
+  if (!text || !String(text).trim()) {
+    return reply.code(400).send({ error: 'text is required' });
+  }
+
+  const objection = await pool.query('SELECT id FROM objections WHERE id = $1', [id]);
+  if (objection.rows.length === 0) {
+    return reply.code(404).send({ error: 'Objection not found' });
+  }
+
+  const result = await pool.query(
+    `INSERT INTO rebuttals (objection_id, text, created_by)
+     VALUES ($1, $2, $3)
+     RETURNING *`,
+    [id, String(text).trim(), request.user.id]
+  );
+
+  return reply.code(201).send(result.rows[0]);
+});
+
+fastify.patch('/api/rebuttals/:id', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const { text } = request.body || {};
+
+  if (!text || !String(text).trim()) {
+    return reply.code(400).send({ error: 'text is required' });
+  }
+
+  const result = await pool.query(
+    `UPDATE rebuttals SET text = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+    [String(text).trim(), id]
+  );
+
+  if (result.rows.length === 0) {
+    return reply.code(404).send({ error: 'Rebuttal not found' });
+  }
+
+  return result.rows[0];
+});
+
+fastify.delete('/api/rebuttals/:id', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const result = await pool.query('DELETE FROM rebuttals WHERE id = $1 RETURNING id', [id]);
+
+  if (result.rows.length === 0) {
+    return reply.code(404).send({ error: 'Rebuttal not found' });
+  }
+
+  return { ok: true };
 });
 
 // ─── Phase 2: WebSocket audio endpoint ───────────────────────────────────────

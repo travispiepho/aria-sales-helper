@@ -473,3 +473,70 @@ export async function startOutboundCall(
     ...(customerId ? { customerId } : {}),
   });
 }
+
+// ─── Objections / Rebuttals library (2026-08-18) ─────────────────────
+// Troy Hacker's request ("Rebuttal list to objections" in HighPriority
+// Todos). Standalone reference library, shared across all reps — see
+// server.js's route-block comment for the auth-model rationale (any
+// authenticated rep can create/edit/delete, not admin-gated).
+
+export interface Rebuttal {
+  id: string;
+  objection_id: string;
+  text: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Objection {
+  id: string;
+  text: string;
+  category?: string | null;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  // Only present on the list endpoint (GET /api/objections) — a count
+  // computed server-side so the list view can show "3 rebuttals" without
+  // fetching every objection's full rebuttal set up front.
+  rebuttal_count?: number;
+}
+
+export interface ObjectionWithRebuttals extends Objection {
+  rebuttals: Rebuttal[];
+}
+
+export async function listObjections(): Promise<Objection[]> {
+  return request('GET', '/api/objections');
+}
+
+export async function getObjection(id: string): Promise<ObjectionWithRebuttals> {
+  return request('GET', `/api/objections/${id}`);
+}
+
+export async function createObjection(text: string, category?: string): Promise<Objection> {
+  return request('POST', '/api/objections', { text, category });
+}
+
+export async function updateObjection(
+  id: string,
+  data: { text?: string; category?: string | null }
+): Promise<Objection> {
+  return request('PATCH', `/api/objections/${id}`, data);
+}
+
+export async function deleteObjection(id: string): Promise<void> {
+  return request('DELETE', `/api/objections/${id}`);
+}
+
+export async function createRebuttal(objectionId: string, text: string): Promise<Rebuttal> {
+  return request('POST', `/api/objections/${objectionId}/rebuttals`, { text });
+}
+
+export async function updateRebuttal(id: string, text: string): Promise<Rebuttal> {
+  return request('PATCH', `/api/rebuttals/${id}`, { text });
+}
+
+export async function deleteRebuttal(id: string): Promise<void> {
+  return request('DELETE', `/api/rebuttals/${id}`);
+}

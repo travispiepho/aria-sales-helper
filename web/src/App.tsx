@@ -11,6 +11,7 @@ import SettingsPage from './pages/SettingsPage';
 import SchedulePage from './pages/SchedulePage';
 import ScheduleCallPage from './pages/ScheduleCallPage';
 import ScheduleVisitPage from './pages/ScheduleVisitPage';
+import ObjectionsPage from './pages/ObjectionsPage';
 // 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
 // same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
 // live-testing it: "Instead of a popup, I would like an almost identical
@@ -181,6 +182,19 @@ export default function App() {
             element={
               <RequireAuth>
                 <ScheduleVisitPage />
+              </RequireAuth>
+            }
+          />
+          {/* Objections tab (2026-08-18) — Troy Hacker's request, tracked as
+              "Rebuttal list to objections" in HighPriorityTodos. Standalone
+              reference library, open to all logged-in reps (server enforces
+              only requireAuth, no admin gate — see server.js's route-block
+              comment for the shared-knowledge-base rationale). */}
+          <Route
+            path="/objections"
+            element={
+              <RequireAuth>
+                <ObjectionsPage />
               </RequireAuth>
             }
           />

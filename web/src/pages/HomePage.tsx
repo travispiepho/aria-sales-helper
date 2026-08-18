@@ -288,6 +288,16 @@ export default function HomePage() {
           >
             🗓️ Schedule Ahead
           </button>
+          {/* Objections tab entry point (2026-08-18) — Troy Hacker's
+              request. Styled to match the other secondary Home CTAs above
+              it (Call a Customer / Schedule Ahead). */}
+          <button
+            onClick={() => navigate('/objections')}
+            disabled={starting}
+            className="w-full mt-2 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
+          >
+            💬 Objections
+          </button>
         </div>
 
         {/* Today's Meetings */}

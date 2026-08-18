@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 
 export default function LoginPage() {
@@ -90,6 +90,16 @@ export default function LoginPage() {
             >
               {loading ? 'Signing in…' : 'Sign In'}
             </button>
+
+            {/* Invite claim / signup entry (2026-08-18) — for a rep who was
+                given an email + claim code by an admin (text/in person, not
+                emailed) and hasn't created their account yet. */}
+            <p className="text-center text-sm text-gray-500">
+              Have an invite code?{' '}
+              <Link to="/signup" className="text-brand-700 font-medium">
+                Claim your account
+              </Link>
+            </p>
           </form>
         </div>
       </div>

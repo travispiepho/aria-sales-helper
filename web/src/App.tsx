@@ -12,6 +12,7 @@ import SchedulePage from './pages/SchedulePage';
 import ScheduleCallPage from './pages/ScheduleCallPage';
 import ScheduleVisitPage from './pages/ScheduleVisitPage';
 import ObjectionsPage from './pages/ObjectionsPage';
+import SignupClaimPage from './pages/SignupClaimPage';
 // 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
 // same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
 // live-testing it: "Instead of a popup, I would like an almost identical
@@ -106,6 +107,13 @@ export default function App() {
         <AuthedSyncGate />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          {/* Invite claim / signup (2026-08-18) — PUBLIC, no auth required.
+              NOT email verification: a rep who was given an email + claim
+              code out-of-band (text/in person) by an admin uses this page
+              to set a password and create their account. See
+              SignupClaimPage.tsx and server.js's POST /api/signup/claim
+              for the full model. */}
+          <Route path="/signup" element={<SignupClaimPage />} />
           <Route
             path="/"
             element={

@@ -1,0 +1,89 @@
+-- 2026-08-18-invite-claim-codes.sql
+--
+-- ⚠️ PROPOSED MIGRATION — WRITTEN BUT **NOT APPLIED**. Do NOT run against
+-- production without an explicit human go/no-go from Gabe (same standing
+-- rule as every other migration file in this directory — see e.g. the
+-- 2026-08-06-pyannote-voiceprint-blobs.sql header). This one is especially
+-- load-bearing: server.js's new claim-code routes will 500 with a
+-- "column ... does not exist" error until this runs, and (per the
+-- 2026-08-17 incident where shipped code referenced columns that were
+-- never applied to prod) this repo's migrations are NOT run automatically
+-- by the deploy path — ensureSessionsTable() in server.js IS the de-facto
+-- auto-migration runner, and the matching idempotent ALTER TABLE block has
+-- ALSO been added there in this same change specifically so a plain
+-- deploy-from-main brings a fresh/updated DB in sync without a manual
+-- step. This .sql file exists for documentation/manual-apply convenience;
+-- the ALTER TABLE ... ADD COLUMN IF NOT EXISTS statements below are
+-- mirrored verbatim in server.js's ensureSessionsTable().
+--
+-- ─────────────────────────────────────────────────────────────────────────
+-- WHAT THIS IS — AND WHAT IT IS DELIBERATELY NOT
+-- ─────────────────────────────────────────────────────────────────────────
+-- This is NOT email verification. It does not prove the invited person
+-- controls the invited mailbox. It implements an "invite claim / claim
+-- code" flow: an admin invites an email address and is shown a one-time
+-- 6-character claim code; that code must be relayed to the rep out-of-band
+-- (text message or in person); the rep then visits a public signup page
+-- and submits (email, claim code, new password) to actually create their
+-- account. This proves "knows an email an admin typed AND holds a secret
+-- delivered out-of-band" — nothing more. Do not describe this as email
+-- verification anywhere (code, UI copy, docs).
+--
+-- WHY THIS EXISTS NOW instead of wiring a real email provider: there is no
+-- email-sending capability anywhere in this codebase (checked — no
+-- SendGrid/SES/Postmark/nodemailer/etc.), no verified sending domain, and
+-- no stable public web URL yet (Vercel SSO currently 302s the canonical
+-- URL — a real "click this link to verify" flow needs a URL that resolves
+-- for an unauthenticated stranger, which does not exist today). Gabe's
+-- explicit decision (2026-08-18): ship the claim-code flow now so account
+-- signup actually works end-to-end, revisit real email-based verification
+-- once there is an email service and a stable public URL. Password reset
+-- is explicitly DEFERRED for the same reason — it is the next feature that
+-- will force the email-service question.
+--
+-- ─────────────────────────────────────────────────────────────────────────
+-- SCHEMA
+-- ─────────────────────────────────────────────────────────────────────────
+-- claim_code_hash: bcrypt hash of the 6-char plaintext claim code, same
+--   hashing approach/library (bcryptjs) already used for user passwords
+--   (see server.js's POST /api/auth/login / PATCH /api/account/password).
+--   The PLAINTEXT code is shown to the admin exactly once, in the invite-
+--   creation API response, and is never persisted or retrievable again —
+--   same model as an API key. Regenerating a claim code (admin action)
+--   overwrites this column and invalidates the previous plaintext code.
+-- expires_at: set to NOW() + 72 hours at invite-creation (and again at
+--   regenerate-time). A claim after expires_at fails the same generic way
+--   as every other claim failure (see below).
+-- accepted_at: set the moment the invite is successfully claimed, inside
+--   the same transaction that flips status to 'accepted' and creates the
+--   user row. NULL until then. (status='accepted' already existed on this
+--   table before this migration; this column adds a precise timestamp
+--   alongside it.)
+-- claim_attempts / claim_locked_until: per-invite rate-limit/backoff state.
+--   The claim endpoint is public and unauthenticated by necessity (the rep
+--   has no account yet), so it needs its own throttle independent of the
+--   session-based auth used everywhere else. claim_attempts increments on
+--   every failed claim attempt against a given (pending) invite;
+--   claim_locked_until is set once attempts crosses a small threshold,
+--   locking out further attempts against THAT invite until it passes,
+--   regardless of whether the code guessed next would be correct. This is
+--   deliberately per-invite (keyed by email), not global — a slow-and-low
+--   attacker spraying many different invited emails is instead throttled
+--   by the endpoint's per-IP limiter (in-memory, server.js) since it needs
+--   no persisted state to be effective at that layer.
+--
+-- ─────────────────────────────────────────────────────────────────────────
+-- IDEMPOTENCY / SAFETY
+-- ─────────────────────────────────────────────────────────────────────────
+-- ADD COLUMN IF NOT EXISTS only. No table rewrite, no existing row is
+-- touched or made invalid — every pre-existing invites row simply gets
+-- NULL/0 in the new columns, which the application code treats as "no
+-- claim code has ever been issued for this row" (server-side: any row with
+-- claim_code_hash IS NULL fails claim attempts the same generic way as an
+-- expired/wrong-code claim, it just can never succeed).
+
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS claim_code_hash TEXT;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS claim_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS claim_locked_until TIMESTAMPTZ;

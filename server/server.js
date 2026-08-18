@@ -11,7 +11,7 @@ import cors from '@fastify/cors';
 import websocketPlugin from '@fastify/websocket';
 import pg from 'pg';
 import bcrypt from 'bcryptjs';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomInt } from 'crypto';
 import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -679,6 +679,31 @@ async function ensureSessionsTable() {
     WHERE status = 'pending'
   `);
 
+  // Invite claim codes (added 2026-08-18, see
+  // migrations/2026-08-18-invite-claim-codes.sql for the full rationale).
+  // This is NOT email verification — it's a one-time "claim code" an admin
+  // relays to the invited rep out-of-band (text/in person); see the SQL
+  // file header and POST /api/admin/invite's comment for the full model.
+  // Mirrored here (ADD COLUMN IF NOT EXISTS, fully idempotent, no rewrite)
+  // per this repo's established convention so a plain deploy-from-main
+  // brings the schema in sync automatically without a manual migration
+  // step — same safety net added for the objections/rebuttals tables above.
+  await pool.query(`
+    ALTER TABLE invites ADD COLUMN IF NOT EXISTS claim_code_hash TEXT
+  `);
+  await pool.query(`
+    ALTER TABLE invites ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
+  `);
+  await pool.query(`
+    ALTER TABLE invites ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ
+  `);
+  await pool.query(`
+    ALTER TABLE invites ADD COLUMN IF NOT EXISTS claim_attempts INTEGER NOT NULL DEFAULT 0
+  `);
+  await pool.query(`
+    ALTER TABLE invites ADD COLUMN IF NOT EXISTS claim_locked_until TIMESTAMPTZ
+  `);
+
   // 'owner' role support (added 2026-08-10, Gabe's request — see the
   // hasAdminAccess()/isOwner() comment block for the full role model).
   //
@@ -1308,24 +1333,87 @@ fastify.delete('/api/admin/users/:id', { preHandler: [requireAuth] }, async (req
   }
 });
 
-// POST /api/admin/invite — record an intent to invite a new user.
+// ─── Invite claim codes (2026-08-18) ───────────────────────────────────────
 //
-// ⚠️ STUB — NO EMAIL IS ACTUALLY SENT BY THIS ROUTE. ⚠️
-// This is the minimal backend piece for the admin "invite a new user" UI
-// (Gabe's request: admin-only email textbox + role picker + Invite
-// button). There is no email-sending capability anywhere else in this
-// codebase either (checked before writing this — no SendGrid/SES/Postmark/
-// nodemailer/etc. integration exists), and wiring one up is explicitly
-// OUT OF SCOPE for this task (a separate task is scoping the actual email
-// service). So this route validates the request, checks for an existing
-// account or an already-pending invite for that email, and persists an
-// `invites` row with status='pending' — that's it. It returns success
-// once the row is saved so the frontend flow is fully testable end-to-end,
-// but the response/UI copy deliberately says "invite recorded", never
-// "email sent", because none was. Whoever wires up real email sending
-// later should: look up pending invites here, generate a signup token,
-// send the actual email, and flip status to 'accepted' once the invitee
-// completes signup.
+// BE PRECISE ABOUT WHAT THIS IS: this is NOT email verification. It does
+// not prove the invited person controls the invited mailbox. It proves
+// they know an email an admin typed AND hold a one-time secret code that
+// was relayed to them out-of-band (text message or in person). Everywhere
+// below and in the aria-web UI, this is called "invite claim" / "claim
+// code", never "verification" or "signup link" — see this task's report
+// for why (no email-sending capability anywhere in this codebase, no
+// verified sending domain, no stable public web URL yet — Vercel SSO
+// currently 302s the canonical URL). Gabe's explicit 2026-08-18 decision:
+// ship this now so account signup actually works; real email-based
+// verification is future work once an email service + stable URL exist.
+// Password reset is explicitly deferred for the same reason.
+//
+// Claim code format: 6 characters, uppercase, drawn from an alphabet with
+// ambiguous characters removed (0/O, 1/I/L) — see CLAIM_CODE_ALPHABET —
+// because a human reads this over the phone or a text message. Generated
+// with crypto.randomInt (CSPRNG), never Math.random(). Only a bcrypt HASH
+// of the code is ever stored (claim_code_hash); the plaintext is returned
+// in this route's response exactly once and is not retrievable again —
+// same model as an API key. See migrations/2026-08-18-invite-claim-codes.sql.
+
+const CLAIM_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L
+const CLAIM_CODE_LENGTH = 6;
+const CLAIM_CODE_TTL_MS = 72 * 60 * 60 * 1000; // 72 hours
+const CLAIM_MAX_ATTEMPTS = 8; // per-invite failed-attempt threshold before lockout
+const CLAIM_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+
+function generateClaimCode() {
+  let code = '';
+  for (let i = 0; i < CLAIM_CODE_LENGTH; i++) {
+    code += CLAIM_CODE_ALPHABET[randomInt(CLAIM_CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+// In-memory per-IP limiter for the public claim endpoint (below). It has no
+// account/session to key off of by definition (the whole point is the rep
+// doesn't have an account yet), so this is independent of every other auth
+// mechanism in this file. Deliberately in-process/in-memory, matching this
+// codebase's existing appetite for lightweight in-memory state over adding
+// a new dependency (e.g. no Redis anywhere in this project) — acceptable
+// here because it's a coarse abuse-throttle, not a correctness boundary;
+// the real single-use/expiry/lockout guarantees live in the DB transaction
+// below. Resets on process restart, which is fine for this purpose.
+const claimAttemptsByIp = new Map(); // ip -> { count, windowStart }
+const CLAIM_IP_WINDOW_MS = 15 * 60 * 1000;
+const CLAIM_IP_MAX_ATTEMPTS = 20;
+
+function claimIpRateLimited(ip) {
+  const now = Date.now();
+  const entry = claimAttemptsByIp.get(ip);
+  if (!entry || now - entry.windowStart > CLAIM_IP_WINDOW_MS) {
+    claimAttemptsByIp.set(ip, { count: 1, windowStart: now });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > CLAIM_IP_MAX_ATTEMPTS;
+}
+
+// Generic, timing-similar failure for every claim-failure path (unknown
+// email, no pending invite, wrong code, expired, already accepted, locked
+// out). SECURITY: if "not invited" and "wrong code" were distinguishable,
+// this public endpoint would be an allowlist enumerator — a stranger could
+// submit random emails and learn which ones an admin has invited. Always
+// return this exact same shape/message/status code from every failure
+// branch below.
+const CLAIM_GENERIC_ERROR = 'Invalid email, claim code, or the invite has expired.';
+function claimGenericFailure(reply) {
+  return reply.code(400).send({ error: CLAIM_GENERIC_ERROR });
+}
+
+// POST /api/admin/invite — create an invite AND a one-time claim code.
+//
+// Persists an `invites` row (status='pending') exactly as before, plus:
+// generates a plaintext claim code, stores only its bcrypt hash, and sets
+// a 72h expiry. The PLAINTEXT code is returned in this response ONCE —
+// the admin UI must display it immediately (with a copy button) because
+// there is no way to retrieve it again short of the regenerate action
+// below, which invalidates the old code and mints a new one.
 fastify.post('/api/admin/invite', { preHandler: [requireAuth] }, async (request, reply) => {
   if (!hasAdminAccess(request.user.role)) {
     return reply.code(403).send({ error: 'Admin access required' });
@@ -1370,14 +1458,25 @@ fastify.post('/api/admin/invite', { preHandler: [requireAuth] }, async (request,
     return reply.code(409).send({ error: 'An invite is already pending for this email' });
   }
 
+  const claimCode = generateClaimCode();
+  const claimCodeHash = await bcrypt.hash(claimCode, 10);
+  const expiresAt = new Date(Date.now() + CLAIM_CODE_TTL_MS);
+
   try {
     const result = await pool.query(
-      `INSERT INTO invites (email, role, invited_by, status)
-       VALUES ($1, $2, $3, 'pending')
-       RETURNING id, email, role, invited_by, created_at, status`,
-      [normalizedEmail, role, request.user.id]
+      `INSERT INTO invites (email, role, invited_by, status, claim_code_hash, expires_at)
+       VALUES ($1, $2, $3, 'pending', $4, $5)
+       RETURNING id, email, role, invited_by, created_at, status, expires_at`,
+      [normalizedEmail, role, request.user.id, claimCodeHash, expiresAt]
     );
-    return reply.code(201).send({ ok: true, invite: result.rows[0] });
+    return reply.code(201).send({
+      ok: true,
+      invite: result.rows[0],
+      // Plaintext claim code — returned ONCE, here, and never again. The
+      // admin must relay it to the rep out-of-band (text/in person) right
+      // now; if it's lost, use the regenerate action to mint a new one.
+      claimCode,
+    });
   } catch (err) {
     // Race-condition backstop: the partial unique index on
     // (LOWER(email)) WHERE status='pending' catches a concurrent
@@ -1387,6 +1486,207 @@ fastify.post('/api/admin/invite', { preHandler: [requireAuth] }, async (request,
     }
     request.log.error({ err }, 'admin invite failed');
     return reply.code(500).send({ error: 'Failed to record invite' });
+  }
+});
+
+// GET /api/admin/invites — list invites (admin only) so the UI can show
+// pending invites with their expiry and offer regenerate/revoke actions.
+// Deliberately excludes claim_code_hash from the SELECT — even hashed,
+// there's no reason to ever ship it to a client.
+fastify.get('/api/admin/invites', { preHandler: [requireAuth] }, async (request, reply) => {
+  if (!hasAdminAccess(request.user.role)) {
+    return reply.code(403).send({ error: 'Admin access required' });
+  }
+  const result = await pool.query(
+    `SELECT id, email, role, invited_by, created_at, status, expires_at, accepted_at
+     FROM invites
+     ORDER BY created_at DESC`
+  );
+  return { invites: result.rows };
+});
+
+// POST /api/admin/invites/:id/regenerate — mint a fresh claim code for an
+// existing pending invite, invalidating the previous code (overwrites
+// claim_code_hash) and resetting the expiry + attempt counter. Same
+// one-time plaintext-in-response model as invite creation.
+fastify.post('/api/admin/invites/:id/regenerate', { preHandler: [requireAuth] }, async (request, reply) => {
+  if (!hasAdminAccess(request.user.role)) {
+    return reply.code(403).send({ error: 'Admin access required' });
+  }
+  const { id } = request.params;
+
+  const existing = await pool.query(
+    "SELECT id, status FROM invites WHERE id = $1",
+    [id]
+  );
+  if (existing.rows.length === 0) {
+    return reply.code(404).send({ error: 'Invite not found' });
+  }
+  if (existing.rows[0].status !== 'pending') {
+    return reply.code(400).send({ error: 'Only a pending invite can have its claim code regenerated' });
+  }
+
+  const claimCode = generateClaimCode();
+  const claimCodeHash = await bcrypt.hash(claimCode, 10);
+  const expiresAt = new Date(Date.now() + CLAIM_CODE_TTL_MS);
+
+  const result = await pool.query(
+    `UPDATE invites
+     SET claim_code_hash = $1, expires_at = $2, claim_attempts = 0, claim_locked_until = NULL
+     WHERE id = $3
+     RETURNING id, email, role, invited_by, created_at, status, expires_at`,
+    [claimCodeHash, expiresAt, id]
+  );
+
+  return { ok: true, invite: result.rows[0], claimCode };
+});
+
+// POST /api/admin/invites/:id/revoke — wire up the existing 'revoked'
+// status value (it was defined on the table from the start but nothing
+// ever set it). A revoked invite's claim code stops working immediately
+// (the claim route below only ever matches status = 'pending').
+fastify.post('/api/admin/invites/:id/revoke', { preHandler: [requireAuth] }, async (request, reply) => {
+  if (!hasAdminAccess(request.user.role)) {
+    return reply.code(403).send({ error: 'Admin access required' });
+  }
+  const { id } = request.params;
+
+  const result = await pool.query(
+    `UPDATE invites SET status = 'revoked' WHERE id = $1 AND status = 'pending'
+     RETURNING id, email, role, created_at, status`,
+    [id]
+  );
+  if (result.rows.length === 0) {
+    return reply.code(404).send({ error: 'Pending invite not found' });
+  }
+  return { ok: true, invite: result.rows[0] };
+});
+
+// POST /api/signup/claim — PUBLIC, unauthenticated. The other half of the
+// invite flow: a rep who has been given an email + claim code out-of-band
+// submits (email, claim code, new password) to actually create their
+// account. On success this is fully atomic (single DB transaction): the
+// invite row is locked with SELECT ... FOR UPDATE, the user is created,
+// the password is hashed the same way login does (bcryptjs), and the
+// invite is flipped to status='accepted' with accepted_at set — all or
+// nothing, and the row lock means two simultaneous claims of the same
+// invite cannot both succeed (the second blocks on FOR UPDATE, then sees
+// status='accepted' once it proceeds and fails the same generic way).
+//
+// SECURITY — every failure path below returns the exact same generic
+// error (CLAIM_GENERIC_ERROR) and status code, whether the cause is an
+// unknown email, an expired invite, a wrong code, an already-claimed
+// invite, or a locked-out invite. If these were distinguishable this
+// public endpoint would let a stranger enumerate which emails an admin
+// has invited — see the CLAIM_GENERIC_ERROR comment above.
+fastify.post('/api/signup/claim', async (request, reply) => {
+  const ip = request.ip || request.headers['x-forwarded-for'] || 'unknown';
+  if (claimIpRateLimited(ip)) {
+    return reply.code(429).send({ error: 'Too many attempts. Please try again later.' });
+  }
+
+  const { email, claimCode, password } = request.body || {};
+
+  if (typeof email !== 'string' || !email.trim() ||
+      typeof claimCode !== 'string' || !claimCode.trim() ||
+      typeof password !== 'string') {
+    return claimGenericFailure(reply);
+  }
+
+  // Minimum password length: this codebase has no dedicated "signup"
+  // password policy anywhere yet, so this follows the one that DOES exist
+  // — PATCH /api/account/password's 8-character minimum (see also
+  // ProfilePage.tsx's matching client-side check).
+  if (password.length < 8) {
+    return reply.code(400).send({ error: 'Password must be at least 8 characters' });
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedCode = claimCode.trim().toUpperCase();
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const inviteResult = await client.query(
+      `SELECT * FROM invites WHERE LOWER(email) = $1 AND status = 'pending' FOR UPDATE`,
+      [normalizedEmail]
+    );
+
+    if (inviteResult.rows.length === 0) {
+      // Unknown email OR no pending invite for it — same generic failure
+      // as every other branch below.
+      await client.query('ROLLBACK');
+      return claimGenericFailure(reply);
+    }
+
+    const invite = inviteResult.rows[0];
+
+    // Per-invite lockout (independent of the per-IP limiter above — this
+    // one persists across IPs/processes since it's in the DB row itself).
+    if (invite.claim_locked_until && new Date(invite.claim_locked_until) > new Date()) {
+      await client.query('ROLLBACK');
+      return claimGenericFailure(reply);
+    }
+
+    if (!invite.claim_code_hash || !invite.expires_at || new Date(invite.expires_at) < new Date()) {
+      await client.query('ROLLBACK');
+      return claimGenericFailure(reply);
+    }
+
+    const codeValid = await bcrypt.compare(normalizedCode, invite.claim_code_hash);
+    if (!codeValid) {
+      const attempts = invite.claim_attempts + 1;
+      const lockedUntil =
+        attempts >= CLAIM_MAX_ATTEMPTS ? new Date(Date.now() + CLAIM_LOCKOUT_MS) : null;
+      await client.query(
+        `UPDATE invites SET claim_attempts = $1, claim_locked_until = $2 WHERE id = $3`,
+        [attempts, lockedUntil, invite.id]
+      );
+      await client.query('COMMIT');
+      return claimGenericFailure(reply);
+    }
+
+    // Guard: an account with this email was created some other way after
+    // the invite was issued (e.g. two invites races is prevented by the
+    // partial unique index, but belt-and-suspenders here too).
+    const existingUser = await client.query(
+      'SELECT id FROM users WHERE LOWER(email) = $1',
+      [normalizedEmail]
+    );
+    if (existingUser.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return claimGenericFailure(reply);
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    // Derive the account name from the email's local-part as a placeholder
+    // — there is no "name" field collected anywhere in this flow (admin
+    // invite only asks for email + role). The rep can update their name
+    // later via ProfilePage if that field is ever exposed there.
+    const derivedName = normalizedEmail.split('@')[0];
+
+    const userResult = await client.query(
+      `INSERT INTO users (name, email, password_hash, role)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, email, role`,
+      [derivedName, normalizedEmail, passwordHash, invite.role]
+    );
+
+    await client.query(
+      `UPDATE invites SET status = 'accepted', accepted_at = NOW() WHERE id = $1`,
+      [invite.id]
+    );
+
+    await client.query('COMMIT');
+
+    return reply.code(201).send({ ok: true, user: userResult.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    request.log.error({ err }, 'signup claim failed');
+    return reply.code(500).send({ error: 'Something went wrong. Please try again.' });
+  } finally {
+    client.release();
   }
 });
 

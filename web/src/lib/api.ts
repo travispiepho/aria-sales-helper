@@ -105,30 +105,70 @@ export async function deleteAdminUser(id: string): Promise<DeleteAdminUserResult
   return request('DELETE', `/api/admin/users/${id}`);
 }
 
-// Admin: invite a new user (2026-08-10).
+// Admin: invite a new user + claim code (2026-08-18).
 //
-// ⚠️ STUB — the backend route this calls (POST /api/admin/invite) does NOT
-// send an email. It only persists an "invite intent" row so this flow is
-// testable end-to-end and duplicate invites/existing accounts are caught.
-// Wiring up a real email-sending service is explicitly out of scope for
-// this task (a separate task is scoping that). See server.js's route
-// comment for the full explanation.
+// ⚠️ NOT EMAIL VERIFICATION. POST /api/admin/invite persists a pending
+// invite AND returns a one-time plaintext claim code that the admin must
+// relay to the rep out-of-body (text message or in person) — nothing is
+// emailed. The rep then completes signup at /signup with (email, claim
+// code, password) via claimInvite() below. See server.js's route comment
+// block for the full rationale (no email-sending capability, no verified
+// sending domain, no stable public URL yet).
 export type InviteRole = 'admin' | 'rep';
+
+export interface Invite {
+  id: string;
+  email: string;
+  role: InviteRole;
+  invited_by: string;
+  created_at: string;
+  status: 'pending' | 'accepted' | 'revoked';
+  expires_at: string | null;
+  accepted_at?: string | null;
+}
 
 export interface InviteUserResult {
   ok: boolean;
-  invite: {
-    id: string;
-    email: string;
-    role: InviteRole;
-    invited_by: string;
-    created_at: string;
-    status: 'pending' | 'accepted' | 'revoked';
-  };
+  invite: Invite;
+  // Plaintext claim code — present ONLY in this response and the
+  // regenerate response below. Never persisted client-side beyond the
+  // current screen; the backend never returns it again after this call.
+  claimCode: string;
 }
 
 export async function inviteUser(email: string, role: InviteRole): Promise<InviteUserResult> {
   return request('POST', '/api/admin/invite', { email, role });
+}
+
+export async function listInvites(): Promise<{ invites: Invite[] }> {
+  return request('GET', '/api/admin/invites');
+}
+
+export async function regenerateInviteClaimCode(
+  id: string
+): Promise<{ ok: boolean; invite: Invite; claimCode: string }> {
+  return request('POST', `/api/admin/invites/${id}/regenerate`);
+}
+
+export async function revokeInvite(id: string): Promise<{ ok: boolean; invite: Invite }> {
+  return request('POST', `/api/admin/invites/${id}/revoke`);
+}
+
+// Public signup claim (2026-08-18) — no auth required, this IS how an
+// invited rep gets their first session. See server.js's POST
+// /api/signup/claim for the full security model (generic errors, rate
+// limiting, single-use, atomic).
+export interface ClaimInviteResult {
+  ok: boolean;
+  user: { id: string; name: string; email: string; role: Role };
+}
+
+export async function claimInvite(
+  email: string,
+  claimCode: string,
+  password: string
+): Promise<ClaimInviteResult> {
+  return request('POST', '/api/signup/claim', { email, claimCode, password });
 }
 
 // Customers

@@ -38,7 +38,24 @@ function formatElapsed(seconds: number): string {
 function formatDuration(startIso: string, endIso?: string): string {
   const start = new Date(startIso).getTime();
   const end = endIso ? new Date(endIso).getTime() : Date.now();
-  return formatElapsed(Math.floor((end - start) / 1000));
+  // ROOT-CAUSE FIX (2026-08-17 outbound-call diagnosis, Gabe's "Active ·
+  // -1:-1" report): a phone-call meeting row's `started_at` is set to the
+  // DB server's `now()` at INSERT time (server/telephony.js's
+  // findOrCreatePhoneMeeting(), column default), which happens the instant
+  // the rep taps "Call a Customer" — essentially simultaneous with this
+  // page loading client-side. Any client/server clock skew (even a
+  // fraction of a second — common across a container host vs a phone/
+  // laptop clock) can put `end - start` slightly NEGATIVE for the first
+  // render. formatElapsed() then computes Math.floor(negativeSeconds / 60)
+  // and negativeSeconds % 60, both of which are negative in JS for a
+  // negative dividend — e.g. -0.4s floors to -1 and -0.4 % 60 stays -0.4,
+  // rendering exactly the literal string "-1:-1" Gabe saw. Clamping the
+  // elapsed seconds to a minimum of 0 fixes this at the source for every
+  // caller (header, post-meeting summary lines, etc.) without touching
+  // `started_at`'s semantics — the row's actual creation timestamp remains
+  // correct and meaningful; this only guards the display math.
+  const elapsedSeconds = Math.max(0, Math.floor((end - start) / 1000));
+  return formatElapsed(elapsedSeconds);
 }
 
 // getWsBase() moved to lib/wsBase.ts (2026-08-05, live meeting sync
@@ -55,6 +72,15 @@ export default function MeetingPage() {
   // Meeting state
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [loading, setLoading] = useState(true);
+  // 2026-08-17 (outbound-call diagnosis fix): a tick counter purely to
+  // force a re-render once per second so the header's `Active ·
+  // ${formatDuration(meeting.started_at)}` (a Twilio phone-call meeting
+  // never sets isRecording locally, so it never had ANY periodic
+  // re-render driving that string) actually counts up live instead of
+  // being frozen at whatever value happened to render on load / the next
+  // unrelated WS message. Not used for any value itself — formatDuration()
+  // still computes off meeting.started_at and Date.now() at render time.
+  const [, setHeaderTick] = useState(0);
 
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
@@ -529,7 +555,47 @@ export default function MeetingPage() {
     isActiveRef.current = active;
     isOwnerSessionRef.current = owner;
 
-    if (active && !owner) {
+    // 2026-08-17 ROOT-CAUSE FIX (outbound-call diagnosis task): a Twilio
+    // phone-call meeting (channel === 'phone' && !!call_sid) is ALWAYS
+    // "owner session" from the server's point of view (the rep who placed
+    // the call authenticated this request), so the `active && !owner`
+    // condition below NEVER opened any live socket for it — and
+    // connectWebSocket() (the OTHER live socket) is also never invoked for
+    // a Twilio phone call, because startRecording()/handleStartButton() is
+    // the ONLY caller of connectWebSocket() and the phone-call UI branch
+    // (isTwilioPhoneCall below) replaces the Record button with a
+    // non-interactive status indicator with no onClick at all — there is
+    // no client-captured mic for a Twilio call, so that's correct. Net
+    // effect: the owner's browser for a Twilio phone-call meeting NEVER
+    // opened ANY WebSocket to the server. broadcastToMeeting() calls for
+    // recording_state (telephony.js's /telephony/recording-status handler)
+    // and every live transcript segment (server.js's Deepgram-final path)
+    // had zero registered sockets to reach on this device — they were not
+    // failing, they were being broadcast into a void. This is the single
+    // root cause behind ALL THREE of Gabe's reported symptoms: recording
+    // indicator stuck on "Waiting to record…", and the live-transcript
+    // panel stuck on the empty-state message, despite the server-side
+    // Twilio Media Stream + Deepgram pipeline actually working correctly
+    // (confirmed via production DB rows: transcript_segments rows DID
+    // exist for both of Gabe's test calls, and recording_status DID reach
+    // 'in-progress'/'completed' in the meetings table — the data was
+    // produced, just never delivered to this open tab).
+    //
+    // Fix: also open the same read-only "observer" socket used for
+    // mobile-sync viewing whenever this is an active Twilio phone-call
+    // meeting, even though `owner` is true. GET /meetings/:meetingId/observe
+    // on the server only checks `meeting.rep_id === user.id` (or admin) —
+    // it has no owner-vs-observer distinction of its own, so the rep who
+    // placed this exact call passes that check trivially. This socket is
+    // receive-only (never sends audio), which is exactly right here: audio
+    // capture for a Twilio call happens over server-to-Twilio's own Media
+    // Stream (/telephony/stream), not this browser's mic, so there is
+    // nothing for this device to transmit — it only needs to RECEIVE the
+    // recording_state / transcript / coaching pushes, which is the
+    // observer socket's entire contract.
+    const isTwilioPhoneMeeting = meeting.channel === 'phone' && !!meeting.call_sid;
+
+    if (active && (!owner || isTwilioPhoneMeeting)) {
       connectObserverSocket();
     } else {
       if (observeReconnectTimerRef.current) {
@@ -540,6 +606,27 @@ export default function MeetingPage() {
       observeWsRef.current = null;
     }
   }, [meeting, connectObserverSocket]);
+
+  // 2026-08-17 (outbound-call diagnosis fix) — header timer tick for a
+  // Twilio phone-call meeting. The in-person/observer paths already get a
+  // periodic re-render for free (isRecording's elapsedSec interval, or the
+  // steady stream of WS transcript/coaching pushes an observer socket
+  // receives), which is WHY this bug was invisible there — but a phone-
+  // call meeting's owner tab can sit for a while between recording_state /
+  // transcript pushes with nothing else forcing React to re-run
+  // formatDuration(meeting.started_at) against the current Date.now(), so
+  // the header's elapsed time silently freezes between pushes. A plain
+  // 1s interval, scoped to only run while this is an active Twilio phone
+  // call, fixes that with no interaction with the unrelated in-person
+  // elapsedSec/isRecording timer above.
+  useEffect(() => {
+    if (!meeting) return;
+    const active = meeting.status === 'active';
+    const isTwilioPhoneMeeting = meeting.channel === 'phone' && !!meeting.call_sid;
+    if (!active || !isTwilioPhoneMeeting) return;
+    const id = setInterval(() => setHeaderTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [meeting]);
 
   // ─── Start recording ──────────────────────────────────────────────────────
 
@@ -1340,7 +1427,27 @@ export default function MeetingPage() {
 
               {segments.length === 0 && !interimText ? (
                 <p className="text-sm text-gray-400 text-center py-4">
-                  {isSyncedFromMobile ? 'Waiting for live transcript from phone…' : isRecording ? 'Listening…' : 'Start recording to see live transcript'}
+                  {isSyncedFromMobile
+                    ? 'Waiting for live transcript from phone…'
+                    : isTwilioPhoneCall
+                      /* 2026-08-17 (outbound-call diagnosis fix): a Twilio
+                         phone-call meeting has no client-side "start
+                         recording" action at all (isTwilioPhoneCall's
+                         Record-button branch above is a non-interactive
+                         status indicator, not a button) — the old generic
+                         'Start recording to see live transcript' copy told
+                         Gabe to do something that literally has no control
+                         on this screen, which is exactly the confusing
+                         empty state he hit while live audio WAS flowing
+                         server-side. Now this only shows while genuinely
+                         waiting for the customer to answer; once
+                         phoneRecordingStatus flips to 'in-progress' this
+                         branch is moot anyway because segments/interimText
+                         populate from the observer-socket fix above. */
+                      ? (phoneRecordingStatus === 'in-progress' ? 'Listening…' : 'Waiting for the customer to answer…')
+                      : isRecording
+                        ? 'Listening…'
+                        : 'Start recording to see live transcript'}
                 </p>
               ) : (
                 <div

@@ -51,6 +51,7 @@ import {
 // nameHeuristics.js header for why (dictionary signal, not capitalization).
 import { isLikelyName, toDisplayName } from './nameHeuristics.js';
 import { createReconnectTracker } from './dgReconnectPolicy.js';
+import { createReadinessTracker } from './readinessTracker.js';
 
 const { Pool } = pg;
 
@@ -978,6 +979,18 @@ const EVENT_LOOP_LAG_DEGRADED_MS = 1000;
 let eventLoopLagMs = 0;
 let eventLoopLagMaxMs = 0;
 
+// Debounced readiness signal derived from the SAME lag samples (no extra
+// polling/timers of its own — see readinessTracker.js header for why this
+// needs sustain/recovery windows instead of a raw threshold, and
+// server/test/readinessTracker.test.mjs for the anti-flap proof). A throw
+// out of this tracker must never take /health or /ready down with it —
+// each call site below is wrapped so a bug in the readiness bookkeeping
+// degrades to "we don't know, but the server still answers", never a 5xx
+// from the observability code itself (brief requirement 6).
+const readinessTracker = createReadinessTracker({
+  log: (msg) => console.log(`[readiness] ${msg}`),
+});
+
 function startEventLoopLagSampler() {
   let expectedAt = Date.now() + EVENT_LOOP_SAMPLE_MS;
   const timer = setInterval(() => {
@@ -987,6 +1000,14 @@ function startEventLoopLagSampler() {
     eventLoopLagMs = Math.max(0, now - expectedAt);
     if (eventLoopLagMs > eventLoopLagMaxMs) eventLoopLagMaxMs = eventLoopLagMs;
     expectedAt = now + EVENT_LOOP_SAMPLE_MS;
+    try {
+      readinessTracker.sample(eventLoopLagMs > EVENT_LOOP_LAG_DEGRADED_MS);
+    } catch (e) {
+      // Never let readiness bookkeeping take the sampler (or the process)
+      // down. Worst case: /ready keeps reporting stale state until this
+      // recovers on its own on a later tick.
+      console.error(`[readiness] sample() threw, ignoring this tick: ${e.message}`);
+    }
   }, EVENT_LOOP_SAMPLE_MS);
   // Never hold the process open just for telemetry.
   if (typeof timer.unref === 'function') timer.unref();
@@ -1039,6 +1060,66 @@ fastify.get('/health', async (request, reply) => {
   } catch (err) {
     reply.code(503).send({ status: 'error', db: 'disconnected', error: err.message });
   }
+});
+
+// GET /ready — SEPARATE from /health, and deliberately not something any
+// restart-triggering healthcheck (Railway's included) should point at while
+// this service is single-replica. See the module-level note above
+// EVENT_LOOP_SAMPLE_MS and readinessTracker.js for the full reasoning; the
+// short version:
+//
+//   /health  = liveness. "Is the process alive and can it reach the DB?"
+//              Stays 200 even when degraded — this is what should keep
+//              Railway from restarting the only replica mid-call.
+//   /ready   = readiness. "Has this instance been SUSTAINABLY degraded long
+//              enough that traffic should stop being routed to it / a human
+//              or a load balancer should react?" Returns 503 only after the
+//              debounced readinessTracker (10s sustained degraded, 5s
+//              sustained recovery by default — see readinessTracker.js) has
+//              flipped, so a single lag spike never trips it.
+//
+// Chosen path is /ready (not /health/ready) to match the conventional
+// Kubernetes-style liveness/readiness naming most infra people and tools
+// already recognize, and to make it trivially easy to point a FUTURE
+// second-replica load balancer or Railway readiness check at a single flat
+// path without nesting it under /health's URL space (the two are
+// deliberately separate resources, not sub-resources of one another).
+//
+// Cheap by construction (brief requirement 5): reads two already-computed
+// in-memory values (readinessTracker.isReady() + eventLoopLagMs), no DB
+// query, no new timer, no allocation beyond the response object itself.
+fastify.get('/ready', async (request, reply) => {
+  let ready = true;
+  let state = null;
+  try {
+    ready = readinessTracker.isReady();
+    state = readinessTracker.getState();
+  } catch (err) {
+    // Requirement 6: a throw in the tracker must be a no-op, never a 5xx
+    // from the observability code itself. Fail OPEN (report ready) rather
+    // than fail closed here, because failing closed on an observability
+    // bug would risk exactly the kind of self-inflicted routing/alerting
+    // flap this feature exists to prevent — if a future consumer ever
+    // points a restart-capable check at /ready, a false "ready" is far
+    // safer than a false "not ready" causing action against a healthy box.
+    console.error(`[readiness] /ready tracker read threw, failing open: ${err.message}`);
+    ready = true;
+    state = { error: err.message };
+  }
+
+  const body = {
+    status: ready ? 'ready' : 'not_ready',
+    eventLoop: {
+      lagMs: eventLoopLagMs,
+      thresholdMs: EVENT_LOOP_LAG_DEGRADED_MS,
+    },
+    readiness: state,
+  };
+
+  if (ready) {
+    return body;
+  }
+  return reply.code(503).send(body);
 });
 
 // ─── Auth routes ──────────────────────────────────────────────────────────────

@@ -234,6 +234,17 @@ export default function HomePage() {
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1v0z" />
               </svg>
             </button>
+            {/* Objections header entry point — moved here (between Settings
+                and Account) per request. Styled to match the Settings /
+                Profile circular buttons on either side; label matches the
+                "Objections" wording already used by ObjectionsPage.tsx. */}
+            <button
+              onClick={() => navigate('/objections')}
+              className="w-11 h-11 rounded-full bg-brand-600 border-2 border-brand-400 hover:bg-brand-500 flex items-center justify-center text-white transition-colors flex-shrink-0"
+              aria-label="Objections"
+            >
+              <span className="text-lg leading-none" aria-hidden="true">💬</span>
+            </button>
             <button
               onClick={() => navigate('/profile')}
               className="w-11 h-11 rounded-full bg-brand-600 border-2 border-brand-400 hover:bg-brand-500 flex items-center justify-center text-white font-bold text-base transition-colors flex-shrink-0"

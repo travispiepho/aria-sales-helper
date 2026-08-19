@@ -1,0 +1,43 @@
+-- 2026-08-10-users-deactivated-at.sql
+--
+-- Adds the soft-delete flag column that backs the admin account-deletion
+-- feature (DELETE /api/admin/users/:id, shipped 2026-08-10).
+--
+-- Why soft-delete instead of hard row delete
+-- ------------------------------------------
+-- meetings.rep_id and customers.created_by are FK references to users(id)
+-- with NO ON DELETE clause (see migrate.js, original 2026-07 schema). A
+-- straight DELETE FROM users would either:
+--   1. FK-violate on any rep that has ever run a meeting or created a
+--      customer (i.e. every real rep account in production), OR
+--   2. Force us to null out those FK columns and orphan the historical
+--      attribution of "which rep ran this meeting" — which is one of the
+--      core pieces of data this product exists to record.
+-- Soft-deleting via a nullable deactivated_at flag preserves all history
+-- and lets the app treat the row as "gone" (login blocked, hidden from
+-- most lists, sessions revoked) without destroying meeting/customer
+-- attribution. See server.js's DELETE /api/admin/users/:id handler and
+-- the login-route / preHandler filters that key off this column.
+--
+-- Idempotency
+-- -----------
+-- ADD COLUMN IF NOT EXISTS + a nullable column with no default is safe to
+-- re-run — no data change on existing rows (they all get NULL, which is
+-- the "active account" state). Matches the existing migration-file
+-- convention in this directory (all others also use IF NOT EXISTS guards).
+--
+-- Applied
+-- -------
+-- server.js's ensureSessionsTable() runs the same ALTER TABLE at boot
+-- (idempotent), so a Railway redeploy is sufficient to bring the prod
+-- schema in sync — this file exists for parity with the other dated
+-- migration files, and for anyone running a fresh install via migrate.js
+-- (which also carries the CREATE TABLE + inline ALTER).
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
+
+-- Verification query (not applied — reference for hand-testing):
+--   SELECT column_name, data_type, is_nullable
+--   FROM information_schema.columns
+--   WHERE table_name = 'users' AND column_name = 'deactivated_at';
+--   -- expected: deactivated_at | timestamp with time zone | YES

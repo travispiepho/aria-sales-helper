@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.local
+.env.production.local
+.env.secrets
+dist/
+.DS_Store
+*.log
+server/knowledge/ARIA_SALES_HELPER.md
+
+# Throwaway scratch/verification output, not product code — see
+# server/scripts/ for the reference test scripts that ARE committed.
+server/model-compare.scratch.mjs
+server/results/

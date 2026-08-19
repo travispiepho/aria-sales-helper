@@ -85,7 +85,7 @@ const secureStore = Platform.OS === 'web' ? webStore : SecureStore;
 // (see app/web/.env.production). Overridable via EXPO_PUBLIC_API_URL for
 // local dev against `node server.js` in app/server.
 export const API_BASE =
-  process.env.EXPO_PUBLIC_API_URL || 'https://aria-backend-production-0e99.up.railway.app';
+  process.env.EXPO_PUBLIC_API_URL || 'https://ariasaleshelper-production.up.railway.app';
 
 export function getWsBase(): string {
   return API_BASE.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');

@@ -2,6 +2,7 @@
   "expo": {
     "name": "ARIA Sales Helper",
     "slug": "ariasaleshelper",
+    "owner": "ghcertaproapps",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",

@@ -264,28 +264,30 @@ export default function HomePage() {
           <p className="text-sm text-gray-500 mb-4">
             Start a meeting to capture the conversation and intake details.
           </p>
-          <button
-            onClick={() => setShowIntake(true)}
-            disabled={starting}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
-          >
-            {starting ? 'Starting…' : '▶ Start Meeting'}
-          </button>
-          {/* 2026-08-13: "Aria calls me, then bridges the customer in" phone
-              meeting entry point — modeled on the in-person Start Meeting
-              flow above but opens PhoneCallModal instead, which collects
-              rep/customer numbers and calls POST /telephony/outbound-call
-              (see api.ts's startOutboundCall). Server may still return 503
-              if Twilio isn't fully provisioned yet — PhoneCallModal itself
-              surfaces that as a real, visible error rather than pretending
-              to succeed. */}
-          <button
-            onClick={() => setShowPhoneCall(true)}
-            disabled={starting}
-            className="w-full mt-2 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
-          >
-            📞 Call a Customer
-          </button>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => setShowIntake(true)}
+              disabled={starting}
+              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-3 rounded-xl transition-colors"
+            >
+              {starting ? 'Starting…' : '▶ Record a Visit'}
+            </button>
+            {/* 2026-08-13: "Aria calls me, then bridges the customer in" phone
+                meeting entry point — modeled on the in-person Start Meeting
+                flow above but opens PhoneCallModal instead, which collects
+                rep/customer numbers and calls POST /telephony/outbound-call
+                (see api.ts's startOutboundCall). Server may still return 503
+                if Twilio isn't fully provisioned yet — PhoneCallModal itself
+                surfaces that as a real, visible error rather than pretending
+                to succeed. */}
+            <button
+              onClick={() => setShowPhoneCall(true)}
+              disabled={starting}
+              className="bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
+            >
+              📞 Call a Customer
+            </button>
+          </div>
           {/* Schedule Ahead (2026-08-17 rework) — entry point to the
               schedule-a-call / schedule-a-visit flow (SchedulePage.tsx).
               Promoted here from Settings so a rep looking to plan ahead
@@ -298,16 +300,6 @@ export default function HomePage() {
             className="w-full mt-2 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
           >
             🗓️ Schedule Ahead
-          </button>
-          {/* Objections tab entry point (2026-08-18) — Troy Hacker's
-              request. Styled to match the other secondary Home CTAs above
-              it (Call a Customer / Schedule Ahead). */}
-          <button
-            onClick={() => navigate('/objections')}
-            disabled={starting}
-            className="w-full mt-2 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
-          >
-            💬 Objections
           </button>
         </div>
 

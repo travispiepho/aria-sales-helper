@@ -11,6 +11,8 @@ import {
   apiFetch,
 } from '../lib/api';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
+import RebuttalTeleprompter, { SuggestedLibraryRebuttal } from '../components/RebuttalTeleprompter';
+import { dismissLibraryRebuttal } from '../lib/api';
 import MeetingScoreCard from '../components/MeetingScoreCard';
 import CoachingReportCard from '../components/CoachingReportCard';
 import { getWsBase } from '../lib/wsBase';
@@ -185,6 +187,15 @@ export default function MeetingPage() {
   // breakdown). This is a first-pass UI: a dismissible banner, not yet a
   // polished "teleprompter" UX — intentionally minimal per task scope.
   const [suggestedRebuttal, setSuggestedRebuttal] = useState<{ objectionCategory: string; rebuttal: string } | null>(null);
+  // Live rebuttal teleprompter, in-meeting surfacing pass (2026-08-18,
+  // 2nd pass) — library-backed prompts (`suggested_rebuttal_library` WS
+  // pushes, matched against the Objections/Rebuttals library from commit
+  // 053c81e). Keyed by objectionId so a repeat push for an objection
+  // already on screen (e.g. duplicate broadcast on a reconnect) updates in
+  // place instead of stacking a second card; the server-side concurrency
+  // cap (objectionLibraryMatcher.js's MAX_CONCURRENT_PROMPTS) is the real
+  // enforcement, this Map just mirrors it faithfully on the client.
+  const [libraryRebuttalPrompts, setLibraryRebuttalPrompts] = useState<Map<string, SuggestedLibraryRebuttal>>(new Map());
   // Mid-call name-introduction confirmation (2026-08-10 intro-window fix).
   // Set from the `speaker_lock_suggestion` WS message; cleared once the user
   // answers (Yes/Edit/No) or another synced client answers first. Nothing is
@@ -457,6 +468,35 @@ export default function MeetingPage() {
       // Live rebuttal teleprompter (item 5) — first-pass scaffolding.
       const { objectionCategory, rebuttal } = msg as { type: string; objectionCategory: string; rebuttal: string };
       setSuggestedRebuttal({ objectionCategory, rebuttal });
+    } else if (msg.type === 'suggested_rebuttal_library') {
+      // Live rebuttal teleprompter, in-meeting surfacing pass (2026-08-18
+      // 2nd pass) — library-backed match (server/objectionLibraryMatcher.js),
+      // separate from the STUB `suggested_rebuttal` handled just above.
+      const payload = msg as unknown as SuggestedLibraryRebuttal & { type: string };
+      setLibraryRebuttalPrompts((prev) => {
+        const next = new Map(prev);
+        next.set(payload.objectionId, {
+          objectionId: payload.objectionId,
+          objectionText: payload.objectionText,
+          objectionCategory: payload.objectionCategory,
+          rebuttals: payload.rebuttals,
+          matchedSegmentText: payload.matchedSegmentText,
+          confidence: payload.confidence,
+          matchMethod: payload.matchMethod,
+        });
+        return next;
+      });
+    } else if (msg.type === 'suggested_rebuttal_library_dismiss') {
+      // Another synced client (e.g. an observer) dismissed this prompt —
+      // close it here too so both views agree, same pattern as
+      // `speaker_lock_suggestion_dismiss` above.
+      const { objectionId } = msg as { type: string; objectionId: string };
+      setLibraryRebuttalPrompts((prev) => {
+        if (!prev.has(objectionId)) return prev;
+        const next = new Map(prev);
+        next.delete(objectionId);
+        return next;
+      });
     } else if (msg.type === 'coaching' && msg.data) {
       // Phase 3: real-time coaching update
       const incoming = msg.data as CoachingData;
@@ -1277,6 +1317,26 @@ export default function MeetingPage() {
     }
   }
 
+  // ── Live rebuttal teleprompter dismiss handler (2026-08-18 2nd pass) ────
+  // Optimistic local remove (rep expects the card to disappear instantly on
+  // tap) + persist server-side so the dismissal sticks for the rest of the
+  // meeting (per this task's explicit requirement) even across a socket
+  // reconnect. Failure to persist is swallowed (not surfaced to the rep) —
+  // worst case on a network blip is the same objection could re-fire later
+  // in the call, which is a minor annoyance, not a meeting-breaking failure,
+  // consistent with this feature's "never break the meeting" degrade rule.
+  function dismissLibraryRebuttalPrompt(objectionId: string) {
+    setLibraryRebuttalPrompts((prev) => {
+      if (!prev.has(objectionId)) return prev;
+      const next = new Map(prev);
+      next.delete(objectionId);
+      return next;
+    });
+    if (meetingId) {
+      dismissLibraryRebuttal(meetingId, objectionId).catch(() => {});
+    }
+  }
+
   // ── Mid-call name-introduction confirmation handlers (2026-08-10) ────────
   // The server emitted a `speaker_lock_suggestion` (a GUESS). These POST the
   // user's answer to /api/meetings/:id/speaker-lock. Confirm commits the lock
@@ -1566,6 +1626,18 @@ export default function MeetingPage() {
                 </button>
               </div>
             )}
+
+            {/* Live rebuttal teleprompter, in-meeting surfacing pass
+                (2026-08-18, 2nd pass) — library-backed matches (rep-curated
+                text from the Objections tab, commit 053c81e), rendered
+                separately from the STUB `suggestedRebuttal` banner above.
+                Placed in the normal scrollable content column (not
+                position: fixed) so it never overlaps the live transcript or
+                the fixed bottom End Meeting / Hang Up bar at 390x844. */}
+            <RebuttalTeleprompter
+              prompts={Array.from(libraryRebuttalPrompts.values())}
+              onDismiss={dismissLibraryRebuttalPrompt}
+            />
 
             {/* Phase 3: Coaching Panel */}
             <CoachingPanel

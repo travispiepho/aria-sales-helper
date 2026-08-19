@@ -31,6 +31,21 @@ import { analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebut
 // Item 5 (live rebuttal teleprompter) — STUB detection half. See
 // objectionDetection.js module docstring for real-vs-stubbed breakdown.
 import { detectObjection } from './objectionDetection.js';
+// Live rebuttal TELEPROMPTER pass (2026-08-18, second pass) — matches the
+// PROSPECT's finalized transcript segments against the Objections/Rebuttals
+// library added in commit 053c81e (rep-curated text, not LLM output), with
+// its own local keyword/substring matcher (no LLM call per segment) plus
+// per-meeting cooldown/dismiss/concurrency noise control. Entirely separate
+// from, and does not replace, the existing objectionDetection.js +
+// coachingAnalysis.js's generateRebuttal() STUB pipeline just above — see
+// this module's header and this task's report for why both now coexist.
+import {
+  loadObjectionMatcherIndex,
+  evaluateLibraryMatch,
+  markPromptFired,
+  markPromptDismissed,
+  clearMeetingPromptState,
+} from './objectionLibraryMatcher.js';
 // Name-likelihood classifier for mid-call self-introduction detection
 // ("Hi, I'm John"). Replaces the old hand-picked STOPWORDS blocklist — see
 // nameHeuristics.js header for why (dictionary signal, not capitalization).
@@ -2030,6 +2045,12 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   if (status !== undefined && TERMINAL_MEETING_STATUSES.has(status)) {
     broadcastToObservers(id, { type: 'meeting_ended', meetingId: id, status });
     notifyUserSyncMeetingEnded(meeting.rep_id, id);
+    // Live rebuttal teleprompter (library-backed): drop this meeting's
+    // cooldown/dismiss/concurrency state now that it's over — avoids an
+    // unbounded Map growing for the life of the process across many
+    // meetings. Safe no-op if this meeting never had any state (e.g. the
+    // library was empty the whole call).
+    clearMeetingPromptState(id);
 
     // Auto-title (origin-agnostic as of the 2026-08-05 follow-up pass) —
     // see generateAutoTitleForMeeting()'s doc comment for full scope/
@@ -2766,6 +2787,40 @@ fastify.post('/api/meetings/:id/consent', { preHandler: [requireAuth] }, async (
   );
 
   return { ok: true, consent_confirmed_at: result.rows[0].consent_confirmed_at };
+});
+
+// ─── Live rebuttal teleprompter: dismiss a library-matched prompt ──────────
+// POST /api/meetings/:id/dismiss-rebuttal
+// The rep's dismiss tap on a `suggested_rebuttal_library` prompt. Records
+// the dismissal in objectionLibraryMatcher.js's per-meeting state so the
+// SAME objection never re-fires for the rest of this meeting ("dismissing
+// must stick for that meeting", per this task's explicit requirement) even
+// across a socket reconnect (state is keyed by meetingId, not by socket).
+// Broadcasts `suggested_rebuttal_library_dismiss` so any other synced
+// client watching this meeting (e.g. an observer view) also closes the
+// prompt — same broadcastToMeeting()-reaches-owner-and-observers pattern
+// used by every other live message type in this file.
+fastify.post('/api/meetings/:id/dismiss-rebuttal', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+  const { objectionId } = request.body || {};
+
+  if (!objectionId) {
+    return reply.code(400).send({ error: 'objectionId is required' });
+  }
+
+  const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
+  if (existing.rows.length === 0) {
+    return reply.code(404).send({ error: 'Meeting not found' });
+  }
+  const meeting = existing.rows[0];
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+
+  markPromptDismissed(id, objectionId);
+  broadcastToMeeting(id, { type: 'suggested_rebuttal_library_dismiss', objectionId });
+
+  return { ok: true };
 });
 
 // ─── Speaker-lock confirm/reject (2026-08-10, intro-window fix) ──────────────
@@ -3791,6 +3846,18 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   const rebuttalCooldownUntil = {}; // category -> ms timestamp until re-eligible
   const REBUTTAL_COOLDOWN_MS = 45000; // 45s — avoid spamming suggestions for a repeated objection
 
+  // ── Live rebuttal TELEPROMPTER: Objections/Rebuttals library matcher ────
+  // (2026-08-18, second pass). Loaded ONCE per WS connection (not per
+  // segment) — cheap, and the library rarely changes mid-call. Empty array
+  // if the library is empty OR the objections/rebuttals migration hasn't
+  // been applied yet (current prod state) — loadObjectionMatcherIndex()
+  // never throws, so this line can never break meeting setup. Awaited here
+  // (not fire-and-forget) because it's a single cheap query pair and the
+  // rest of this handler's setup already does sequential awaited queries
+  // (voice_prints lookup just above) before the socket starts handling
+  // real audio.
+  let objectionMatcherIndex = await loadObjectionMatcherIndex(pool, (m) => fastify.log.info(m));
+
   // ── Speaker de-duplication (merge over-segmented speaker indices) ─────────
   // Deepgram's streaming diarizer can spawn a "new" speaker index mid-call
   // for the same person (pause, pitch/cadence shift, background noise). Before
@@ -4242,6 +4309,40 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           if (recentSegmentContext.length > RECENT_CONTEXT_MAX) recentSegmentContext.shift();
 
           const isProspectSegment = groupLabel !== repName;
+
+          // ── Live rebuttal teleprompter (library-backed, 2026-08-18 2nd pass) ──
+          // CUSTOMER SPEECH ONLY, and only once speaker attribution is
+          // actually RESOLVED for this slot — not just "doesn't currently
+          // equal repName". Before a lock exists, `groupLabel` is the
+          // generic `Speaker N` placeholder for EVERY unresolved speaker,
+          // including the rep before their voiceprint matches or before an
+          // intro is confirmed; treating that placeholder as "prospect" would
+          // risk firing a rebuttal off the rep's own words pre-lock. Per this
+          // task's explicit requirement: if attribution is unresolved,
+          // silence is preferred over a wrong on-screen prompt. Attribution
+          // is "resolved" here iff speakerLocks[si] is set (rep identified
+          // via voiceprint OR this specific speaker slot's name was
+          // confirmed via the intro-suggestion flow) AND that resolved name
+          // is not the rep's own name.
+          const attributionResolved = Boolean(speakerLocks[si]);
+          const isConfirmedProspectSegment = attributionResolved && isProspectSegment;
+          if (isConfirmedProspectSegment && objectionMatcherIndex.length > 0) {
+            const libraryMatch = evaluateLibraryMatch(groupText, objectionMatcherIndex, meetingId);
+            if (libraryMatch) {
+              markPromptFired(meetingId, libraryMatch.objection.id);
+              broadcastToMeeting(meetingId, {
+                type: 'suggested_rebuttal_library',
+                objectionId: libraryMatch.objection.id,
+                objectionText: libraryMatch.objection.text,
+                objectionCategory: libraryMatch.objection.category,
+                rebuttals: libraryMatch.objection.rebuttals,
+                matchedSegmentText: groupText,
+                confidence: libraryMatch.confidence,
+                matchMethod: libraryMatch.method,
+              });
+            }
+          }
+
           if (isProspectSegment && OPENROUTER_API_KEY) {
             const objection = detectObjection(groupText);
             if (objection) {

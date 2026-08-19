@@ -234,6 +234,20 @@ export function createIntroDetector({
       if (si === null) return;
       speakerLocks[si] = name;
     },
+    // Read-only lookup of a speaker slot's CONFIRMED display name (voice-
+    // print lock via externalLock(), or a human-confirmed intro via
+    // confirm()) — returns undefined if that slot has no resolved
+    // attribution yet. Added for the live rebuttal teleprompter (2026-08-18
+    // 2nd pass): telephony.js's phone-call path has no equivalent of
+    // server.js's own inline `speakerLocks` object to read from, so this
+    // getter lets a caller ask "do we actually know who Speaker N is yet?"
+    // without duplicating the si-parsing/lock-storage logic. Does not
+    // affect existing on-the-wire behavior at all — purely additive.
+    getLockedName(speakerId) {
+      const si = _siFromLabel(speakerId);
+      if (si === null) return undefined;
+      return speakerLocks[si];
+    },
   };
 
   return { onFinalSegment, sweep, speakerLockController };

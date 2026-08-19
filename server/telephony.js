@@ -73,6 +73,16 @@ import { twilioPayloadToLinear16Buffer } from './audioCodec.js';
 import { createDeepgramSession } from './deepgramSession.js';
 import { isLikelyName, toDisplayName } from './nameHeuristics.js';
 import { createIntroDetector } from './introDetection.js';
+// Live rebuttal teleprompter (2026-08-18, 2nd pass) — same library matcher
+// used by server.js's in-person /meetings/:id/audio handler, reused here
+// verbatim for the phone-call path so both channels get identical matching
+// behavior/noise-control rather than a second parallel implementation.
+import {
+  loadObjectionMatcherIndex,
+  evaluateLibraryMatch,
+  markPromptFired,
+  clearMeetingPromptState,
+} from './objectionLibraryMatcher.js';
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 
@@ -455,6 +465,10 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
         if (endedMeetingId && broadcastToMeeting) {
           broadcastToMeeting(endedMeetingId, { type: 'meeting_ended', meetingId: endedMeetingId, status: 'completed' });
         }
+        // Live rebuttal teleprompter: drop this meeting's cooldown/dismiss
+        // state now that it's over (same cleanup server.js's in-person
+        // PATCH /api/meetings/:id handler does for that path).
+        if (endedMeetingId) clearMeetingPromptState(endedMeetingId);
       } catch (err) {
         fastify.log.error(`status-callback meeting update failed: ${err.message}`);
       }
@@ -869,6 +883,22 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     let callSid = null;
     let meetingId = null;
     let dgSession = null;
+    // Live rebuttal teleprompter (2026-08-18 2nd pass) — populated once the
+    // meeting row is resolved in the `start` handler below. Starts empty so
+    // any final segment that somehow arrives before `start` resolves it is
+    // a safe no-op (evaluateLibraryMatch/loop below already treats an empty
+    // index as "nothing to match").
+    let objectionMatcherIndex = [];
+    // Rep's own display name for this call's meeting — resolved alongside
+    // objectionMatcherIndex in the `start` handler below. Used the SAME way
+    // server.js's in-person handler uses `repName`: a locked speaker slot
+    // whose confirmed name matches this is the REP, everything else
+    // (locked, non-matching) is treated as the prospect. Stays null if the
+    // meeting has no resolvable rep_id — in that case every locked slot is
+    // conservatively treated as non-prospect-confirmed-enough to skip (see
+    // isConfirmedProspectSegment below), same silence-over-wrong-prompt
+    // preference as an unresolved slot.
+    let phoneRepName = null;
 
     // ── Mid-call name-introduction detector (2026-08-18, THIRD PASS ROOT-
     // CAUSE FIX) ──────────────────────────────────────────────────────────
@@ -923,6 +953,22 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
                 // path already uses — no web-client change needed at all.
                 if (registerSpeakerController) registerSpeakerController(meetingId, introDetector.speakerLockController);
                 fastify.log.info(`Twilio stream linked to meeting ${meetingId}`);
+                // Live rebuttal teleprompter (2026-08-18 2nd pass): load the
+                // Objections/Rebuttals library ONCE for this call, same as
+                // the in-person handler does. Never throws — empty array on
+                // an empty library or (current prod state) an unapplied
+                // migration, which is the correct "feature disabled for
+                // this call" no-op degrade.
+                objectionMatcherIndex = await loadObjectionMatcherIndex(pool, (m) => fastify.log.info(`[callSid=${callSid}] ${m}`));
+                try {
+                  const repRes = await pool.query(
+                    `SELECT u.name FROM meetings m JOIN users u ON u.id = m.rep_id WHERE m.id = $1`,
+                    [meetingId]
+                  );
+                  phoneRepName = repRes.rows[0]?.name || null;
+                } catch (repErr) {
+                  fastify.log.warn(`Twilio stream: rep name lookup failed for meeting ${meetingId}: ${repErr.message}`);
+                }
               } else {
                 fastify.log.warn(`Twilio stream: no meeting row found for callSid=${callSid} — voice webhook may not have run yet`);
               }
@@ -990,6 +1036,43 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
                   // assigns; no merge/dedup step exists on this path (unlike
                   // server.js's resolveSpeaker), so it's used directly.
                   introDetector.onFinalSegment(result.speaker, result.text);
+
+                  // ── Live rebuttal teleprompter (library-backed, 2026-08-18 2nd pass) ──
+                  // CUSTOMER SPEECH ONLY, and only once this speaker slot's
+                  // attribution is actually RESOLVED (voiceprint-equivalent
+                  // or confirmed intro) — telephony.js has no voiceprint
+                  // matching on this path today, so in practice "resolved"
+                  // here means a confirmed intro lock via introDetector's
+                  // speakerLockController. An unresolved `Speaker N`
+                  // placeholder NEVER fires a prompt, matching this task's
+                  // explicit silence-over-wrong-prompt requirement — this is
+                  // deliberately MORE conservative on the phone path than
+                  // the in-person path (no voiceprint signal available here
+                  // at all), so real dogfooding volume will likely show this
+                  // firing less often on phone calls until intros are
+                  // confirmed, which is the correct, safe default.
+                  if (dgMeetingId && objectionMatcherIndex.length > 0) {
+                    const lockedName = introDetector.speakerLockController.getLockedName(speakerLabel);
+                    const attributionResolved = Boolean(lockedName);
+                    const isConfirmedProspectSegment = attributionResolved && phoneRepName && lockedName !== phoneRepName;
+                    if (isConfirmedProspectSegment) {
+                      const libraryMatch = evaluateLibraryMatch(result.text, objectionMatcherIndex, dgMeetingId);
+                      if (libraryMatch && broadcastToMeeting) {
+                        markPromptFired(dgMeetingId, libraryMatch.objection.id);
+                        broadcastToMeeting(dgMeetingId, {
+                          type: 'suggested_rebuttal_library',
+                          objectionId: libraryMatch.objection.id,
+                          objectionText: libraryMatch.objection.text,
+                          objectionCategory: libraryMatch.objection.category,
+                          rebuttals: libraryMatch.objection.rebuttals,
+                          matchedSegmentText: result.text,
+                          confidence: libraryMatch.confidence,
+                          matchMethod: libraryMatch.method,
+                        });
+                      }
+                    }
+                  }
+
                   if (pool) {
                     const wordCount = result.words.length > 0
                       ? result.words.length

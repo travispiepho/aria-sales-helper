@@ -580,3 +580,10 @@ export async function updateRebuttal(id: string, text: string): Promise<Rebuttal
 export async function deleteRebuttal(id: string): Promise<void> {
   return request('DELETE', `/api/rebuttals/${id}`);
 }
+
+// ─── Live rebuttal teleprompter (2026-08-18, in-meeting surfacing pass) ───
+// Dismiss a `suggested_rebuttal_library` WS-pushed prompt — sticks for the
+// rest of this meeting (server-side per-meeting state, not client-only).
+export async function dismissLibraryRebuttal(meetingId: string, objectionId: string): Promise<void> {
+  return request('POST', `/api/meetings/${meetingId}/dismiss-rebuttal`, { objectionId });
+}

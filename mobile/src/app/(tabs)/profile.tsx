@@ -37,7 +37,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
-import { changePassword, deleteVoicePrint, getVoicePrintStatus, saveVoicePrint, VoicePrintStatus } from '@/lib/api';
+import { changePassword, deleteVoicePrint, getVoicePrintStatus, saveVoicePrint, updateProfile, VoicePrintStatus } from '@/lib/api';
 import {
   ENROLL_DURATION_MS,
   ENROLLMENT_SUPPORTED_PLATFORM,
@@ -47,7 +47,16 @@ import {
 } from '@/lib/voiceEnrollment';
 
 export default function ProfileScreen() {
-  const { user, logout, loading } = useAuth();
+  const { user, logout, loading, updateUser } = useAuth();
+
+  // Phone Number (mirrors app/web/src/pages/ProfilePage.tsx's phone field,
+  // added 2026-08-13) — lets a rep save their own number once so the
+  // phone-call flow's "Your Phone Number" field prefills from it instead of
+  // asking them to retype it on every call. Seeded from the logged-in
+  // user's stored value and kept editable.
+  const [phone, setPhone] = useState(user?.phone || '');
+  const [phoneSaving, setPhoneSaving] = useState(false);
+  const [phoneMsg, setPhoneMsg] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
   // Change Password (2026-08-08 fast-follow to web's ProfilePage.tsx —
   // mirrors that flow: current password re-verified server-side, see
@@ -72,6 +81,14 @@ export default function ProfileScreen() {
   const enrollmentRef = useRef<VoiceEnrollmentRecorder | null>(null);
   const startTimeRef = useRef<number>(0);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // user loads asynchronously (getMe() in AuthProvider) — sync the local
+  // phone input once it resolves, same reason as web's ProfilePage.tsx: a
+  // fresh app open must not show a stale/blank phone box while `user` is
+  // still null on the first render.
+  useEffect(() => {
+    setPhone(user?.phone || '');
+  }, [user?.phone]);
 
   useEffect(() => {
     let cancelled = false;
@@ -174,6 +191,25 @@ export default function ProfileScreen() {
 
   const vpProgressPct = Math.min((elapsedMs / ENROLL_DURATION_MS) * 100, 100);
   const vpSecondsLeft = Math.max(0, Math.ceil((ENROLL_DURATION_MS - elapsedMs) / 1000));
+
+  async function handleSavePhone() {
+    setPhoneMsg(null);
+    setPhoneSaving(true);
+    try {
+      const { user: updated } = await updateProfile(phone.trim());
+      setPhone(updated.phone || '');
+      // Push the saved phone into the shared AuthContext user object so any
+      // other screen's prefill (useAuth().user.phone) reflects it immediately
+      // in this same session — no reload/re-login required.
+      updateUser({ phone: updated.phone });
+      setPhoneMsg({ type: 'success', text: '✅ Phone number saved.' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save phone number.';
+      setPhoneMsg({ type: 'error', text: msg });
+    } finally {
+      setPhoneSaving(false);
+    }
+  }
 
   async function handleChangePassword() {
     setPwMsg(null);
@@ -326,6 +362,34 @@ export default function ProfileScreen() {
             )}
           </ThemedView>
 
+          <ThemedView style={styles.phoneCard} type="backgroundElement">
+            <ThemedText type="smallBold" style={styles.phoneTitle}>
+              📞 Your Phone Number
+            </ThemedText>
+            <ThemedText type="small" themeColor="textSecondary" style={styles.phoneSubtitle}>
+              Saved here so the "Call a Customer" screen can prefill your number automatically.
+            </ThemedText>
+            <TextInput
+              style={styles.input}
+              placeholder="(616) 555-1234"
+              keyboardType="phone-pad"
+              value={phone}
+              onChangeText={setPhone}
+              editable={!phoneSaving}
+            />
+            {phoneMsg && (
+              <ThemedText type="small" style={phoneMsg.type === 'success' ? styles.pwSuccess : styles.pwError}>
+                {phoneMsg.text}
+              </ThemedText>
+            )}
+            <Pressable
+              onPress={handleSavePhone}
+              disabled={phoneSaving}
+              style={({ pressed }) => [styles.pwButton, pressed && styles.pwButtonPressed, phoneSaving && styles.pwButtonDisabled]}>
+              {phoneSaving ? <ActivityIndicator color="#fff" /> : <ThemedText style={styles.pwButtonText}>Save Phone Number</ThemedText>}
+            </Pressable>
+          </ThemedView>
+
           <ThemedView style={styles.pwCard} type="backgroundElement">
             <ThemedText type="smallBold" style={styles.pwTitle}>
               Change Password
@@ -455,6 +519,9 @@ const styles = StyleSheet.create({
   },
   logoutPressed: { opacity: 0.7 },
   logoutText: { color: '#DC2626', fontWeight: '700', fontSize: 16 },
+  phoneCard: { borderRadius: Spacing.three, padding: Spacing.four, gap: Spacing.two },
+  phoneTitle: { marginBottom: 0 },
+  phoneSubtitle: { marginBottom: Spacing.one },
   pwCard: { borderRadius: Spacing.three, padding: Spacing.four, gap: Spacing.two },
   pwTitle: { marginBottom: Spacing.one },
   input: {

@@ -113,6 +113,11 @@ export interface User {
   name: string;
   email: string;
   role: 'rep' | 'admin';
+  // Rep's own phone number on file (mirrors app/web/src/lib/api.ts's User.phone,
+  // added 2026-08-13), E.164-normalized server-side. Null/undefined if the rep
+  // hasn't saved one yet. Used to prefill the phone-call flow's "Your Phone
+  // Number" field, same as web's PhoneCallModal.tsx.
+  phone?: string | null;
 }
 
 export async function login(email: string, password: string): Promise<{ user: User }> {
@@ -164,6 +169,14 @@ export async function getMe(): Promise<{ user: User; sessionId?: string }> {
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
   return request('PATCH', '/api/account/password', { currentPassword, newPassword });
+}
+
+// Profile: self-service phone number (mirrors app/web/src/lib/api.ts's
+// updateProfile(), added 2026-08-13). Pass '' or null to clear a previously
+// saved number. Same EXISTING backend route as web (server.js's
+// PATCH /api/profile) — not a new endpoint.
+export async function updateProfile(phone: string | null): Promise<{ user: User }> {
+  return request('PATCH', '/api/profile', { phone });
 }
 
 // ─── Voice print (2026-08-10, mobile voice-recognition port) ──────────────

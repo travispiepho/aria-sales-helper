@@ -334,6 +334,12 @@ export async function generateSummary(id: string): Promise<{ summary: string }> 
   return request('POST', `/api/meetings/${id}/summary`, {});
 }
 
+// ─── Outbound phone meeting (web parity, 2026-08-22) ────────────────
+export interface OutboundCallResult { callSid: string; meetingId: string | null; }
+export async function startOutboundCall(repPhone: string, customerPhone: string, customerId?: string): Promise<OutboundCallResult> {
+  return request('POST', '/telephony/outbound-call', { repPhone, customerPhone, ...(customerId ? { customerId } : {}) });
+}
+
 // ─── Objections/rebuttals shared library (web parity, 2026-08-22) ────────
 export interface Rebuttal {
   id: string;

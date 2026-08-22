@@ -59,7 +59,7 @@ export default function HomeScreen() {
           <ThemedText type="small" themeColor="textSecondary" style={styles.readyCopy}>Start a visit, measure a floor, or build a homeowner proposal.</ThemedText>
           <View style={styles.primaryGrid}>
             <ActionButton icon="mic" label="Record a Visit" primary onPress={() => router.push('/meeting-setup')} />
-            <ActionButton icon="call" label="Call a Customer" onPress={() => router.push('/meeting-setup')} />
+            <ActionButton icon="call" label="Call a Customer" onPress={() => router.push('/call-customer')} />
           </View>
           <View style={styles.primaryGrid}>
             <ActionButton icon="scan" label="Scan a Floor" onPress={() => router.push('/floor-scan')} />

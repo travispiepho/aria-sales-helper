@@ -68,6 +68,7 @@ function ThemedRoot() {
           <Stack.Screen name="floor-scan" />
           <Stack.Screen name="proposal" />
           <Stack.Screen name="objections" />
+          <Stack.Screen name="call-customer" />
         </Stack.Protected>
         <Stack.Protected guard={!user}>
           <Stack.Screen name="login" />

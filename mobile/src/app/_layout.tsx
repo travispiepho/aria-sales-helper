@@ -1,6 +1,8 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect } from 'react';
 import { ActivityIndicator, useColorScheme } from 'react-native';
 
 import { ThemedView } from '@/components/themed-view';
@@ -36,6 +38,15 @@ import { AuthProvider, useAuth } from '@/lib/auth';
 // instead of a hand-rolled redirect effect, so unauthenticated users are
 // structurally unable to navigate to any tab/meeting screen.
 export default function RootLayout() {
+  // Expo Router normally dismisses the native splash once its navigation
+  // tree is ready. ARIA intentionally waits for a live auth check before it
+  // mounts that tree, though, so a slow/offline emulator could remain on the
+  // native splash indefinitely. Dismiss it as soon as React is alive; the
+  // explicit loading UI below then tells the truth while auth bootstraps.
+  useEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
   return (
     <AuthProvider>
       <ThemedRoot />

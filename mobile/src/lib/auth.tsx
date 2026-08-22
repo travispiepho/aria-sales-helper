@@ -22,26 +22,52 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+const AUTH_BOOT_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let mounted = true;
     (async () => {
       // Paint instantly from the cached profile (if any) while we confirm
       // the session cookie is still valid against the server.
-      const cached = await getCachedUser();
-      if (cached) setUser(cached);
+      try {
+        const cached = await withTimeout(getCachedUser(), 2_000, 'Secure session cache');
+        if (mounted && cached) setUser(cached);
+      } catch {
+        // A broken/locked keystore must not trap the app on its splash.
+      }
 
       try {
-        const { user } = await getMe();
-        setUser(user);
+        const { user } = await withTimeout(getMe(), AUTH_BOOT_TIMEOUT_MS, 'Session check');
+        if (mounted) setUser(user);
       } catch {
-        setUser(null);
+        if (mounted) setUser(null);
       } finally {
-        setLoading(false);
+        if (mounted) setLoading(false);
       }
     })();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const login = async (email: string, password: string) => {

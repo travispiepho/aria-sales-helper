@@ -14,6 +14,7 @@
     },
     "preview": {
       "distribution": "internal",
+      "autoIncrement": true,
       "channel": "preview",
       "env": {
         "EXPO_PUBLIC_API_URL": "https://ariasaleshelper-production.up.railway.app"

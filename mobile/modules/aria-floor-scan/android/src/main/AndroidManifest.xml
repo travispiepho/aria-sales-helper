@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.CAMERA" />
+  <uses-feature android:name="android.hardware.camera.ar" android:required="false" />
+  <uses-feature android:name="com.google.ar.core.depth" android:required="false" />
+  <application>
+    <meta-data android:name="com.google.ar.core" android:value="optional" />
+    <activity
+      android:name="expo.modules.ariafloorscan.FloorScanActivity"
+      android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+      android:exported="false"
+      android:screenOrientation="portrait"
+      android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+  </application>
+</manifest>

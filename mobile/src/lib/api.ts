@@ -333,3 +333,27 @@ export async function getMeetingSegments(id: string): Promise<{ segments: Transc
 export async function generateSummary(id: string): Promise<{ summary: string }> {
   return request('POST', `/api/meetings/${id}/summary`, {});
 }
+
+// ─── Objections/rebuttals shared library (web parity, 2026-08-22) ────────
+export interface Rebuttal {
+  id: string;
+  objection_id: string;
+  text: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface Objection {
+  id: string;
+  text: string;
+  category?: string | null;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+  rebuttal_count?: number;
+}
+export interface ObjectionWithRebuttals extends Objection { rebuttals: Rebuttal[]; }
+export async function listObjections(): Promise<Objection[]> { return request('GET', '/api/objections'); }
+export async function getObjection(id: string): Promise<ObjectionWithRebuttals> { return request('GET', `/api/objections/${id}`); }
+export async function createObjection(text: string, category?: string): Promise<Objection> { return request('POST', '/api/objections', { text, category }); }
+export async function createRebuttal(objectionId: string, text: string): Promise<Rebuttal> { return request('POST', `/api/objections/${objectionId}/rebuttals`, { text }); }

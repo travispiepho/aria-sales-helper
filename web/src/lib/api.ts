@@ -255,7 +255,7 @@ export interface Meeting {
   // 'phone' = a Twilio-bridged "Aria calls the rep" call (server.js's
   // /telephony/outbound-call flow); anything else (including undefined,
   // for pre-channel-column legacy rows) is treated as 'in_person'.
-  channel?: 'phone' | 'in_person';
+  channel?: 'phone' | 'in_person' | 'uploaded_recording';
   // Set only for meetings actually linked to a Twilio call (both the web
   // outbound "Aria calls the rep" bridge and an inbound customer call);
   // null for mobile's local-mic-capture 'phone'-channel meetings (those are
@@ -282,6 +282,11 @@ export interface Meeting {
 
 export async function createMeeting(customerId?: string): Promise<Meeting> {
   return request('POST', '/api/meetings', { customer_id: customerId });
+}
+
+/** Creates a meeting whose source is a local uploaded recording. */
+export async function createUploadedRecordingMeeting(): Promise<Meeting> {
+  return request('POST', '/api/meetings', { channel: 'uploaded_recording' });
 }
 
 // 2026-08-07: /api/meetings now paginates (limit+offset) so older meetings

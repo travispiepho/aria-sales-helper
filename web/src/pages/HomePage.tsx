@@ -254,13 +254,22 @@ export default function HomePage() {
               finds it right next to the two "do it now" actions above,
               instead of buried behind the gear icon. Styled to match the
               "Call a Customer" secondary button above it. */}
-          <button
-            onClick={() => navigate('/schedule')}
-            disabled={starting}
-            className="w-full mt-2 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
-          >
-            🗓️ Schedule Ahead
-          </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+            <button
+              onClick={() => navigate('/schedule')}
+              disabled={starting}
+              className="min-h-11 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
+            >
+              🗓️ Schedule Ahead
+            </button>
+            <button
+              onClick={() => navigate('/recordings/analyze')}
+              disabled={starting}
+              className="min-h-11 bg-white border border-gray-200 hover:bg-gray-50 disabled:opacity-60 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
+            >
+              🎧 Analyze a Recording
+            </button>
+          </div>
         </div>
 
         {/* Today's Meetings */}

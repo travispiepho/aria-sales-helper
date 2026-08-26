@@ -13,6 +13,7 @@ import ScheduleCallPage from './pages/ScheduleCallPage';
 import ScheduleVisitPage from './pages/ScheduleVisitPage';
 import ObjectionsPage from './pages/ObjectionsPage';
 import SignupClaimPage from './pages/SignupClaimPage';
+import UploadedRecordingPage from './pages/UploadedRecordingPage';
 // 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
 // same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
 // live-testing it: "Instead of a popup, I would like an almost identical
@@ -129,6 +130,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <MeetingPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/recordings/analyze"
+            element={
+              <RequireAuth>
+                <UploadedRecordingPage />
               </RequireAuth>
             }
           />

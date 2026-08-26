@@ -57,6 +57,7 @@ import {
 } from './inPersonIntroductionLabels.js';
 import { createReconnectTracker } from './dgReconnectPolicy.js';
 import { createReadinessTracker } from './readinessTracker.js';
+import { registerUploadedRecordingRoutes, UPLOADED_RECORDING_CHANNEL } from './uploadedRecording.js';
 import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
 import {
   loadEnrolledVoicePrint,
@@ -3570,6 +3571,60 @@ async function authWebSocketWithSession(request) {
   const result = await pool.query('SELECT id, name, email, role FROM users WHERE id = $1', [session.userId]);
   return { user: result.rows[0] || null, sessionId };
 }
+
+// Uploaded-recording playback: the browser retains and plays the source file,
+// sending only decoded 16 kHz mono PCM at 1x pace. This route intentionally
+// bypasses mic consent, Twilio, voiceprint and in-person introduction logic.
+async function finalizeUploadedRecording(meetingId) {
+  const updated = await pool.query(
+    `UPDATE meetings SET status = 'completed', ended_at = COALESCE(ended_at, NOW())
+     WHERE id = $1 AND status = 'active' AND channel = $2 RETURNING id, rep_id`,
+    [meetingId, UPLOADED_RECORDING_CHANNEL]
+  );
+  if (updated.rows.length !== 1) throw new Error('Uploaded recording was already completed');
+
+  // Preserve the normal terminal analysis contract. Coaching snapshots are
+  // already generated live; summary generation below uses the same persisted
+  // transcript and prompt as POST /api/meetings/:id/summary, without storing
+  // source audio anywhere.
+  let summaryText = null;
+  const segments = await pool.query(
+    `SELECT speaker, text FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
+    [meetingId]
+  );
+  const transcriptText = segments.rows.length
+    ? segments.rows.map((segment) => `${segment.speaker}: ${segment.text}`).join('\n')
+    : '(No transcript recorded)';
+  if (!anthropic) {
+    summaryText = '⚠️ Summary generation requires ANTHROPIC_API_KEY or OPENROUTER_API_KEY. Please provision a key and try again.\n\n' +
+      `Transcript preview (first 500 chars):\n${transcriptText.slice(0, 500)}`;
+  } else {
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5', max_tokens: 1500,
+      system: `You are ARIA, a sales coach for CertaPro Painters field reps. Write a structured plain-text meeting summary with: MEETING OVERVIEW, SALES STAGE, CHECKLIST COVERAGE, WHAT WAS MISSED, and ACTION ITEMS.`,
+      messages: [{ role: 'user', content: `Meeting transcript:\n\n${transcriptText}` }],
+    });
+    summaryText = response.content?.[0]?.type === 'text' ? response.content[0].text : '(No summary generated)';
+  }
+  await pool.query('UPDATE meetings SET summary = $1 WHERE id = $2', [summaryText, meetingId]);
+  notifyUserSyncMeetingEnded(updated.rows[0].rep_id, meetingId);
+  if (process.env.ENABLE_AUTO_TITLE_GENERATION === 'true') {
+    generateAutoTitleForMeeting(meetingId).catch((error) => fastify.log.error(`uploaded recording auto-title failed: ${error.message}`));
+  }
+  return { summary: summaryText };
+}
+
+await registerUploadedRecordingRoutes(fastify, {
+  pool,
+  requireAuth,
+  authWebSocketWithSession,
+  apiKey: DEEPGRAM_API_KEY,
+  broadcastToMeeting,
+  registerMeetingSocket,
+  unregisterMeetingSocket,
+  runCoachingAnalysis,
+  finalizeMeeting: finalizeUploadedRecording,
+});
 
 // ── Live meeting sync (mobile → web), 2026-08-05 ── GET /api/sync (account-level) ─
 // A logged-in session opens this ONCE (e.g. on app/tab load, independent of

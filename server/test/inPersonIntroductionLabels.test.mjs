@@ -227,6 +227,9 @@ test('persistence transaction updates labels/evidence and all prior generic rows
   assert.equal(result.resolved, true);
   assert.equal(result.relabelledCount ?? result.relabeledCount, 3);
   assert.equal(result.speakerLabels['Speaker 2'], 'Sarah');
+  const meetingUpdate = pool.client.queries.find(q => q.sql.includes('UPDATE meetings'));
+  assert.match(meetingUpdate.sql, /jsonb_each_text/);
+  assert.match(meetingUpdate.sql, /lower\(existing\.value\) = lower\(\$1::text\)/);
   assert.deepEqual(pool.client.queries.map(q => q.sql === 'BEGIN' || q.sql === 'COMMIT' ? q.sql : q.sql.includes('UPDATE meetings') ? 'meeting' : 'segments'), [
     'BEGIN', 'meeting', 'segments', 'COMMIT',
   ]);

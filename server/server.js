@@ -2150,11 +2150,40 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
     // generated.)
     updates.push(`auto_titled = false`);
   }
+  let liveManualLabels = null;
   if (speaker_labels !== undefined) {
-    // Manual UI labels are authoritative. Persist them and, while a live
-    // in-person session exists, seed its lock state before later inference.
-    updates.push(`speaker_labels = $${idx++}`);
+    if (!speaker_labels || typeof speaker_labels !== 'object' || Array.isArray(speaker_labels)) {
+      return reply.code(400).send({ error: 'speaker_labels must be an object' });
+    }
+    // Merge rather than replace: introduction lock events cause clients to
+    // echo a PATCH, and concurrent echoes must not erase another proven key.
+    // A different value is a true manual override and clears that slot's
+    // introduction provenance; an identical echo preserves it.
+    updates.push(`speaker_labels = COALESCE(speaker_labels, '{}'::jsonb) || $${idx++}::jsonb`);
     values.push(JSON.stringify(speaker_labels));
+    liveManualLabels = {};
+    const evidenceKeysToClear = [];
+    for (const [speakerId, rawName] of Object.entries(speaker_labels)) {
+      const name = String(rawName || '').trim();
+      if (!name) continue;
+      const parsed = /^Speaker\s+(\d+)$/i.exec(speakerId);
+      const evidenceKey = parsed ? String(parseInt(parsed[1], 10) - 1) : null;
+      const isIntroductionEcho = Boolean(
+        evidenceKey !== null &&
+        meeting.speaker_label_evidence?.[evidenceKey]?.method === 'introduction' &&
+        meeting.speaker_labels?.[speakerId] === name
+      );
+      if (!isIntroductionEcho) {
+        liveManualLabels[speakerId] = name;
+        if (evidenceKey !== null && meeting.speaker_label_evidence?.[evidenceKey]) {
+          evidenceKeysToClear.push(evidenceKey);
+        }
+      }
+    }
+    if (evidenceKeysToClear.length > 0) {
+      updates.push(`speaker_label_evidence = COALESCE(speaker_label_evidence, '{}'::jsonb) - $${idx++}::text[]`);
+      values.push(evidenceKeysToClear);
+    }
   }
 
   if (updates.length === 0) {
@@ -2180,11 +2209,11 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   // Only seed the live manual lock after persistence succeeds. A failed
   // speaker-label PATCH must not leave an in-memory lock that survives for
   // the rest of the active meeting.
-  if (speaker_labels !== undefined) {
+  if (liveManualLabels) {
     const liveController = activeMeetingSpeakerControllers.get(id);
     if (liveController?.manualLock) {
-      for (const [speakerId, name] of Object.entries(speaker_labels || {})) {
-        if (String(name || '').trim()) liveController.manualLock(speakerId, String(name).trim());
+      for (const [speakerId, name] of Object.entries(liveManualLabels)) {
+        liveController.manualLock(speakerId, name);
       }
     }
   }

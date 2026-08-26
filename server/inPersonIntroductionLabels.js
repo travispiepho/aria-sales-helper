@@ -317,6 +317,11 @@ export async function persistIntroductionResolution({ pool, meetingId, speakerIn
            speaker_label_evidence = COALESCE(speaker_label_evidence, '{}'::jsonb) || jsonb_build_object($5::text, $2::jsonb)
        WHERE id = $3
          AND NOT (COALESCE(speaker_labels, '{}'::jsonb) ? $4)
+         AND NOT EXISTS (
+           SELECT 1
+           FROM jsonb_each_text(COALESCE(speaker_labels, '{}'::jsonb)) AS existing(label, value)
+           WHERE lower(existing.value) = lower($1::text)
+         )
        RETURNING speaker_labels, speaker_label_evidence`,
       [name, JSON.stringify(evidence), meetingId, speakerId, si],
     );

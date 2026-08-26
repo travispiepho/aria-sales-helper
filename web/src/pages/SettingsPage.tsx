@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { hasAdminAccess } from '../lib/roles';
+import AppHeader from '../components/AppHeader';
 
 // SettingsPage — 2026-08-10.
 //
@@ -35,18 +36,7 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      {/* Header */}
-      <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => navigate('/')}
-            className="text-brand-100 hover:text-white text-2xl leading-none p-1"
-          >
-            ←
-          </button>
-          <h1 className="text-2xl font-bold leading-tight">Settings</h1>
-        </div>
-      </div>
+      <AppHeader title="Settings" backTo="/" />
 
       <div className="px-4 py-6 max-w-lg mx-auto space-y-4">
 

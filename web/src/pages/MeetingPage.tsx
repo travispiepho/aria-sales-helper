@@ -17,6 +17,7 @@ import MeetingScoreCard from '../components/MeetingScoreCard';
 import CoachingReportCard from '../components/CoachingReportCard';
 import { getWsBase } from '../lib/wsBase';
 import { createReconnectTracker, ReconnectTracker } from '../lib/reconnectPolicy';
+import AppHeader from '../components/AppHeader';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1471,40 +1472,23 @@ export default function MeetingPage() {
         />
       )}
 
-      {/* Header */}
-      <div
-        className={`px-4 pt-4 pb-5 ${isRecording ? 'bg-red-700' : isSyncedFromMobile ? 'bg-indigo-700' : isActive ? 'bg-green-700' : 'bg-blue-700'} text-white`}
-        style={{ paddingTop: 'calc(1rem + env(safe-area-inset-top))' }}
-      >
-        <div className="flex items-center gap-3 mb-3">
-          <button
-            onClick={() => navigate('/')}
-            className="text-white/70 hover:text-white text-lg"
-          >
-            ←
-          </button>
-          <div className="flex-1 min-w-0">
-            <h1 className="font-bold text-lg truncate">
-              {meeting.customer_name || 'Meeting'}
-            </h1>
-            <p className="text-white/70 text-sm">
-              {isRecording
-                ? `Recording · ${formatElapsed(elapsedSec)}`
-                : isSyncedFromMobile
-                  ? `Synced from mobile · ${formatDuration(meeting.started_at)}`
-                  : isActive
-                    ? `Active · ${formatDuration(meeting.started_at)}`
-                    : `Completed · ${formatDuration(meeting.started_at, meeting.ended_at ?? undefined)}`}
-            </p>
-          </div>
-          {/* Connection status indicator — shared badge, works for either
-              socket (owner audio or observer) since both drive the same
-              connectionStatus state. */}
-          {isActive && (
-            <ConnectionBadge status={connectionStatus} isRecording={isRecording || isSyncedFromMobile} />
-          )}
-        </div>
-      </div>
+      <AppHeader
+        title={meeting.customer_name || 'Meeting'}
+        subtitle={
+          isRecording
+            ? `Recording · ${formatElapsed(elapsedSec)}`
+            : isSyncedFromMobile
+              ? `Synced from mobile · ${formatDuration(meeting.started_at)}`
+              : isActive
+                ? `Active · ${formatDuration(meeting.started_at)}`
+                : `Completed · ${formatDuration(meeting.started_at, meeting.ended_at ?? undefined)}`
+        }
+        backTo="/"
+        toneClassName={isRecording ? 'bg-red-700' : isSyncedFromMobile ? 'bg-indigo-700' : isActive ? 'bg-green-700' : 'bg-blue-700'}
+        status={isActive ? (
+          <ConnectionBadge status={connectionStatus} isRecording={isRecording || isSyncedFromMobile} />
+        ) : undefined}
+      />
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 pb-32">

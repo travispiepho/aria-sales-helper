@@ -1,0 +1,105 @@
+import React from 'react';
+import { Link, useLocation } from 'react-router-dom';
+import { useAuth } from '../lib/auth';
+
+interface AppHeaderProps {
+  title: string;
+  subtitle?: React.ReactNode;
+  backTo?: string;
+  onBack?: () => void;
+  backLabel?: string;
+  toneClassName?: string;
+  status?: React.ReactNode;
+}
+
+const navItemClass =
+  'w-11 h-11 rounded-full bg-white/10 border-2 border-white/25 hover:bg-white/20 flex items-center justify-center text-white transition-colors flex-shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-brand-700';
+
+export default function AppHeader({
+  title,
+  subtitle,
+  backTo,
+  onBack,
+  backLabel = 'Back to Home',
+  toneClassName = 'bg-brand-700',
+  status,
+}: AppHeaderProps) {
+  const { user } = useAuth();
+  const { pathname } = useLocation();
+  const current = (path: string) =>
+    path === '/objections' ? pathname.startsWith(path) : pathname === path;
+
+  const primary = (
+    <div className="flex min-w-0 flex-1 items-center gap-2 max-[480px]:w-full max-[480px]:flex-none">
+      {(backTo || onBack) && (
+        backTo ? (
+          <Link
+            to={backTo}
+            aria-label={backLabel}
+            className="w-11 h-11 rounded-full flex flex-shrink-0 items-center justify-center text-white/80 hover:bg-white/10 hover:text-white text-2xl leading-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            <span aria-hidden="true">←</span>
+          </Link>
+        ) : (
+          <button
+            type="button"
+            onClick={onBack}
+            aria-label={backLabel}
+            className="w-11 h-11 rounded-full flex flex-shrink-0 items-center justify-center text-white/80 hover:bg-white/10 hover:text-white text-2xl leading-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          >
+            <span aria-hidden="true">←</span>
+          </button>
+        )
+      )}
+      <div className="min-w-0 flex-1">
+        <h1 className="text-xl sm:text-2xl font-bold leading-tight truncate">{title}</h1>
+        {subtitle && <div className="text-white/75 text-sm leading-snug truncate">{subtitle}</div>}
+      </div>
+      {status && <div className="flex-shrink-0">{status}</div>}
+    </div>
+  );
+
+  return (
+    <header
+      data-app-header="compact"
+      data-compact-min-height="104px"
+      className={`${toneClassName} text-white px-4 py-2.5 min-h-[6.5rem] flex items-center transition-colors`}
+    >
+      <div className="w-full flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        {primary}
+        <nav
+          aria-label="Authenticated navigation"
+          className="ml-auto flex flex-shrink-0 items-center justify-center gap-2 max-[480px]:mx-auto max-[480px]:w-full"
+        >
+          <Link
+            to="/settings"
+            aria-label="Settings"
+            aria-current={current('/settings') ? 'page' : undefined}
+            className={`${navItemClass} ${current('/settings') ? 'ring-2 ring-white' : ''}`}
+          >
+            <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </Link>
+          <Link
+            to="/objections"
+            aria-label="Objections"
+            aria-current={current('/objections') ? 'page' : undefined}
+            className={`${navItemClass} ${current('/objections') ? 'ring-2 ring-white' : ''}`}
+          >
+            <span className="text-lg leading-none" aria-hidden="true">💬</span>
+          </Link>
+          <Link
+            to="/profile"
+            aria-label="Profile"
+            aria-current={current('/profile') ? 'page' : undefined}
+            className={`${navItemClass} font-bold text-base ${current('/profile') ? 'ring-2 ring-white' : ''}`}
+          >
+            {user?.name?.charAt(0)?.toUpperCase() || '?'}
+          </Link>
+        </nav>
+      </div>
+    </header>
+  );
+}

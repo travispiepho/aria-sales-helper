@@ -1,5 +1,6 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import AppHeader from '../components/AppHeader';
 
 // ScheduleCallPage — Phase 1 placeholder (2026-08-17).
 //
@@ -16,17 +17,7 @@ export default function ScheduleCallPage() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => navigate('/schedule')}
-            className="text-brand-100 hover:text-white text-2xl leading-none p-1"
-          >
-            ←
-          </button>
-          <h1 className="text-2xl font-bold leading-tight">Schedule a Call</h1>
-        </div>
-      </div>
+      <AppHeader title="Schedule a Call" backTo="/schedule" backLabel="Back to Schedule" />
 
       <div className="px-4 -mt-2 pb-24 max-w-lg mx-auto">
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 text-center">

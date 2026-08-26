@@ -13,6 +13,7 @@ import {
   updateRebuttal,
   deleteRebuttal,
 } from '../lib/api';
+import AppHeader from '../components/AppHeader';
 
 // ObjectionsPage — new "Objections" tab (2026-08-18), Troy Hacker's request
 // (tracked as "Rebuttal list to objections" in HighPriorityTodos). A
@@ -99,17 +100,11 @@ function ObjectionsList({ onOpen, onBack }: { onOpen: (id: string) => void; onBa
 
   return (
     <div className="min-h-screen bg-gray-100">
-      <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
-        <div className="flex items-center gap-4">
-          <button onClick={onBack} className="text-brand-100 hover:text-white text-2xl leading-none p-1">
-            ←
-          </button>
-          <h1 className="text-2xl font-bold leading-tight">Objections</h1>
-        </div>
-        <p className="text-brand-100 text-sm mt-2">
-          Browse common customer objections and the rebuttals that work.
-        </p>
-      </div>
+      <AppHeader
+        title="Objections"
+        subtitle="Browse common customer objections and the rebuttals that work."
+        onBack={onBack}
+      />
 
       <div className="px-4 -mt-2 pb-24 max-w-lg mx-auto">
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 mb-4">
@@ -334,14 +329,7 @@ function ObjectionDetail({ id, onBack }: { id: string; onBack: () => void }) {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
-        <div className="flex items-center gap-4">
-          <button onClick={onBack} className="text-brand-100 hover:text-white text-2xl leading-none p-1">
-            ←
-          </button>
-          <h1 className="text-2xl font-bold leading-tight">Objection</h1>
-        </div>
-      </div>
+      <AppHeader title="Objection" onBack={onBack} backLabel="Back to Objections" />
 
       <div className="px-4 -mt-2 pb-24 max-w-lg mx-auto">
         {loading ? (

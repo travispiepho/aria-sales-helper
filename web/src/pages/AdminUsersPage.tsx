@@ -13,6 +13,7 @@ import {
   InviteRole,
 } from '../lib/api';
 import { hasAdminAccess, isOwner, roleLabel } from '../lib/roles';
+import AppHeader from '../components/AppHeader';
 
 // AdminUsersPage — 2026-08-10, invite claim codes added 2026-08-18.
 //
@@ -264,17 +265,7 @@ export default function AdminUsersPage() {
   if (!loading && !hasAdminAccess(user?.role)) {
     return (
       <div className="min-h-screen bg-gray-100">
-        <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => navigate('/')}
-              className="text-brand-100 hover:text-white text-2xl leading-none p-1"
-            >
-              ←
-            </button>
-            <h1 className="text-2xl font-bold leading-tight">Admin — Users</h1>
-          </div>
-        </div>
+        <AppHeader title="Admin — Users" backTo="/" />
         <div className="px-4 py-6 max-w-lg mx-auto">
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 text-center">
             <p className="text-4xl mb-2">🔒</p>
@@ -293,17 +284,7 @@ export default function AdminUsersPage() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => navigate('/')}
-            className="text-brand-100 hover:text-white text-2xl leading-none p-1"
-          >
-            ←
-          </button>
-          <h1 className="text-2xl font-bold leading-tight">Admin — Users</h1>
-        </div>
-      </div>
+      <AppHeader title="Admin — Users" backTo="/" />
 
       <div className="px-4 py-6 max-w-lg mx-auto space-y-4">
         {/* Invite a new user — 2026-08-10, claim codes added 2026-08-18.

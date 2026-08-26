@@ -11,7 +11,8 @@ const ROLE_OR_COMPANY = new Set([
   'representative', 'rep', 'customer', 'client', 'homeowner', 'owner',
   'manager', 'estimator', 'contractor', 'company', 'team', 'office',
 ]);
-const ACKNOWLEDGEMENT_RE = /^(?:hi|hello|hey|yes|yeah|yep|correct|right|that'?s me|nice to meet you|pleasure)(?:\b|[.!?,])/iu;
+const EXPLICIT_SELF_CONFIRMATION_RE = /^(?:yes[,!]?\s+|yeah[,!]?\s+|yep[,!]?\s+)?(?:i(?:'|’)?m|i am|my name is)\s+/iu;
+const ADJACENT_IDENTITY_ACK_RE = /^(?:yes|yeah|yep|correct|right)[,!]?\s+(?:that(?:'|’)?s me|that is me)\b|^(?:that(?:'|’)?s me|that is me)\b/iu;
 
 function normalizeName(value) {
   return String(value || '')
@@ -41,6 +42,10 @@ function validatedName(raw) {
   return /^[\p{L}\p{M}][\p{L}\p{M}'’\-]{1,39}$/u.test(String(raw)) ? displayName(raw) : null;
 }
 
+export function isEligibleInPersonMeeting(meeting) {
+  return meeting?.channel === 'in_person' && !meeting?.call_sid;
+}
+
 function accountMatchesSpokenName(accountName, spokenName) {
   if (!accountName) return true;
   const spoken = normalizeName(spokenName);
@@ -59,14 +64,17 @@ export function parseTwoPersonIntroduction(text) {
   if (!input || input.length > 300) return null;
 
   const selfPrefix = String.raw`(?:^|[.!?]\s+|\bhi[,!]?\s+|\bhello[,!]?\s+)(?:i(?:'|’)?m|i am|my name is)\s+${NAME_CAPTURE}`;
+  // Context-only company clause: bounded to at most three list-free tokens.
+  // Neither these words nor a role can ever become the person's label.
+  const companyClause = String.raw`(?:\s+with\s+[\p{L}\p{M}&'’.-]{2,30})?`;
   const patterns = [
     {
       id: 'this_is',
-      re: new RegExp(String.raw`${selfPrefix}(?:\s+with\s+[^,;.!?]{1,50})?\s*[,;]?\s*(?:and\s+)?this\s+is\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu'),
+      re: new RegExp(String.raw`${selfPrefix}${companyClause}\s*[,;]?\s*(?:and\s+)?this\s+is\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu'),
     },
     {
       id: 'you_are_right',
-      re: new RegExp(String.raw`${selfPrefix}(?:\s+with\s+[^,;.!?]{1,50})?\s*[,;]?\s*(?:and\s+)?you(?:'|’)?re\s+${NAME_CAPTURE}\s*,?\s*right\s*\??(?=$|\s)`, 'iu'),
+      re: new RegExp(String.raw`${selfPrefix}${companyClause}\s*[,;]?\s*(?:and\s+)?you(?:'|’)?re\s+${NAME_CAPTURE}\s*,?\s*right\s*\??(?=$|\s)`, 'iu'),
     },
     {
       id: 'here_with',
@@ -81,9 +89,10 @@ export function parseTwoPersonIntroduction(text) {
     const customerName = validatedName(match[2]);
     if (!selfName || !customerName || normalizeName(selfName) === normalizeName(customerName)) return null;
 
-    // A trailing conjunction/list means this is not safely a two-person intro.
+    // Any substantive tail means the utterance may discuss or introduce more
+    // than these two people. Trailing punctuation alone is harmless.
     const tail = input.slice((match.index || 0) + match[0].length);
-    if (/^\s*(?:,?\s*and|&)\s+/iu.test(tail)) return null;
+    if (tail.replace(/[\s,.!?;:]+/gu, '')) return null;
 
     return {
       selfName,
@@ -140,13 +149,9 @@ export function createInPersonIntroductionLabeler({
       confidence,
       transcript_segment_id: segment.id || null,
       transcript_ts: segment.ts || new Date(now()).toISOString(),
-      transcript_text: intro.evidenceText,
       pattern: intro.pattern,
-      spoken_self_name: intro.selfName,
-      spoken_customer_name: intro.customerName,
       context_segment_id: contextSegment?.id || null,
       context_ts: contextSegment?.ts || null,
-      context_text: contextSegment?.text || null,
     };
     // Mark locally before awaiting persistence so concurrent Deepgram message
     // handlers cannot resolve this slot twice. Roll back only if persistence
@@ -227,13 +232,21 @@ export function createInPersonIntroductionLabeler({
       pending.candidateConfirmedIdentity = false;
     }
     pending.candidateTurns += 1;
-    const candidateText = String(segment.text || '').trim();
-    const strongAdjacentResponse = segmentOrdinal === pending.introOrdinal + 1 && ACKNOWLEDGEMENT_RE.test(candidateText);
-    const saysCustomerName = normalizeName(candidateText).split(/\s+/u).includes(normalizeName(pending.intro.customerName));
-    pending.candidateConfirmedIdentity ||= strongAdjacentResponse || saysCustomerName;
-    // Always require a second turn from the same canonical slot plus at least
-    // one identity-confirming response/name use. Two arbitrary turns could be
-    // a temporary Deepgram split of the rep; adjacency alone is not enough.
+    const candidateText = String(segment.text || '').normalize('NFKC').trim();
+    const explicitSelf = EXPLICIT_SELF_CONFIRMATION_RE.test(candidateText);
+    const selfMatch = explicitSelf
+      ? new RegExp(String.raw`^(?:yes[,!]?\s+|yeah[,!]?\s+|yep[,!]?\s+)?(?:i(?:'|’)?m|i am|my name is)\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu').exec(candidateText)
+      : null;
+    const explicitName = selfMatch ? validatedName(selfMatch[1]) : null;
+    const explicitlyMatchesCustomer = Boolean(
+      explicitName && normalizeName(explicitName) === normalizeName(pending.intro.customerName)
+    );
+    const adjacentIdentityAck = segmentOrdinal === pending.introOrdinal + 1 && ADJACENT_IDENTITY_ACK_RE.test(candidateText);
+    pending.candidateConfirmedIdentity ||= explicitlyMatchesCustomer || adjacentIdentityAck;
+    // Two turns from one canonical slot are necessary but not sufficient:
+    // Deepgram can split the rep into a fresh raw index. Require the candidate
+    // to affirm the introduced identity too, so two ordinary rep turns cannot
+    // accidentally become the customer.
     if (pending.candidateTurns < 2 || !pending.candidateConfirmedIdentity) return { pendingCustomer: true };
 
     // If this slot already carries any authoritative/manual identity, do not
@@ -249,7 +262,7 @@ export function createInPersonIntroductionLabeler({
       'customer',
       pending.intro,
       pending.introSegment,
-      strongAdjacentResponse ? pending.intro.confidence : pending.intro.confidence - 0.08,
+      pending.intro.confidence,
       segment,
     );
     pending = null;
@@ -332,4 +345,9 @@ export async function persistIntroductionResolution({ pool, meetingId, speakerIn
   }
 }
 
-export const _internals = { normalizeName, accountMatchesSpokenName, ACKNOWLEDGEMENT_RE };
+export const _internals = {
+  normalizeName,
+  accountMatchesSpokenName,
+  EXPLICIT_SELF_CONFIRMATION_RE,
+  ADJACENT_IDENTITY_ACK_RE,
+};

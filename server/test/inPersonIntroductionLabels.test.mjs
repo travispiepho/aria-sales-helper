@@ -4,6 +4,7 @@ import {
   parseTwoPersonIntroduction,
   createInPersonIntroductionLabeler,
   persistIntroductionResolution,
+  isEligibleInPersonMeeting,
   INTRODUCTION_WINDOW_MS,
 } from '../inPersonIntroductionLabels.js';
 
@@ -34,6 +35,9 @@ const negatives = [
   "I'm Gabe, and you're ready, right?",
   "Yesterday I said I'm Gabe and this is Sarah",
   "I'm Gabe and I'm here with the homeowner.",
+  "I'm Gabe with Acme Sales Team, and this is Sarah.",
+  "I'm Gabe, and this is Sarah. John will join us later.",
+  "I'm Gabe, and this is Sarah from Acme.",
 ];
 for (const phrase of negatives) {
   test(`parser rejects: ${phrase}`, () => assert.equal(parseTwoPersonIntroduction(phrase), null));
@@ -71,25 +75,26 @@ test('fixture resolves authenticated rep and adjacent responding customer, with 
   assert.equal(first.rep.resolved, true);
   assert.equal(first.pendingCustomer, true);
   f.tick(800);
-  assert.equal((await f.segment(7, 'Hi, nice to meet you.')).pendingCustomer, true);
+  assert.equal((await f.segment(7, "Yes, I'm Sarah.")).pendingCustomer, true);
   f.tick(300);
-  const second = await f.segment(7, 'Yes, Sarah.');
+  const second = await f.segment(7, 'Nice to meet you.');
   assert.equal(second.customer.resolved, true);
   assert.deepEqual(f.calls.map(({ speakerIndex, name, role }) => ({ speakerIndex, name, role })), [
     { speakerIndex: 2, name: 'Gabriel “Gabe” Bass', role: 'rep' },
     { speakerIndex: 7, name: 'Sarah', role: 'customer' },
   ]);
   assert.equal(f.calls[0].evidence.transcript_segment_id, 'intro-1');
-  assert.equal(f.calls[0].evidence.transcript_text, "Hi, I'm Gabe, and this is Sarah.");
+  assert.equal(f.calls[0].evidence.transcript_text, undefined);
+  assert.equal(f.calls[0].evidence.spoken_customer_name, undefined);
 });
 
 test('delayed customer needs two turns when first response is not an acknowledgement', async () => {
   const f = fixture();
   await f.segment(0, "I'm Gabe and I'm here with Sarah.");
   f.tick(5000);
-  assert.equal((await f.segment(4, 'The living room is over here.')).pendingCustomer, true);
+  assert.equal((await f.segment(4, "Yes, I'm Sarah.")).pendingCustomer, true);
   f.tick(1000);
-  assert.equal((await f.segment(4, 'Yes, Sarah — we also want the trim painted.')).customer.resolved, true);
+  assert.equal((await f.segment(4, 'We also want the trim painted.')).customer.resolved, true);
   assert.equal(f.calls.at(-1).speakerIndex, 4);
 });
 
@@ -148,8 +153,15 @@ test('same introduction is idempotent', async () => {
   assert.equal(f.calls.filter(c => c.role === 'rep').length, 1);
 });
 
-test('browser and phone meeting types are hard-disabled', async () => {
-  for (const meetingType of ['browser', 'phone']) {
+test('hard meeting eligibility requires in_person and no telephony CallSid', () => {
+  assert.equal(isEligibleInPersonMeeting({ channel: 'in_person', call_sid: null }), true);
+  assert.equal(isEligibleInPersonMeeting({ channel: 'in_person', call_sid: 'CAlegacy' }), false);
+  assert.equal(isEligibleInPersonMeeting({ channel: 'phone', call_sid: null }), false);
+  assert.equal(isEligibleInPersonMeeting({}), false);
+});
+
+test('browser, phone, rep-phone and excluded meeting types are hard-disabled', async () => {
+  for (const meetingType of ['browser', 'phone', 'rep_phone', 'excluded', undefined]) {
     const calls = [];
     const labeler = createInPersonIntroductionLabeler({
       meetingType,
@@ -210,7 +222,7 @@ test('persistence transaction updates labels/evidence and all prior generic rows
     meetingId: 'fixture-meeting',
     speakerIndex: 1,
     name: 'Sarah',
-    evidence: { method: 'introduction', transcript_segment_id: 'seg-1', transcript_text: "I'm Gabe, and this is Sarah." },
+    evidence: { method: 'introduction', transcript_segment_id: 'seg-1' },
   });
   assert.equal(result.resolved, true);
   assert.equal(result.relabelledCount ?? result.relabeledCount, 3);

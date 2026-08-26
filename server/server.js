@@ -50,7 +50,11 @@ import {
 // ("Hi, I'm John"). Replaces the old hand-picked STOPWORDS blocklist — see
 // nameHeuristics.js header for why (dictionary signal, not capitalization).
 import { isLikelyName, toDisplayName } from './nameHeuristics.js';
-import { createInPersonIntroductionLabeler, persistIntroductionResolution } from './inPersonIntroductionLabels.js';
+import {
+  createInPersonIntroductionLabeler,
+  isEligibleInPersonMeeting,
+  persistIntroductionResolution,
+} from './inPersonIntroductionLabels.js';
 import { createReconnectTracker } from './dgReconnectPolicy.js';
 import { createReadinessTracker } from './readinessTracker.js';
 import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
@@ -312,9 +316,8 @@ function broadcastToMeeting(meetingId, payload) {
 // existed) is never treated as "someone else's" meeting.
 function shapeMeetingForClient(meetingRow, requestSessionId) {
   if (!meetingRow) return meetingRow;
-  // Keep introduction evidence server-side for audit/debug. It contains an
-  // exact transcript excerpt and must not ride every general meeting-detail
-  // response when the UI only needs the resolved labels.
+  // Keep introduction evidence server-side for audit/debug. The UI only
+  // needs resolved labels, not internal provenance identifiers.
   const { owner_session_id, speaker_label_evidence: _speakerLabelEvidence, ...rest } = meetingRow;
   return {
     ...rest,
@@ -635,9 +638,9 @@ async function ensureSessionsTable() {
   await pool.query(`
     ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speaker_labels JSONB DEFAULT '{}'
   `);
-  // Introduction-derived identities + exact transcript evidence. This is
-  // metadata only: evidence points at the already-persisted transcript row;
-  // no duplicate audio or recording is created.
+  // Introduction-derived identity provenance. Metadata points at already-
+  // persisted transcript rows; it stores no transcript copy or duplicate
+  // audio/recording.
   await pool.query(`
     ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speaker_label_evidence JSONB NOT NULL DEFAULT '{}'
   `);
@@ -3814,12 +3817,12 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   let voiceMatchDone = false;
 
   const persistedIntroEvidence = meeting.speaker_label_evidence || {};
-  // `channel=phone` covers both rep-phone and browser/Twilio meetings. Keep
-  // all introduction heuristics (including the historical suggestion flow)
-  // behind this one explicit guard.
-  const isInPersonIntroductionMeeting = meeting.channel === 'in_person';
+  // `channel=phone` covers both rep-phone and browser/Twilio meetings. The
+  // CallSid exclusion is defense in depth against a malformed/legacy row.
+  // Keep all introduction heuristics behind this one explicit guard.
+  const isInPersonIntroductionMeeting = isEligibleInPersonMeeting(meeting);
   const introductionLabeler = createInPersonIntroductionLabeler({
-    meetingType: isInPersonIntroductionMeeting ? 'in_person' : meeting.channel,
+    meetingType: isInPersonIntroductionMeeting ? 'in_person' : 'excluded',
     repDisplayName: repName,
     startedAtMs: new Date(meeting.started_at || Date.now()).getTime(),
     existingLocks: Object.fromEntries(

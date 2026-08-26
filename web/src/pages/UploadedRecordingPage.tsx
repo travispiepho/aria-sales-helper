@@ -39,6 +39,7 @@ export default function UploadedRecordingPage() {
   const transportRef = useRef<UploadedRecordingTransport | null>(null);
   const finalizePromiseRef = useRef<Promise<void> | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const active = state === 'preparing' || state === 'playing' || state === 'paused' || state === 'stopping';
 
@@ -48,7 +49,7 @@ export default function UploadedRecordingPage() {
 
   const cleanupResources = useCallback(async (sendEnd = true) => {
     if (sendEnd) transportRef.current?.end();
-    else transportRef.current?.close();
+    transportRef.current?.close();
     transportRef.current = null;
     const player = playerRef.current;
     playerRef.current = null;
@@ -110,7 +111,14 @@ export default function UploadedRecordingPage() {
     const id = meetingIdRef.current;
     const task = (async () => {
       setState('stopping');
-      await cleanupResources(true);
+      const transport = transportRef.current;
+      const player = playerRef.current;
+      playerRef.current = null;
+      if (player) await Promise.resolve(player.stop()).catch(() => {});
+      if (!transport || !transport.end()) throw new Error('ARIA playback connection is not available.');
+      await transport.waitForCompletion();
+      transport.close();
+      transportRef.current = null;
       if (!id) {
         setState('complete');
         return;
@@ -149,12 +157,17 @@ export default function UploadedRecordingPage() {
     setProgress(0);
     setState('preparing');
     finalizePromiseRef.current = null;
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current.currentTime = 0;
+      previewAudioRef.current.playbackRate = PLAYBACK_RATE;
+    }
 
     try {
-      const meeting = await createUploadedRecordingMeeting();
+      const meeting = await createUploadedRecordingMeeting(duration);
       setMeetingId(meeting.id);
       meetingIdRef.current = meeting.id;
-      const transport = new UploadedRecordingTransport(meeting.id);
+      const transport = new UploadedRecordingTransport(meeting.id, meeting.upload_ws_path);
       transportRef.current = transport;
       await transport.connect(applyLiveMessage);
 
@@ -162,9 +175,7 @@ export default function UploadedRecordingPage() {
       playerRef.current = player;
       await player.load(file!);
       transport.start({
-        durationMs: Math.round(player.durationSeconds * 1000),
-        fileName: file!.name,
-        mimeType: file!.type,
+        durationSeconds: player.durationSeconds,
       });
       await player.play({
         onPcm: pcm => transport.sendPcm(pcm),
@@ -173,7 +184,7 @@ export default function UploadedRecordingPage() {
       });
       setState('playing');
     } catch (cause) {
-      await cleanupResources(true);
+      await cleanupResources(false);
       setError(cause instanceof Error ? cause.message : 'Could not start recording analysis.');
       setState('error');
     }
@@ -229,8 +240,9 @@ export default function UploadedRecordingPage() {
                 <div><dt className="text-gray-500">Type</dt><dd className="font-medium text-gray-900">{file.type || 'Unknown'}</dd></div>
               </dl>
               <audio
+                ref={previewAudioRef}
                 aria-label="Selected recording playback"
-                controls
+                controls={!active}
                 controlsList="nodownload noplaybackrate"
                 src={objectUrl}
                 preload="metadata"

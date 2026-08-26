@@ -653,6 +653,22 @@ async function ensureSessionsTable() {
   await pool.query(`
     ALTER TABLE meetings ADD COLUMN IF NOT EXISTS title TEXT
   `);
+  // Uploaded-recording analysis reuses meetings.channel as an explicit type.
+  // This repository has no production migration runner; ensureSessionsTable()
+  // is the deploy-time schema gate, so mirror the additive SQL migration here.
+  // No audio/blob column is added: the source recording remains in the browser.
+  await pool.query(`
+    ALTER TABLE meetings
+      ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'in_person'
+  `);
+  await pool.query(`
+    ALTER TABLE meetings DROP CONSTRAINT IF EXISTS meetings_channel_check
+  `);
+  await pool.query(`
+    ALTER TABLE meetings
+      ADD CONSTRAINT meetings_channel_check
+      CHECK (channel IN ('phone', 'in_person', 'uploaded_recording'))
+  `);
   // Word cadence / sequencing analytics (added 2026-08-02)
   await pool.query(`
     ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS word_count INTEGER

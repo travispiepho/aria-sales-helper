@@ -184,6 +184,7 @@ test('creation is authenticated and emits explicit uploaded_recording type witho
   assert.equal(response.json().upload_protocol.playbackRate, 1);
   assert.ok(built.pool.sqlLog.every((sql) => !/audio|recording_(?:data|blob|path|url)|s3/i.test(sql.replaceAll('uploaded-recording', '').replaceAll('uploaded_recordings', ''))));
   assert.deepEqual(Object.keys(built.pool.meetings[0]).filter((key) => /audio|file|blob|path|url/i.test(key)), []);
+  assert.equal(Object.hasOwn(response.json(), 'owner_session_id'), false);
   await built.app.close();
 });
 

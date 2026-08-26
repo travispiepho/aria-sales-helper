@@ -284,9 +284,25 @@ export async function createMeeting(customerId?: string): Promise<Meeting> {
   return request('POST', '/api/meetings', { customer_id: customerId });
 }
 
-/** Creates a meeting whose source is a local uploaded recording. */
-export async function createUploadedRecordingMeeting(): Promise<Meeting> {
-  return request('POST', '/api/meetings', { channel: 'uploaded_recording' });
+export interface UploadedRecordingMeeting extends Meeting {
+  channel: 'uploaded_recording';
+  meeting_type: 'uploaded_recording';
+  upload_ws_path: string;
+  upload_protocol: {
+    encoding: 'pcm_s16le';
+    sampleRate: 16000;
+    channels: 1;
+    playbackRate: 1;
+    maxChunkBytes: number;
+  };
+}
+
+/** Creates an owner/session-bound meeting for a browser-local recording. */
+export async function createUploadedRecordingMeeting(durationSeconds: number, customerId?: string): Promise<UploadedRecordingMeeting> {
+  return request('POST', '/api/uploaded-recordings', {
+    durationSeconds,
+    customer_id: customerId,
+  });
 }
 
 // 2026-08-07: /api/meetings now paginates (limit+offset) so older meetings

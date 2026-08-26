@@ -7,7 +7,7 @@ import { getWsBase } from './wsBase';
  */
 export const UPLOADED_RECORDING_CONTRACT = {
   meetingChannel: 'uploaded_recording' as const,
-  websocketPath: (meetingId: string) => `/meetings/${meetingId}/recording-playback`,
+  websocketPath: (meetingId: string) => `/meetings/${meetingId}/uploaded-recording`,
   messageTypes: {
     start: 'start',
     pause: 'pause',
@@ -20,21 +20,21 @@ export const TARGET_PCM_SAMPLE_RATE = 16_000;
 export const PLAYBACK_RATE = 1;
 
 export interface RecordingMetadata {
-  durationMs: number;
-  fileName: string;
-  mimeType: string;
+  durationSeconds: number;
 }
 
-export function uploadedRecordingWsUrl(meetingId: string): string {
-  return `${getWsBase()}${UPLOADED_RECORDING_CONTRACT.websocketPath(meetingId)}`;
+export function uploadedRecordingWsUrl(meetingId: string, serverPath?: string): string {
+  return `${getWsBase()}${serverPath || UPLOADED_RECORDING_CONTRACT.websocketPath(meetingId)}`;
 }
 
 export function startMessage(metadata: RecordingMetadata) {
   return {
     type: UPLOADED_RECORDING_CONTRACT.messageTypes.start,
-    duration_ms: metadata.durationMs,
-    file_name: metadata.fileName,
-    mime_type: metadata.mimeType,
+    encoding: 'pcm_s16le',
+    sampleRate: TARGET_PCM_SAMPLE_RATE,
+    channels: 1,
+    playbackRate: PLAYBACK_RATE,
+    durationSeconds: metadata.durationSeconds,
   };
 }
 
@@ -97,20 +97,31 @@ type SocketFactory = (url: string) => SocketLike;
 export class UploadedRecordingTransport {
   private socket: SocketLike | null = null;
   private ended = false;
+  private completion: unknown | null = null;
+  private completionError: Error | null = null;
+  private completionWaiters: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
 
   constructor(
     private readonly meetingId: string,
+    private readonly serverPath?: string,
     private readonly socketFactory: SocketFactory = url => new WebSocket(url),
   ) {}
 
   async connect(onMessage: (message: unknown) => void): Promise<void> {
     if (this.socket) throw new Error('Playback connection already created');
-    const socket = this.socketFactory(uploadedRecordingWsUrl(this.meetingId));
+    const socket = this.socketFactory(uploadedRecordingWsUrl(this.meetingId, this.serverPath));
     this.socket = socket;
     socket.binaryType = 'arraybuffer';
     socket.onmessage = event => {
       if (typeof event.data !== 'string') return;
-      try { onMessage(JSON.parse(event.data)); } catch { /* ignore malformed server frames */ }
+      try {
+        const message = JSON.parse(event.data);
+        if (message?.type === 'completed') {
+          this.completion = message;
+          for (const waiter of this.completionWaiters.splice(0)) waiter.resolve(message);
+        }
+        onMessage(message);
+      } catch { /* ignore malformed server frames */ }
     };
 
     await new Promise<void>((resolve, reject) => {
@@ -120,7 +131,12 @@ export class UploadedRecordingTransport {
         if (!settled) reject(new Error('Could not connect to ARIA. Check your connection and retry.'));
       };
       socket.onclose = () => {
-        if (!settled) reject(new Error('ARIA closed the connection before playback started. Retry.'));
+        const error = new Error('ARIA closed the connection before analysis completed. Retry.');
+        if (!settled) reject(error);
+        if (!this.completion) {
+          this.completionError = error;
+          for (const waiter of this.completionWaiters.splice(0)) waiter.reject(error);
+        }
       };
     });
   }
@@ -141,13 +157,29 @@ export class UploadedRecordingTransport {
     if (this.ended) return false;
     this.ended = true;
     if (this.isOpen()) this.socket!.send(JSON.stringify({ type: UPLOADED_RECORDING_CONTRACT.messageTypes.end }));
-    this.socket?.close(1000, 'playback complete');
     return true;
   }
 
+  waitForCompletion(timeoutMs = 60_000): Promise<unknown> {
+    if (this.completion) return Promise.resolve(this.completion);
+    if (this.completionError) return Promise.reject(this.completionError);
+    return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const waiter = {
+        resolve: (value: unknown) => { clearTimeout(timer); resolve(value); },
+        reject: (error: Error) => { clearTimeout(timer); reject(error); },
+      };
+      this.completionWaiters.push(waiter);
+      timer = setTimeout(() => {
+        const index = this.completionWaiters.indexOf(waiter);
+        if (index >= 0) this.completionWaiters.splice(index, 1);
+        reject(new Error('ARIA is still finalizing this recording. Open the meeting from History in a moment.'));
+      }, timeoutMs);
+    });
+  }
+
   close(): void {
-    if (!this.ended) this.end();
-    else this.socket?.close(1000, 'cleanup');
+    this.socket?.close(1000, 'cleanup');
     this.socket = null;
   }
 
@@ -292,6 +324,7 @@ export function validateRecordingFile(file: File | null): string | null {
   if (!file) return 'Choose an audio recording first.';
   if (!file.type.toLowerCase().startsWith('audio/')) return 'Choose a supported audio file.';
   if (file.size <= 0) return 'The selected file is empty.';
+  if (file.size > 250 * 1024 * 1024) return 'Choose an audio file smaller than 250 MB.';
   return null;
 }
 

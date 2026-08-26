@@ -177,7 +177,12 @@ export async function registerUploadedRecordingRoutes(fastify, {
     );
     const meeting = result.rows[0];
     return reply.code(201).send({
-      ...meeting,
+      id: meeting.id,
+      customer_id: meeting.customer_id,
+      rep_id: meeting.rep_id,
+      status: meeting.status,
+      started_at: meeting.started_at,
+      origin_client: meeting.origin_client,
       channel: UPLOADED_RECORDING_CHANNEL,
       meeting_type: UPLOADED_RECORDING_CHANNEL,
       upload_ws_path: `/meetings/${meeting.id}/uploaded-recording`,
@@ -218,6 +223,7 @@ export async function registerUploadedRecordingRoutes(fastify, {
     let transcription = null;
     let persistQueue = Promise.resolve();
     let finalSegmentCount = 0;
+    let coachingInFlight = null;
 
     registerMeetingSocket(meetingId, socket);
 
@@ -242,9 +248,19 @@ export async function registerUploadedRecordingRoutes(fastify, {
           type: 'final', id: inserted.rows[0]?.id, ts: inserted.rows[0]?.ts,
           text: result.text, speaker,
         });
-        if (finalSegmentCount >= 3) {
-          const coaching = await runCoachingAnalysis(meetingId);
-          if (coaching) broadcastToMeeting(meetingId, { type: 'coaching', data: coaching });
+        // Keep transcript persistence real-time. Coaching is intentionally
+        // non-blocking and capped at one request at a time; otherwise a long
+        // recording could queue one paid model call per utterance and delay
+        // terminal finalization behind the entire call chain.
+        if (finalSegmentCount >= 3 && finalSegmentCount % 3 === 0 && !coachingInFlight) {
+          coachingInFlight = Promise.resolve(runCoachingAnalysis(meetingId))
+            .then((coaching) => {
+              if (coaching) broadcastToMeeting(meetingId, { type: 'coaching', data: coaching });
+            })
+            .catch((error) => {
+              fastify.log.error(`uploaded recording coaching failed: ${error.message}`);
+            })
+            .finally(() => { coachingInFlight = null; });
         }
       }).catch((error) => {
         fastify.log.error(`uploaded recording transcript persistence failed: ${error.message}`);
@@ -276,6 +292,7 @@ export async function registerUploadedRecordingRoutes(fastify, {
         timer.unref?.();
       });
       await persistQueue;
+      if (coachingInFlight) await coachingInFlight;
       const completion = await finalizeMeeting(meetingId);
       broadcastToMeeting(meetingId, { type: 'meeting_ended', meetingId, status: 'completed' });
       safeSend(socket, { type: 'completed', meetingId, summary: completion?.summary ?? null });

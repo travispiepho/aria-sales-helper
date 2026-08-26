@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
   getMeeting: vi.fn(),
   getSegments: vi.fn(),
   load: vi.fn(), play: vi.fn(), pause: vi.fn(), resume: vi.fn(), stop: vi.fn(),
-  connect: vi.fn(), start: vi.fn(), sendPcm: vi.fn(), transportPause: vi.fn(), transportResume: vi.fn(), end: vi.fn(), close: vi.fn(),
+  connect: vi.fn(), start: vi.fn(), sendPcm: vi.fn(), transportPause: vi.fn(), transportResume: vi.fn(), end: vi.fn(), waitForCompletion: vi.fn(), close: vi.fn(),
 }));
 
 vi.mock('../lib/auth', () => ({ useAuth: () => ({ user: { id: 'rep-1', name: 'Rep' } }) }));
@@ -37,6 +37,7 @@ vi.mock('../lib/uploadedRecording', async importOriginal => {
     pause = mocks.transportPause;
     resume = mocks.transportResume;
     end = mocks.end;
+    waitForCompletion = mocks.waitForCompletion;
     close = mocks.close;
   }
   return { ...actual, LocalRecordingPlayer: Player, UploadedRecordingTransport: Transport };
@@ -62,7 +63,8 @@ async function selectAudio() {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn(() => 'blob:local-only'), revokeObjectURL: vi.fn() });
-  mocks.createMeeting.mockResolvedValue({ id: 'meeting-upload-1' });
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+  mocks.createMeeting.mockResolvedValue({ id: 'meeting-upload-1', upload_ws_path: '/meetings/meeting-upload-1/uploaded-recording' });
   mocks.connect.mockResolvedValue(undefined);
   mocks.load.mockResolvedValue(undefined);
   mocks.stop.mockResolvedValue(undefined);
@@ -70,6 +72,7 @@ beforeEach(() => {
   mocks.resume.mockResolvedValue(undefined);
   mocks.play.mockResolvedValue(undefined);
   mocks.end.mockReturnValue(true);
+  mocks.waitForCompletion.mockResolvedValue({ type: 'completed' });
   mocks.getMeeting.mockResolvedValue({ id: 'meeting-upload-1', status: 'completed' });
   mocks.getSegments.mockResolvedValue({ segments: [] });
 });
@@ -94,8 +97,8 @@ describe('UploadedRecordingPage', () => {
     await selectAudio();
     await userEvent.click(screen.getByRole('checkbox'));
     await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
-    await waitFor(() => expect(mocks.start).toHaveBeenCalledWith({ durationMs: 12000, fileName: 'customer-call.wav', mimeType: 'audio/wav' }));
-    expect(mocks.createMeeting).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledWith({ durationSeconds: 12 }));
+    expect(mocks.createMeeting).toHaveBeenCalledWith(12);
     expect(screen.getByText(/Seeking and playback-speed changes are locked/)).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: /Pause/ }));
     expect(mocks.pause).toHaveBeenCalled();

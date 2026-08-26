@@ -29,8 +29,9 @@ describe('uploaded recording helpers', () => {
   });
 
   it('creates the isolated start contract without source bytes', () => {
-    expect(startMessage({ durationMs: 3200, fileName: 'call.wav', mimeType: 'audio/wav' })).toEqual({
-      type: 'start', duration_ms: 3200, file_name: 'call.wav', mime_type: 'audio/wav',
+    expect(startMessage({ durationSeconds: 3.2 })).toEqual({
+      type: 'start', encoding: 'pcm_s16le', sampleRate: 16000, channels: 1,
+      playbackRate: 1, durationSeconds: 3.2,
     });
   });
 
@@ -47,11 +48,11 @@ describe('uploaded recording helpers', () => {
 
   it('sends protocol in order, streams only binary PCM, and finalizes exactly once', async () => {
     const socket = new FakeSocket();
-    const transport = new UploadedRecordingTransport('meeting-1', () => socket);
+    const transport = new UploadedRecordingTransport('meeting-1', undefined, () => socket);
     const connecting = transport.connect(vi.fn());
     socket.open();
     await connecting;
-    transport.start({ durationMs: 1000, fileName: 'call.wav', mimeType: 'audio/wav' });
+    transport.start({ durationSeconds: 1 });
     transport.sendPcm(new ArrayBuffer(4));
     transport.pause();
     transport.resume();
@@ -60,12 +61,16 @@ describe('uploaded recording helpers', () => {
     expect(socket.sent.map(frame => typeof frame === 'string' ? JSON.parse(frame).type : 'pcm')).toEqual([
       'start', 'pcm', 'pause', 'resume', 'end',
     ]);
+    expect(socket.close).not.toHaveBeenCalled();
+    socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'completed' }) }));
+    await expect(transport.waitForCompletion()).resolves.toMatchObject({ type: 'completed' });
+    transport.close();
     expect(socket.close).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces a visible/retryable connection failure before start', async () => {
     const socket = new FakeSocket();
-    const transport = new UploadedRecordingTransport('meeting-1', () => socket);
+    const transport = new UploadedRecordingTransport('meeting-1', undefined, () => socket);
     const connecting = transport.connect(vi.fn());
     socket.onerror?.(new Event('error'));
     await expect(connecting).rejects.toThrow(/retry/i);

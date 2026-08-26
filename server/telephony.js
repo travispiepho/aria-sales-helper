@@ -143,6 +143,39 @@ function browserGateReply(reply) {
   return null;
 }
 
+/** Safe account label for deterministic rep-phone transcript attribution. */
+export function accountRepLabel(name, email) {
+  const savedName = typeof name === 'string' ? name.trim() : '';
+  if (savedName) return savedName;
+  const savedEmail = typeof email === 'string' ? email.trim() : '';
+  if (savedEmail) return savedEmail;
+  return 'Rep';
+}
+
+function requestPublicOrigin(request) {
+  const forwardedProto = request.headers['x-forwarded-proto'];
+  const protocol = (forwardedProto ? forwardedProto.split(',')[0].trim() : null) || 'https';
+  const host = request.headers['x-forwarded-host'] || request.headers.host || request.hostname;
+  return { protocol, host };
+}
+
+function validateTwilioMediaStreamUpgrade(request) {
+  if (!hasAuthTokenForSignatureValidation()) {
+    if (process.env.TELEPHONY_SKIP_SIGNATURE_CHECK === '1') return { ok: true, reason: 'skipped_dev_override' };
+    return { ok: false, reason: 'no_auth_token_configured' };
+  }
+  const signatureHeader = request.headers['x-twilio-signature'];
+  if (!signatureHeader) return { ok: false, reason: 'missing_signature_header' };
+  const { host } = requestPublicOrigin(request);
+  // Twilio signs the original HTTPS-equivalent URL for the initial WebSocket
+  // handshake. A Media Stream upgrade has no form body and <Stream> URLs
+  // cannot carry query parameters.
+  const url = `https://${host}${request.url}`;
+  return twilio.validateRequest(TWILIO_AUTH_TOKEN, signatureHeader, url, {})
+    ? { ok: true, reason: null }
+    : { ok: false, reason: 'signature_mismatch' };
+}
+
 // ─── Credential / configuration state ──────────────────────────────────────
 // Two independent auth shapes are supported:
 //   1. API Key auth (current real state): ACCOUNT_SID + API_KEY_SID +
@@ -402,7 +435,7 @@ export async function findOrCreatePhoneMeeting(pool, { callSid, customerId, repI
  * handle that content-type). This was a real, flagged gap in the prior
  * scaffolding pass — fixed here, not deferred again.
  */
-export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController } = {}) {
+export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController, createTranscriptionSession = createDeepgramSession } = {}) {
   const formbody = (await import('@fastify/formbody')).default;
   await fastify.register(formbody);
 
@@ -949,7 +982,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Start>
-    <Stream url="${wsProtocol}://${host}/telephony/stream" />
+    <Stream url="${wsProtocol}://${host}/telephony/stream" track="both_tracks" />
   </Start>
   <Dial callerId="${TWILIO_PHONE_NUMBER}" record="record-from-answer-dual" recordingStatusCallback="${recordingStatusCallbackUrl}" recordingStatusCallbackEvent="in-progress completed absent">
     <Number url="${consentWhisperUrl}">${customerNumber}</Number>
@@ -1074,28 +1107,24 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
   // (same ring-buffer/forwarding shape) but consumes Twilio's JSON-enveloped
   // base64 mulaw frames instead of raw binary PCM, and converts audio via
   // audioCodec.js before forwarding onward to Deepgram.
-  fastify.get('/telephony/stream', { websocket: true }, async (socket, request) => {
+  fastify.get('/telephony/stream', {
+    websocket: true,
+    preValidation: async (request, reply) => {
+      const check = validateTwilioMediaStreamUpgrade(request);
+      if (!check.ok) {
+        fastify.log.warn(`Twilio Media Stream signature validation failed: ${check.reason}`);
+        return reply.code(403).send({ error: 'Invalid Twilio signature' });
+      }
+    },
+  }, async (socket, request) => {
     if (!isConfigured()) {
       socket.send(JSON.stringify({ type: 'error', error: 'Twilio not configured on server' }));
       socket.close(1011, 'Twilio not configured');
       return;
     }
 
-    // NOTE: unlike /telephony/voice and /telephony/status-callback (plain
-    // HTTP POST webhooks, easily signature-validated via the form body +
-    // X-Twilio-Signature header), Twilio's Media Streams WS connection is
-    // NOT itself signed the same way — Twilio's docs note the WS upgrade
-    // request DOES carry a lowercase `x-twilio-signature` header, but the
-    // "params" half of the HMAC input for a WS connection is the querystring
-    // (there is no form body on a WS upgrade). This module does not attempt
-    // WS-specific signature validation in this pass — flagged, not silently
-    // ignored: the real security boundary for this route in practice is that
-    // the wss:// URL is only ever handed out by our own signature-validated
-    // /telephony/voice response (Twilio must have first passed OUR signature
-    // check to receive a URL pointing back at this stream endpoint), and the
-    // URL itself is unguessable-in-practice per-call metadata. A dedicated
-    // WS-signature check can be added once a real call exercises this path
-    // and the exact querystring shape Twilio sends is confirmed live.
+    // Twilio's signed WebSocket upgrade was validated in preValidation
+    // before any audio or custom parameters are trusted.
     fastify.log.info('Twilio Media Stream WS connected');
 
     let streamSid = null;
@@ -1131,7 +1160,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     function openDeepgramTrack(track, speakerLabel, isCustomer) {
       if (!DEEPGRAM_API_KEY || dgSessions.has(track)) return;
       const dgMeetingId = meetingId;
-      const session = createDeepgramSession({
+      const session = createTranscriptionSession({
         apiKey: DEEPGRAM_API_KEY,
         log: (msg2) => fastify.log.info(`[callSid=${callSid} track=${track}] ${msg2}`),
         onError: (err) => fastify.log.error(`Twilio stream Deepgram error (callSid=${callSid} track=${track}): ${err.message}`),
@@ -1235,6 +1264,11 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
           // start.customParameters
           streamSid = msg.start?.streamSid;
           callSid = msg.start?.callSid;
+          if (msg.start?.accountSid !== TWILIO_ACCOUNT_SID || !callSid) {
+            fastify.log.warn(`Twilio stream rejected start metadata for streamSid=${streamSid}`);
+            socket.close(1008, 'Invalid Twilio stream metadata');
+            return;
+          }
           usesDeterministicBothTracks = Array.isArray(msg.start?.tracks)
             && msg.start.tracks.includes('inbound')
             && msg.start.tracks.includes('outbound');
@@ -1263,10 +1297,10 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
                 objectionMatcherIndex = await loadObjectionMatcherIndex(pool, (m) => fastify.log.info(`[callSid=${callSid}] ${m}`));
                 try {
                   const repRes = await pool.query(
-                    `SELECT u.name FROM meetings m JOIN users u ON u.id = m.rep_id WHERE m.id = $1`,
+                    `SELECT u.name, u.email FROM meetings m JOIN users u ON u.id = m.rep_id WHERE m.id = $1`,
                     [meetingId]
                   );
-                  phoneRepName = repRes.rows[0]?.name || null;
+                  phoneRepName = accountRepLabel(repRes.rows[0]?.name, repRes.rows[0]?.email);
                 } catch (repErr) {
                   fastify.log.warn(`Twilio stream: rep name lookup failed for meeting ${meetingId}: ${repErr.message}`);
                 }
@@ -1282,7 +1316,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
             fastify.log.warn(`Twilio stream: DEEPGRAM_API_KEY not set — phone call ${callSid} will not be transcribed`);
           } else {
             if (usesDeterministicBothTracks) {
-              openDeepgramTrack('inbound', 'Rep', false);
+              openDeepgramTrack('inbound', phoneRepName || 'Rep', false);
               openDeepgramTrack('outbound', 'Customer', true);
               fastify.log.info(`Twilio stream: per-track Deepgram sessions opened for callSid=${callSid} meetingId=${meetingId}`);
             } else {
@@ -1307,7 +1341,14 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
             // Codec conversion is real and tested (audioCodec.js, untouched
             // by this pass — see scripts/test-audio-codec.js).
             const linear16Buf = twilioPayloadToLinear16Buffer(msg.media.payload);
-            const track = usesDeterministicBothTracks ? (msg.media.track || 'inbound') : 'inbound';
+            const track = usesDeterministicBothTracks ? msg.media.track : 'inbound';
+            // Never guess a missing/unknown track in deterministic mode: a
+            // guess could duplicate or misattribute audio. Twilio documents
+            // only `inbound` and `outbound` for a both_tracks stream.
+            if (track !== 'inbound' && track !== 'outbound') {
+              fastify.log.warn(`Twilio stream ignored media with invalid track=${track || 'missing'} callSid=${callSid}`);
+              break;
+            }
             const session = dgSessions.get(track);
             if (session) session.send(linear16Buf);
           }

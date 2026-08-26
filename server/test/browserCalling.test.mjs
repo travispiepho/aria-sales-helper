@@ -128,6 +128,7 @@ test('signed browser TwiML links meeting and preserves consent, dual recording a
   const res = await app.inject({ method: 'POST', url: '/telephony/browser-outgoing', payload: form(params), headers: signedHeaders(url, params) });
   assert.equal(res.statusCode, 200, res.body);
   assert.match(res.body, /<Stream[^>]+track="both_tracks"/);
+  assert.doesNotMatch(res.body, /<Parameter[^>]+flow="rep-phone"/);
   assert.match(res.body, /record="record-from-answer-dual"/);
   assert.match(res.body, /<Number url="https:\/\/aria\.example\.test\/telephony\/consent-whisper"/);
   assert.match(res.body, />\+16165550123<\/Number>/);

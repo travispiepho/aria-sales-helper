@@ -68,6 +68,7 @@
  */
 
 import twilio from 'twilio';
+import { createHash, randomUUID } from 'node:crypto';
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import { twilioPayloadToLinear16Buffer } from './audioCodec.js';
 import { createDeepgramSession } from './deepgramSession.js';
@@ -96,7 +97,51 @@ const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID;
 const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN; // legacy fallback, not currently set
 const TWILIO_APP_SID = process.env.TWILIO_TWIML_APP_SID;
+// Browser calling deliberately uses a separate TwiML App. The production
+// number continues to use TWILIO_TWIML_APP_SID, so browser rollout/rollback
+// can never repoint or disturb its inbound/rep-phone routing.
+const TWILIO_BROWSER_APP_SID = process.env.TWILIO_BROWSER_TWIML_APP_SID;
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
+
+const BROWSER_TOKEN_TTL_SECONDS = 300;
+const BROWSER_PENDING_TTL_MS = 10 * 60 * 1000;
+const browserPendingCalls = new Map();
+
+export function isBrowserCallingEnabled() {
+  return process.env.ENABLE_BROWSER_CALLING === 'true';
+}
+
+export function browserCallingConfigStatus() {
+  const missing = [];
+  if (!TWILIO_ACCOUNT_SID) missing.push('account_sid');
+  if (!TWILIO_API_KEY_SID) missing.push('api_key_sid');
+  if (!TWILIO_API_KEY_SECRET) missing.push('api_key_secret');
+  if (!TWILIO_AUTH_TOKEN) missing.push('auth_token');
+  if (!TWILIO_BROWSER_APP_SID) missing.push('browser_twiml_app_sid');
+  if (!TWILIO_PHONE_NUMBER) missing.push('phone_number');
+  return { enabled: isBrowserCallingEnabled(), configured: missing.length === 0, missing };
+}
+
+/** Twilio Voice identities allow only alphanumerics/underscores, max 121. */
+export function browserIdentityForUser(userId) {
+  const raw = String(userId || '');
+  const safe = raw.replace(/[^A-Za-z0-9_]/g, '_');
+  const digest = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+  return `aria_${safe.slice(0, 98)}_${digest}`;
+}
+
+function pruneBrowserPendingCalls(now = Date.now()) {
+  for (const [id, pending] of browserPendingCalls) {
+    if (pending.expiresAtMs <= now) browserPendingCalls.delete(id);
+  }
+}
+
+function browserGateReply(reply) {
+  const status = browserCallingConfigStatus();
+  if (!status.enabled) return reply.code(503).send({ error: 'Browser calling is disabled', browserCalling: false });
+  if (!status.configured) return reply.code(503).send({ error: 'Browser calling is unavailable', browserCalling: false });
+  return null;
+}
 
 // ─── Credential / configuration state ──────────────────────────────────────
 // Two independent auth shapes are supported:
@@ -360,6 +405,153 @@ export async function findOrCreatePhoneMeeting(pool, { callSid, customerId, repI
 export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController } = {}) {
   const formbody = (await import('@fastify/formbody')).default;
   await fastify.register(formbody);
+
+  // ── Browser/WebRTC calling ─────────────────────────────────────────────
+  // App-facing setup route. It authenticates through the existing session
+  // hook, validates the customer number, creates a single-use pending-call
+  // record bound to the authenticated rep, and returns only an opaque ID plus
+  // a short-lived outgoing-only Voice token. Customer/rep trust data never
+  // comes from Device.connect() parameters.
+  fastify.post('/telephony/browser-token', async (request, reply) => {
+    if (!request.user) return reply.code(401).send({ error: 'Unauthorized' });
+    const gated = browserGateReply(reply);
+    if (gated) return gated;
+
+    const customerPhone = normalizePhoneNumber(request.body?.customerPhone);
+    if (!customerPhone) {
+      return reply.code(400).send({ error: 'Invalid or missing customerPhone', field: 'customerPhone' });
+    }
+
+    let customerId = null;
+    try {
+      customerId = (await resolveCustomerByPhone(pool, customerPhone)).customer?.id || null;
+    } catch (err) {
+      fastify.log.error(`/telephony/browser-token customer lookup failed: ${err.message}`);
+    }
+
+    pruneBrowserPendingCalls();
+    const pendingCallId = randomUUID();
+    const identity = browserIdentityForUser(request.user.id);
+    browserPendingCalls.set(pendingCallId, {
+      repId: request.user.id,
+      identity,
+      customerPhone,
+      customerId,
+      expiresAtMs: Date.now() + BROWSER_PENDING_TTL_MS,
+    });
+
+    const AccessToken = twilio.jwt.AccessToken;
+    const token = new AccessToken(TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, {
+      identity,
+      ttl: BROWSER_TOKEN_TTL_SECONDS,
+    });
+    token.addGrant(new AccessToken.VoiceGrant({
+      outgoingApplicationSid: TWILIO_BROWSER_APP_SID,
+      incomingAllow: false,
+    }));
+
+    return reply.send({
+      browserCalling: true,
+      token: token.toJwt(),
+      pendingCallId,
+      expiresIn: BROWSER_TOKEN_TTL_SECONDS,
+    });
+  });
+
+  // Twilio-facing Voice URL for the dedicated browser TwiML App. Twilio
+  // signs the SDK request, but its custom params remain user-controlled, so
+  // only the opaque pendingCallId is accepted and all trusted fields are
+  // loaded from server memory. The pending record is consumed before TwiML
+  // is returned, making retries unable to create duplicate customer calls.
+  fastify.post('/telephony/browser-outgoing', async (request, reply) => {
+    const gated = browserGateReply(reply);
+    if (gated) return gated;
+
+    const signatureCheck = validateTwilioSignature(request);
+    if (!signatureCheck.ok) {
+      fastify.log.warn(`Twilio signature validation failed for /telephony/browser-outgoing: ${signatureCheck.reason}`);
+      return reply.code(403).send({ error: 'Invalid Twilio signature', reason: signatureCheck.reason });
+    }
+
+    pruneBrowserPendingCalls();
+    const pendingCallId = request.body?.pendingCallId;
+    const pending = typeof pendingCallId === 'string' ? browserPendingCalls.get(pendingCallId) : null;
+    if (!pending) return reply.code(400).send({ error: 'Invalid or expired pending call' });
+
+    // Twilio supplies the token identity as `From=client:<identity>` on an
+    // outgoing SDK call. This prevents one authenticated browser from using
+    // an opaque ID leaked from another rep before it expires.
+    if (request.body?.From !== `client:${pending.identity}`) {
+      return reply.code(403).send({ error: 'Pending call identity mismatch' });
+    }
+    const customerNumber = normalizePhoneNumber(pending.customerPhone);
+    if (!customerNumber) return reply.code(400).send({ error: 'Invalid pending customer number' });
+    browserPendingCalls.delete(pendingCallId);
+
+    const callSid = request.body?.CallSid;
+    if (!callSid) return reply.code(400).send({ error: 'Missing CallSid' });
+
+    let meeting = null;
+    try {
+      ({ meeting } = await findOrCreatePhoneMeeting(pool, {
+        callSid,
+        customerId: pending.customerId,
+        repId: pending.repId,
+      }));
+    } catch (err) {
+      // Meeting linkage is mandatory for browser calls: without it the media
+      // stream cannot safely feed the correct transcript/coaching timeline.
+      fastify.log.error(`/telephony/browser-outgoing meeting create failed: ${err.message}`);
+      const errorTwiml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Say>Sorry, we could not start this call. Goodbye.</Say><Hangup/></Response>`;
+      return reply.type('text/xml').send(errorTwiml);
+    }
+
+    const forwardedProto = request.headers['x-forwarded-proto'];
+    const protocol = (forwardedProto ? forwardedProto.split(',')[0].trim() : null) || 'https';
+    const host = request.headers['x-forwarded-host'] || request.headers.host || request.hostname;
+    const wsProtocol = protocol === 'http' ? 'ws' : 'wss';
+    const consentWhisperUrl = `${protocol}://${host}/telephony/consent-whisper`;
+    const recordingStatusCallbackUrl = `${protocol}://${host}/telephony/recording-status`;
+    const statusCallbackUrl = `${protocol}://${host}/telephony/status-callback`;
+    const dialCompleteUrl = `${protocol}://${host}/telephony/browser-dial-complete`;
+
+    fastify.log.info(`/telephony/browser-outgoing: CallSid=${callSid} rep=${pending.repId} meeting=${meeting.id}`);
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Start>
+    <Stream url="${wsProtocol}://${host}/telephony/stream" track="both_tracks" />
+  </Start>
+  <Dial callerId="${TWILIO_PHONE_NUMBER}" answerOnBridge="true" action="${dialCompleteUrl}" method="POST" record="record-from-answer-dual" recordingStatusCallback="${recordingStatusCallbackUrl}" recordingStatusCallbackEvent="in-progress completed absent">
+    <Number url="${consentWhisperUrl}" statusCallback="${statusCallbackUrl}" statusCallbackEvent="ringing answered completed">${customerNumber}</Number>
+  </Dial>
+</Response>`;
+    return reply.type('text/xml').send(twiml);
+  });
+
+  fastify.post('/telephony/browser-dial-complete', async (request, reply) => {
+    const gated = browserGateReply(reply);
+    if (gated) return gated;
+    const signatureCheck = validateTwilioSignature(request);
+    if (!signatureCheck.ok) return reply.code(403).send({ error: 'Invalid Twilio signature' });
+    const callSid = request.body?.CallSid;
+    if (callSid && pool) {
+      try {
+        const ended = await pool.query(
+          `UPDATE meetings SET status = 'completed', ended_at = COALESCE(ended_at, NOW())
+           WHERE call_sid = $1 AND status = 'active' RETURNING id`,
+          [callSid]
+        );
+        const meetingId = ended.rows[0]?.id;
+        if (meetingId) {
+          clearMeetingPromptState(meetingId);
+          if (broadcastToMeeting) broadcastToMeeting(meetingId, { type: 'meeting_ended', meetingId, status: 'completed' });
+        }
+      } catch (err) {
+        fastify.log.error(`/telephony/browser-dial-complete meeting update failed: ${err.message}`);
+      }
+    }
+    return reply.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+  });
 
   // ── POST /telephony/voice — inbound-call voice webhook (TwiML response) ──
   // This is the URL you'd configure on the Twilio phone number / TwiML App
@@ -882,7 +1074,11 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     let streamSid = null;
     let callSid = null;
     let meetingId = null;
-    let dgSession = null;
+    // One Deepgram session per Twilio track when both_tracks is requested.
+    // Legacy streams omit track=both_tracks and carry only inbound audio;
+    // those remain on the original diarized single-session behavior.
+    const dgSessions = new Map();
+    let usesDeterministicBothTracks = false;
     // Live rebuttal teleprompter (2026-08-18 2nd pass) — populated once the
     // meeting row is resolved in the `start` handler below. Starts empty so
     // any final segment that somehow arrives before `start` resolves it is
@@ -899,6 +1095,81 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     // isConfirmedProspectSegment below), same silence-over-wrong-prompt
     // preference as an unresolved slot.
     let phoneRepName = null;
+
+    function closeDeepgramSessions() {
+      for (const session of dgSessions.values()) session.close();
+      dgSessions.clear();
+    }
+
+    function openDeepgramTrack(track, speakerLabel, isCustomer) {
+      if (!DEEPGRAM_API_KEY || dgSessions.has(track)) return;
+      const dgMeetingId = meetingId;
+      const session = createDeepgramSession({
+        apiKey: DEEPGRAM_API_KEY,
+        log: (msg2) => fastify.log.info(`[callSid=${callSid} track=${track}] ${msg2}`),
+        onError: (err) => fastify.log.error(`Twilio stream Deepgram error (callSid=${callSid} track=${track}): ${err.message}`),
+        onCircuitOpen: (reason) => {
+          fastify.log.error(`Twilio stream Deepgram reconnect give-up (callSid=${callSid} track=${track}): ${reason}`);
+          if (dgMeetingId && broadcastToMeeting) {
+            broadcastToMeeting(dgMeetingId, {
+              type: 'transcription_lapse', state: 'stopped',
+              message: 'Live transcription has stopped for part of this call. The call recording is still being captured.',
+            });
+          }
+        },
+        onLapseStart: (startedAtMs) => {
+          if (dgMeetingId && broadcastToMeeting) {
+            broadcastToMeeting(dgMeetingId, { type: 'transcription_lapse', state: 'started', startedAt: startedAtMs });
+          }
+        },
+        onLapseEnd: (durationMs) => {
+          if (dgMeetingId && broadcastToMeeting) {
+            broadcastToMeeting(dgMeetingId, { type: 'transcription_lapse', state: 'recovered', durationMs });
+          }
+        },
+        onTranscript: (result) => {
+          if (!dgMeetingId) return;
+          if (result.isFinal) {
+            // Customer-only coaching is deterministic from the outbound
+            // Twilio track; no fingerprint/introduction inference involved.
+            if (isCustomer && objectionMatcherIndex.length > 0) {
+              const libraryMatch = evaluateLibraryMatch(result.text, objectionMatcherIndex, dgMeetingId);
+              if (libraryMatch && broadcastToMeeting) {
+                markPromptFired(dgMeetingId, libraryMatch.objection.id);
+                broadcastToMeeting(dgMeetingId, {
+                  type: 'suggested_rebuttal_library',
+                  objectionId: libraryMatch.objection.id,
+                  objectionText: libraryMatch.objection.text,
+                  objectionCategory: libraryMatch.objection.category,
+                  rebuttals: libraryMatch.objection.rebuttals,
+                  matchedSegmentText: result.text,
+                  confidence: libraryMatch.confidence,
+                  matchMethod: libraryMatch.method,
+                });
+              }
+            }
+            if (pool) {
+              const wordCount = result.words.length || result.text.split(/\s+/).filter(Boolean).length;
+              const timedWords = result.words.filter((w) => w.start !== undefined && w.end !== undefined);
+              const durationMs = timedWords.length > 0
+                ? Math.max(0, Math.round((timedWords[timedWords.length - 1].end - timedWords[0].start) * 1000))
+                : null;
+              pool.query(
+                `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id`,
+                [dgMeetingId, speakerLabel, result.text, wordCount, durationMs]
+              ).then((insertResult) => {
+                if (broadcastToMeeting) {
+                  broadcastToMeeting(dgMeetingId, { type: 'final', id: insertResult.rows[0]?.id, text: result.text, speaker: speakerLabel });
+                }
+              }).catch((dbErr) => fastify.log.error(`Twilio stream transcript insert error: ${dbErr.message}`));
+            }
+          } else if (broadcastToMeeting) {
+            broadcastToMeeting(dgMeetingId, { type: 'interim', text: result.text, speaker: speakerLabel });
+          }
+        },
+      });
+      dgSessions.set(track, session);
+    }
 
     // ── Mid-call name-introduction detector (2026-08-18, THIRD PASS ROOT-
     // CAUSE FIX) ──────────────────────────────────────────────────────────
@@ -937,6 +1208,9 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
           // start.customParameters
           streamSid = msg.start?.streamSid;
           callSid = msg.start?.callSid;
+          usesDeterministicBothTracks = Array.isArray(msg.start?.tracks)
+            && msg.start.tracks.includes('inbound')
+            && msg.start.tracks.includes('outbound');
           fastify.log.info(`Twilio stream started: streamSid=${streamSid} callSid=${callSid}`);
 
           // Look up the meetings row created in the /telephony/voice webhook
@@ -977,131 +1251,17 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
             }
           }
 
-          // ── Open Deepgram live-transcription connection for this call ──
-          // Uses the standalone deepgramSession.js module (see its header
-          // comment for why this duplicates, rather than shares, the
-          // in-person handler's Deepgram connection logic in server.js —
-          // that file is explicitly NOT touched in this pass). Opened here
-          // on `start` (not on WS connect) so it's tied to a specific
-          // Twilio call/streamSid, matching the in-person handler's
-          // per-connection lifecycle.
           if (!DEEPGRAM_API_KEY) {
             fastify.log.warn(`Twilio stream: DEEPGRAM_API_KEY not set — phone call ${callSid} will not be transcribed`);
-          } else if (!dgSession) {
-            const dgMeetingId = meetingId; // captured now; stable for this connection's lifetime
-            dgSession = createDeepgramSession({
-              apiKey: DEEPGRAM_API_KEY,
-              log: (msg2) => fastify.log.info(`[callSid=${callSid}] ${msg2}`),
-              onError: (err) => fastify.log.error(`Twilio stream Deepgram error (callSid=${callSid}): ${err.message}`),
-              // 2026-08-18 hardening: this callback now fires when the shared
-              // dgReconnectPolicy tracker gives up (60s time budget or ~14
-              // attempt seatbelt), not the old ad hoc 8-failures/5-min
-              // circuit breaker. Broadcasts a terminal, truthful notice —
-              // recording (Twilio record-from-answer-dual on the customer
-              // leg) is unaffected and keeps capturing audio; only the LIVE
-              // feed stops for this call.
-              onCircuitOpen: (reason) => {
-                fastify.log.error(`Twilio stream Deepgram reconnect give-up (callSid=${callSid}): ${reason}`);
-                if (dgMeetingId && broadcastToMeeting) {
-                  broadcastToMeeting(dgMeetingId, {
-                    type: 'transcription_lapse',
-                    state: 'stopped',
-                    message: 'Live transcription has stopped for this call. The call recording is still being captured and the transcript can be backfilled afterward.',
-                  });
-                }
-              },
-              // >2s lapse / recovery notices — see dgReconnectPolicy.js. A
-              // sub-2s blip never reaches these callbacks (no perceptible
-              // stall to announce).
-              onLapseStart: (startedAtMs) => {
-                fastify.log.warn(`Twilio stream Deepgram lapse (>2s) (callSid=${callSid}), started ${new Date(startedAtMs).toISOString()}`);
-                if (dgMeetingId && broadcastToMeeting) {
-                  broadcastToMeeting(dgMeetingId, { type: 'transcription_lapse', state: 'started', startedAt: startedAtMs });
-                }
-              },
-              onLapseEnd: (durationMs) => {
-                fastify.log.info(`Twilio stream Deepgram lapse recovered (callSid=${callSid}) after ${durationMs}ms`);
-                if (dgMeetingId && broadcastToMeeting) {
-                  broadcastToMeeting(dgMeetingId, { type: 'transcription_lapse', state: 'recovered', durationMs });
-                }
-              },
-              onTranscript: (result) => {
-                if (!dgMeetingId) return; // no meeting row resolved yet — nothing to persist/broadcast against
-                const speakerLabel = `Speaker ${result.speaker + 1}`;
-                if (result.isFinal) {
-                  // Feed the mid-call intro detector on every final segment,
-                  // same as the in-person handler does — THIS is the actual
-                  // fix (see introDetection.js header). result.speaker is
-                  // already the canonical per-call 0-based index Deepgram
-                  // assigns; no merge/dedup step exists on this path (unlike
-                  // server.js's resolveSpeaker), so it's used directly.
-                  introDetector.onFinalSegment(result.speaker, result.text);
-
-                  // ── Live rebuttal teleprompter (library-backed, 2026-08-18 2nd pass) ──
-                  // CUSTOMER SPEECH ONLY, and only once this speaker slot's
-                  // attribution is actually RESOLVED (voiceprint-equivalent
-                  // or confirmed intro) — telephony.js has no voiceprint
-                  // matching on this path today, so in practice "resolved"
-                  // here means a confirmed intro lock via introDetector's
-                  // speakerLockController. An unresolved `Speaker N`
-                  // placeholder NEVER fires a prompt, matching this task's
-                  // explicit silence-over-wrong-prompt requirement — this is
-                  // deliberately MORE conservative on the phone path than
-                  // the in-person path (no voiceprint signal available here
-                  // at all), so real dogfooding volume will likely show this
-                  // firing less often on phone calls until intros are
-                  // confirmed, which is the correct, safe default.
-                  if (dgMeetingId && objectionMatcherIndex.length > 0) {
-                    const lockedName = introDetector.speakerLockController.getLockedName(speakerLabel);
-                    const attributionResolved = Boolean(lockedName);
-                    const isConfirmedProspectSegment = attributionResolved && phoneRepName && lockedName !== phoneRepName;
-                    if (isConfirmedProspectSegment) {
-                      const libraryMatch = evaluateLibraryMatch(result.text, objectionMatcherIndex, dgMeetingId);
-                      if (libraryMatch && broadcastToMeeting) {
-                        markPromptFired(dgMeetingId, libraryMatch.objection.id);
-                        broadcastToMeeting(dgMeetingId, {
-                          type: 'suggested_rebuttal_library',
-                          objectionId: libraryMatch.objection.id,
-                          objectionText: libraryMatch.objection.text,
-                          objectionCategory: libraryMatch.objection.category,
-                          rebuttals: libraryMatch.objection.rebuttals,
-                          matchedSegmentText: result.text,
-                          confidence: libraryMatch.confidence,
-                          matchMethod: libraryMatch.method,
-                        });
-                      }
-                    }
-                  }
-
-                  if (pool) {
-                    const wordCount = result.words.length > 0
-                      ? result.words.length
-                      : result.text.split(/\s+/).filter(Boolean).length;
-                    let durationMs = null;
-                    const timedWords = result.words.filter((w) => w.start !== undefined && w.end !== undefined);
-                    if (timedWords.length > 0) {
-                      const firstStart = timedWords[0].start;
-                      const lastEnd = timedWords[timedWords.length - 1].end;
-                      if (lastEnd > firstStart) durationMs = Math.round((lastEnd - firstStart) * 1000);
-                    }
-                    pool.query(
-                      `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id`,
-                      [dgMeetingId, speakerLabel, result.text, wordCount, durationMs]
-                    ).then((insertResult) => {
-                      const insertedSegmentId = insertResult.rows[0]?.id;
-                      if (broadcastToMeeting) {
-                        broadcastToMeeting(dgMeetingId, { type: 'final', id: insertedSegmentId, text: result.text, speaker: speakerLabel });
-                      }
-                    }).catch((dbErr) => {
-                      fastify.log.error(`Twilio stream transcript_segments insert error (callSid=${callSid}): ${dbErr.message}`);
-                    });
-                  }
-                } else if (broadcastToMeeting) {
-                  broadcastToMeeting(dgMeetingId, { type: 'interim', text: result.text, speaker: speakerLabel });
-                }
-              },
-            });
-            fastify.log.info(`Twilio stream: Deepgram session opened for callSid=${callSid} meetingId=${meetingId}`);
+          } else {
+            if (usesDeterministicBothTracks) {
+              openDeepgramTrack('inbound', 'Rep', false);
+              openDeepgramTrack('outbound', 'Customer', true);
+              fastify.log.info(`Twilio stream: per-track Deepgram sessions opened for callSid=${callSid} meetingId=${meetingId}`);
+            } else {
+              openDeepgramTrack('inbound', 'Speaker 1', false);
+              fastify.log.info(`Twilio stream: legacy inbound Deepgram session opened for callSid=${callSid} meetingId=${meetingId}`);
+            }
           }
 
           // If PYANNOTE_API_KEY is set, a real implementation would also
@@ -1120,9 +1280,9 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
             // Codec conversion is real and tested (audioCodec.js, untouched
             // by this pass — see scripts/test-audio-codec.js).
             const linear16Buf = twilioPayloadToLinear16Buffer(msg.media.payload);
-            if (dgSession) {
-              dgSession.send(linear16Buf);
-            }
+            const track = usesDeterministicBothTracks ? (msg.media.track || 'inbound') : 'inbound';
+            const session = dgSessions.get(track);
+            if (session) session.send(linear16Buf);
           }
           break;
         }
@@ -1130,10 +1290,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
         case 'stop':
           // Confirmed shape: stop.accountSid, stop.callSid
           fastify.log.info(`Twilio stream stopped: streamSid=${streamSid}`);
-          if (dgSession) {
-            dgSession.close();
-            dgSession = null;
-          }
+          closeDeepgramSessions();
           if (meetingId && unregisterMeetingSocket) {
             unregisterMeetingSocket(meetingId, socket);
           }
@@ -1156,10 +1313,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
 
     socket.on('close', () => {
       fastify.log.info(`Twilio Media Stream WS closed: streamSid=${streamSid}`);
-      if (dgSession) {
-        dgSession.close();
-        dgSession = null;
-      }
+      closeDeepgramSessions();
       if (meetingId && unregisterMeetingSocket) {
         unregisterMeetingSocket(meetingId, socket);
       }

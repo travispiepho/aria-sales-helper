@@ -1,197 +1,275 @@
-import React, { useState } from 'react';
-import { startOutboundCall } from '../lib/api';
+import React, { useEffect, useRef, useState } from 'react';
+import { Call, Device } from '@twilio/voice-sdk';
+import { createBrowserCall, startOutboundCall } from '../lib/api';
 import { useAuth } from '../lib/auth';
 
 interface Props {
   onClose: () => void;
-  // Called once the backend confirms a meeting was linked to the call, so
-  // the parent (HomePage) can navigate the rep straight into that meeting
-  // — mirrors CustomerIntakeModal's onCreated(customerId, title) contract,
-  // just with a meetingId instead since a phone meeting has no title step.
   onMeetingReady: (meetingId: string) => void;
 }
 
-type CallState = 'idle' | 'placing' | 'ringing-rep' | 'failed';
+type Mode = 'browser' | 'phone';
+type BrowserState =
+  | 'idle'
+  | 'initializing'
+  | 'ready'
+  | 'dialing'
+  | 'ringing'
+  | 'connecting'
+  | 'connected'
+  | 'ended'
+  | 'error';
+type PhoneState = 'idle' | 'placing' | 'ringing-rep' | 'failed';
 
-// Client-side sanity check ONLY — not authoritative. The backend
-// (server/telephony.js's normalizePhoneNumber, via libphonenumber-js)
-// does the real E.164 parsing/validation; this is just a fast, dependency-
-// free check so a rep gets an inline error before round-tripping to the
-// server for something obviously wrong (empty, letters, too short). Per
-// the task's hard rule: do NOT add an npm dependency for this.
 function looksLikePhoneNumber(raw: string): boolean {
   const trimmed = raw.trim();
   if (!trimmed) return false;
-  // Strip common formatting chars (spaces, dashes, parens, dots, leading +)
-  // then require 10-15 remaining digits — covers a bare 10-digit US number
-  // typed as "(616) 555-1234" as well as an already-E.164 "+16165551234".
   const digitsOnly = trimmed.replace(/^\+/, '').replace(/[\s().-]/g, '');
   return /^\d{10,15}$/.test(digitsOnly);
 }
 
+function messageFromError(err: unknown): string {
+  return err instanceof Error ? err.message : 'Browser calling is unavailable';
+}
+
 export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
   const { user } = useAuth();
-  // Prefill from the rep's saved profile number (added 2026-08-13, see
-  // ProfilePage.tsx's "Your Phone Number" field / PATCH /api/profile) so a
-  // rep who has already saved a number never has to retype it. Still fully
-  // editable — this is only a default, not a lock — and falls back to an
-  // empty string if the rep hasn't saved one yet (unchanged old behavior).
+  const [mode, setMode] = useState<Mode>('browser');
   const [repPhone, setRepPhone] = useState(user?.phone || '');
   const [customerPhone, setCustomerPhone] = useState('');
   const [repPhoneError, setRepPhoneError] = useState('');
   const [customerPhoneError, setCustomerPhoneError] = useState('');
-  const [callState, setCallState] = useState<CallState>('idle');
+  const [browserState, setBrowserState] = useState<BrowserState>('idle');
+  const [phoneState, setPhoneState] = useState<PhoneState>('idle');
   const [errorMsg, setErrorMsg] = useState('');
+  const [muted, setMuted] = useState(false);
+  const deviceRef = useRef<Device | null>(null);
+  const callRef = useRef<Call | null>(null);
+  const mountedRef = useRef(true);
 
-  const busy = callState === 'placing' || callState === 'ringing-rep';
+  const browserBusy = ['initializing', 'dialing', 'ringing', 'connecting', 'connected'].includes(browserState);
+  const phoneBusy = phoneState === 'placing' || phoneState === 'ringing-rep';
+  const busy = browserBusy || phoneBusy;
 
-  function validate(): boolean {
-    let ok = true;
+  function cleanupCall() {
+    const call = callRef.current;
+    callRef.current = null;
+    if (call) {
+      call.removeAllListeners();
+      if (call.status() !== Call.State.Closed) call.disconnect();
+    }
+    const device = deviceRef.current;
+    deviceRef.current = null;
+    if (device) {
+      device.removeAllListeners();
+      device.destroy();
+    }
+  }
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    cleanupCall();
+  }, []);
+
+  function validateCustomer(): boolean {
+    if (!looksLikePhoneNumber(customerPhone)) {
+      setCustomerPhoneError('Enter a valid phone number, e.g. (616) 555-1234');
+      return false;
+    }
+    setCustomerPhoneError('');
+    return true;
+  }
+
+  function usePhoneFallback(reason?: string) {
+    cleanupCall();
+    setMode('phone');
+    setBrowserState('idle');
+    setMuted(false);
+    if (reason) setErrorMsg(`${reason} You can still call using your phone.`);
+  }
+
+  async function handleBrowserCall(e: React.FormEvent) {
+    e.preventDefault();
+    setErrorMsg('');
+    if (!validateCustomer()) return;
+
+    cleanupCall();
+    setBrowserState('initializing');
+    try {
+      const setup = await createBrowserCall(customerPhone.trim());
+      if (!mountedRef.current) return;
+
+      const device = new Device(setup.token, {
+        appName: 'ARIA Web',
+        appVersion: '1.0.0',
+        logLevel: 4,
+      });
+      deviceRef.current = device;
+      device.on('error', (error) => {
+        if (!mountedRef.current) return;
+        setErrorMsg(error.message || 'Browser calling error');
+        setBrowserState('error');
+      });
+      setBrowserState('ready');
+
+      // Device.connect() obtains microphone permission through the SDK. No
+      // separate getUserMedia/autoplay workaround and no token persistence.
+      setBrowserState('dialing');
+      const call = await device.connect({
+        params: { pendingCallId: setup.pendingCallId },
+        rtcConstraints: { audio: true },
+      });
+      if (!mountedRef.current) {
+        call.disconnect();
+        device.destroy();
+        return;
+      }
+      callRef.current = call;
+      setBrowserState('connecting');
+
+      call.on('ringing', () => mountedRef.current && setBrowserState('ringing'));
+      call.on('accept', () => mountedRef.current && setBrowserState('connected'));
+      call.on('disconnect', () => mountedRef.current && setBrowserState('ended'));
+      call.on('cancel', () => mountedRef.current && setBrowserState('ended'));
+      call.on('reject', () => mountedRef.current && setBrowserState('ended'));
+      call.on('mute', (isMuted) => mountedRef.current && setMuted(isMuted));
+      call.on('error', (error) => {
+        if (!mountedRef.current) return;
+        setErrorMsg(error.message || 'Call failed');
+        setBrowserState('error');
+      });
+    } catch (err) {
+      if (!mountedRef.current) return;
+      cleanupCall();
+      usePhoneFallback(messageFromError(err));
+    }
+  }
+
+  async function handlePhoneCall(e: React.FormEvent) {
+    e.preventDefault();
+    setErrorMsg('');
+    let ok = validateCustomer();
     if (!looksLikePhoneNumber(repPhone)) {
       setRepPhoneError('Enter a valid phone number, e.g. (616) 555-1234');
       ok = false;
-    } else {
-      setRepPhoneError('');
-    }
-    if (!looksLikePhoneNumber(customerPhone)) {
-      setCustomerPhoneError('Enter a valid phone number, e.g. (616) 555-1234');
-      ok = false;
-    } else {
-      setCustomerPhoneError('');
-    }
-    return ok;
-  }
+    } else setRepPhoneError('');
+    if (!ok) return;
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setErrorMsg('');
-    if (!validate()) return;
-
-    setCallState('placing');
+    setPhoneState('placing');
     try {
       const result = await startOutboundCall(repPhone.trim(), customerPhone.trim());
-      // The server has already dialed the rep's phone by the time this
-      // resolves (it's a synchronous REST call to Twilio) — reflect that
-      // in the copy rather than a generic "connecting" spinner.
-      setCallState('ringing-rep');
-      if (result.meetingId) {
-        onMeetingReady(result.meetingId);
-      }
-      // If meetingId is null, the call was still placed for real (server
-      // logs this as a DB-write failure, not a call failure) — nothing
-      // further for this modal to do; the rep's phone is genuinely
-      // ringing. Leave the "ringing" state up rather than erroring, since
-      // erroring here would be misleading (the call itself succeeded).
-    } catch (err: unknown) {
-      setCallState('failed');
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to place call');
+      setPhoneState('ringing-rep');
+      if (result.meetingId) onMeetingReady(result.meetingId);
+    } catch (err) {
+      setPhoneState('failed');
+      setErrorMsg(messageFromError(err));
     }
   }
+
+  function hangUp() {
+    callRef.current?.disconnect();
+    setBrowserState('ended');
+  }
+
+  function toggleMute() {
+    const next = !muted;
+    callRef.current?.mute(next);
+    setMuted(next);
+  }
+
+  function close() {
+    cleanupCall();
+    onClose();
+  }
+
+  const browserStatus: Record<BrowserState, string> = {
+    idle: 'Ready to call from this browser',
+    initializing: 'Initializing secure browser calling…',
+    ready: 'Microphone ready',
+    dialing: 'Dialing…',
+    ringing: 'Customer phone is ringing…',
+    connecting: 'Connecting…',
+    connected: muted ? 'Connected · Muted' : 'Connected',
+    ended: 'Call ended',
+    error: 'Call error',
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={busy ? undefined : onClose} />
-
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={busy ? undefined : close} />
       <div className="relative w-full sm:max-w-lg bg-white rounded-t-3xl sm:rounded-2xl shadow-2xl max-h-[92vh] overflow-y-auto">
         <div className="sticky top-0 bg-white px-5 pt-5 pb-4 border-b border-gray-100 flex items-center justify-between">
           <h2 className="text-lg font-bold text-gray-900">Call a Customer</h2>
-          {!busy && (
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">
-              ×
-            </button>
-          )}
+          {!busy && <button onClick={close} aria-label="Close" className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>}
         </div>
 
         <div className="px-5 py-5 space-y-4">
-          {/* Recording disclosure — plain, factual, always visible, never
-              buried behind a tooltip/collapse. Per task spec: no legal
-              claims, just what actually happens. */}
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex gap-3">
             <span className="text-lg leading-none">⏺️</span>
             <p className="text-sm text-amber-900">
-              This call will be recorded. Aria will call your phone first; once you answer, a recorded
-              message plays before the customer is connected letting them know the call is recorded.
+              This call will be recorded. A recorded message plays before the customer is connected letting them know the call is recorded.
             </p>
           </div>
 
-          {callState === 'idle' && (
-            <form onSubmit={handleSubmit} className="space-y-4">
-              {errorMsg && (
-                <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">{errorMsg}</div>
-              )}
+          {errorMsg && <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">{errorMsg}</div>}
 
+          {mode === 'browser' ? (
+            <form onSubmit={handleBrowserCall} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Your Phone Number</label>
+                <label htmlFor="browser-customer-phone" className="block text-sm font-medium text-gray-700 mb-1">Customer's Phone Number</label>
                 <input
-                  type="tel"
-                  value={repPhone}
-                  onChange={(e) => setRepPhone(e.target.value)}
-                  placeholder="(616) 555-1234"
-                  className="w-full rounded-xl border border-gray-300 px-4 py-3 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
-                />
-                {repPhoneError && <p className="text-xs text-red-600 mt-1">{repPhoneError}</p>}
-                <p className="text-xs text-gray-400 mt-1">Aria calls this number first — answer to be connected.</p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Customer's Phone Number</label>
-                <input
+                  id="browser-customer-phone"
                   type="tel"
                   value={customerPhone}
                   onChange={(e) => setCustomerPhone(e.target.value)}
+                  disabled={browserBusy}
                   placeholder="(616) 555-6789"
-                  className="w-full rounded-xl border border-gray-300 px-4 py-3 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                  className="w-full rounded-xl border border-gray-300 px-4 py-3 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:bg-gray-50"
                 />
                 {customerPhoneError && <p className="text-xs text-red-600 mt-1">{customerPhoneError}</p>}
               </div>
 
-              <div className="pt-2 pb-2">
-                <button
-                  type="submit"
-                  className="w-full bg-brand-700 hover:bg-brand-800 disabled:opacity-60 text-white font-semibold py-4 rounded-xl transition-colors text-lg"
-                >
-                  📞 Start Phone Meeting
-                </button>
-              </div>
+              <div role="status" className="rounded-xl bg-blue-50 text-blue-900 px-4 py-3 text-sm">{browserStatus[browserState]}</div>
+
+              {browserState === 'connected' ? (
+                <div className="grid grid-cols-2 gap-3">
+                  <button type="button" onClick={toggleMute} className="border border-gray-300 font-semibold py-3 rounded-xl">
+                    {muted ? 'Unmute' : 'Mute'}
+                  </button>
+                  <button type="button" onClick={hangUp} className="bg-red-600 hover:bg-red-700 text-white font-semibold py-3 rounded-xl">Hang Up</button>
+                </div>
+              ) : browserBusy ? (
+                <button type="button" onClick={hangUp} className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-3 rounded-xl">Hang Up</button>
+              ) : (
+                <button type="submit" className="w-full bg-brand-700 hover:bg-brand-800 text-white font-semibold py-4 rounded-xl text-lg">Call from Browser</button>
+              )}
+
+              <button type="button" disabled={browserBusy} onClick={() => usePhoneFallback()} className="w-full text-sm text-gray-600 hover:text-gray-800 underline disabled:opacity-40">
+                Use My Phone Instead
+              </button>
             </form>
-          )}
-
-          {callState === 'placing' && (
-            <div className="py-8 text-center space-y-3">
-              <div className="animate-spin h-8 w-8 border-4 border-brand-600 border-t-transparent rounded-full mx-auto" />
-              <p className="text-gray-600 text-sm">Placing call…</p>
-            </div>
-          )}
-
-          {callState === 'ringing-rep' && (
-            <div className="py-8 text-center space-y-3">
-              <div className="text-4xl">📱</div>
-              <p className="text-gray-900 font-semibold">Aria is calling your phone</p>
-              <p className="text-gray-500 text-sm">
-                Answer to be connected. You'll hear the recording disclosure, then the customer will join.
-              </p>
-              <button
-                onClick={onClose}
-                className="mt-2 text-sm text-gray-500 hover:text-gray-700 underline"
-              >
-                Close this window
-              </button>
-            </div>
-          )}
-
-          {callState === 'failed' && (
-            <div className="space-y-4">
-              <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3">
-                <p className="text-sm font-medium text-red-800 mb-1">Couldn't place the call</p>
-                <p className="text-sm text-red-700">{errorMsg}</p>
+          ) : (
+            <form onSubmit={handlePhoneCall} className="space-y-4">
+              <div className="rounded-xl bg-gray-50 px-4 py-3 text-sm text-gray-700">Aria calls your phone first. Answer it to connect to the customer.</div>
+              <div>
+                <label htmlFor="fallback-rep-phone" className="block text-sm font-medium text-gray-700 mb-1">Your Phone Number</label>
+                <input id="fallback-rep-phone" type="tel" value={repPhone} onChange={(e) => setRepPhone(e.target.value)} disabled={phoneBusy} placeholder="(616) 555-1234" className="w-full rounded-xl border border-gray-300 px-4 py-3 disabled:bg-gray-50" />
+                {repPhoneError && <p className="text-xs text-red-600 mt-1">{repPhoneError}</p>}
               </div>
-              <button
-                onClick={() => { setCallState('idle'); setErrorMsg(''); }}
-                className="w-full bg-brand-700 hover:bg-brand-800 text-white font-semibold py-3 rounded-xl transition-colors"
-              >
-                Try Again
-              </button>
-            </div>
+              <div>
+                <label htmlFor="fallback-customer-phone" className="block text-sm font-medium text-gray-700 mb-1">Customer's Phone Number</label>
+                <input id="fallback-customer-phone" type="tel" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} disabled={phoneBusy} placeholder="(616) 555-6789" className="w-full rounded-xl border border-gray-300 px-4 py-3 disabled:bg-gray-50" />
+                {customerPhoneError && <p className="text-xs text-red-600 mt-1">{customerPhoneError}</p>}
+              </div>
+              {phoneState === 'ringing-rep' ? (
+                <div role="status" className="rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-900">Aria is calling your phone. Answer to be connected.</div>
+              ) : (
+                <button type="submit" disabled={phoneBusy} className="w-full bg-brand-700 hover:bg-brand-800 disabled:opacity-60 text-white font-semibold py-4 rounded-xl text-lg">
+                  {phoneState === 'placing' ? 'Placing call…' : 'Start Phone Meeting'}
+                </button>
+              )}
+              {!phoneBusy && <button type="button" onClick={() => { setMode('browser'); setErrorMsg(''); setPhoneState('idle'); }} className="w-full text-sm text-gray-600 underline">Back to Call from Browser</button>}
+            </form>
           )}
         </div>
       </div>

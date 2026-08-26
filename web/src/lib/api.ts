@@ -514,6 +514,22 @@ export async function startOutboundCall(
   });
 }
 
+export interface BrowserCallSetup {
+  browserCalling: true;
+  token: string;
+  pendingCallId: string;
+  expiresIn: number;
+}
+
+/**
+ * Creates a short-lived, server-bound browser-call capability. The token is
+ * returned to the caller and kept only in component memory; api.ts never
+ * persists or logs it.
+ */
+export async function createBrowserCall(customerPhone: string): Promise<BrowserCallSetup> {
+  return request('POST', '/telephony/browser-token', { customerPhone });
+}
+
 // ─── Objections / Rebuttals library (2026-08-18) ─────────────────────
 // Troy Hacker's request ("Rebuttal list to objections" in HighPriority
 // Todos). Standalone reference library, shared across all reps — see

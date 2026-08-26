@@ -218,11 +218,11 @@ console.log('\n--- Meeting-lookup logic tests (mocked DB) ---');
           return { rows: found };
         }
         if (sql.startsWith('INSERT INTO meetings')) {
-          const [customerId, callSid] = params;
+          const [customerId, repId, callSid] = params;
           const row = {
             id: `mock-meeting-${meetings.length + 1}`,
             customer_id: customerId,
-            rep_id: null,
+            rep_id: repId,
             status: 'active',
             channel: 'phone',
             call_sid: callSid,

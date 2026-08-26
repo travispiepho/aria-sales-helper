@@ -433,10 +433,19 @@ export default function MeetingPage() {
         ]);
       }
     } else if (msg.type === 'speaker_lock') {
-      // Voice fingerprint matched — auto-label the rep's speaker ID
-      const { speakerId, name } = msg as { type: string; speakerId: string; name: string };
-      handleSpeakerLabelChange(speakerId, name);
-      setVoiceToast(`🎙️ ${name} identified`);
+      const { speakerId, name, source } = msg as { type: string; speakerId: string; name: string; source?: string };
+      if (source === 'introduction') {
+        // Introduction labels are already persisted atomically with the
+        // transcript relabel on the server. Update local rendering only;
+        // sending the page's stale full speaker_labels map back here could
+        // overwrite the second identity when rep/customer events arrive close
+        // together.
+        setSpeakerLabels(prev => ({ ...prev, [speakerId]: name }));
+      } else {
+        // Voice/manual confirmation still uses the existing persistence path.
+        handleSpeakerLabelChange(speakerId, name);
+      }
+      setVoiceToast(source === 'introduction' ? `✓ ${name} identified from the introduction` : `🎙️ ${name} identified`);
       setTimeout(() => setVoiceToast(null), 4000);
     } else if (msg.type === 'speaker_unlock') {
       // Server detected the rep-voiceprint lock drifted (likely a wrong

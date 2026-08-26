@@ -50,6 +50,7 @@ import {
 // ("Hi, I'm John"). Replaces the old hand-picked STOPWORDS blocklist — see
 // nameHeuristics.js header for why (dictionary signal, not capitalization).
 import { isLikelyName, toDisplayName } from './nameHeuristics.js';
+import { createInPersonIntroductionLabeler, persistIntroductionResolution } from './inPersonIntroductionLabels.js';
 import { createReconnectTracker } from './dgReconnectPolicy.js';
 import { createReadinessTracker } from './readinessTracker.js';
 import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
@@ -311,7 +312,10 @@ function broadcastToMeeting(meetingId, payload) {
 // existed) is never treated as "someone else's" meeting.
 function shapeMeetingForClient(meetingRow, requestSessionId) {
   if (!meetingRow) return meetingRow;
-  const { owner_session_id, ...rest } = meetingRow;
+  // Keep introduction evidence server-side for audit/debug. It contains an
+  // exact transcript excerpt and must not ride every general meeting-detail
+  // response when the UI only needs the resolved labels.
+  const { owner_session_id, speaker_label_evidence: _speakerLabelEvidence, ...rest } = meetingRow;
   return {
     ...rest,
     is_owner_session: !owner_session_id || owner_session_id === requestSessionId,
@@ -630,6 +634,12 @@ async function ensureSessionsTable() {
   // speaker_labels column on meetings (added 2026-07-17)
   await pool.query(`
     ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speaker_labels JSONB DEFAULT '{}'
+  `);
+  // Introduction-derived identities + exact transcript evidence. This is
+  // metadata only: evidence points at the already-persisted transcript row;
+  // no duplicate audio or recording is created.
+  await pool.query(`
+    ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speaker_label_evidence JSONB NOT NULL DEFAULT '{}'
   `);
   // Persisted meeting title (used by MeetingPage, Home/history, transcript
   // downloads and Docs exports). Some live databases predate the title UI;
@@ -2137,7 +2147,12 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
     // generated.)
     updates.push(`auto_titled = false`);
   }
-  if (speaker_labels !== undefined) { updates.push(`speaker_labels = $${idx++}`); values.push(JSON.stringify(speaker_labels)); }
+  if (speaker_labels !== undefined) {
+    // Manual UI labels are authoritative. Persist them and, while a live
+    // in-person session exists, seed its lock state before later inference.
+    updates.push(`speaker_labels = $${idx++}`);
+    values.push(JSON.stringify(speaker_labels));
+  }
 
   if (updates.length === 0) {
     return reply.code(400).send({ error: 'No fields to update' });
@@ -2157,6 +2172,18 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
     updated = requireSingleMeetingUpdate(result);
   } catch (err) {
     return reply.code(err.statusCode || 409).send({ error: err.message });
+  }
+
+  // Only seed the live manual lock after persistence succeeds. A failed
+  // speaker-label PATCH must not leave an in-memory lock that survives for
+  // the rest of the active meeting.
+  if (speaker_labels !== undefined) {
+    const liveController = activeMeetingSpeakerControllers.get(id);
+    if (liveController?.manualLock) {
+      for (const [speakerId, name] of Object.entries(speaker_labels || {})) {
+        if (String(name || '').trim()) liveController.manualLock(speakerId, String(name).trim());
+      }
+    }
   }
 
   // Live meeting sync: if this PATCH just finalized the meeting, tell any
@@ -3774,7 +3801,74 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
   const speakerChunks = {}; // canonical speaker id -> Float32Array[] (rep-voiceprint match)
   const speakerLocks = {};  // canonical speaker id (string) -> displayName
+  const speakerLockSources = {}; // canonical speaker id -> manual|introduction|voiceprint
+  // Persisted labels include older manual UI choices and prior introduction
+  // resolutions after a reconnect. Seed them before any inference runs.
+  for (const [speakerId, name] of Object.entries(meeting.speaker_labels || {})) {
+    const parsed = /Speaker\s+(\d+)/i.exec(speakerId);
+    if (!parsed || !String(name || '').trim()) continue;
+    const si = String(parseInt(parsed[1], 10) - 1);
+    speakerLocks[si] = String(name).trim();
+    speakerLockSources[si] = meeting.speaker_label_evidence?.[si]?.method === 'introduction' ? 'introduction' : 'manual';
+  }
   let voiceMatchDone = false;
+
+  const persistedIntroEvidence = meeting.speaker_label_evidence || {};
+  // `channel=phone` covers both rep-phone and browser/Twilio meetings. Keep
+  // all introduction heuristics (including the historical suggestion flow)
+  // behind this one explicit guard.
+  const isInPersonIntroductionMeeting = meeting.channel === 'in_person';
+  const introductionLabeler = createInPersonIntroductionLabeler({
+    meetingType: isInPersonIntroductionMeeting ? 'in_person' : meeting.channel,
+    repDisplayName: repName,
+    startedAtMs: new Date(meeting.started_at || Date.now()).getTime(),
+    existingLocks: Object.fromEntries(
+      Object.entries(speakerLocks).map(([si, name]) => [si, { name, source: speakerLockSources[si] }])
+    ),
+    existingEvidence: persistedIntroEvidence,
+    onConflict: (conflict) => fastify.log.warn(`In-person introduction conflict for ${meetingId}: ${JSON.stringify(conflict)}`),
+    resolveIdentity: async ({ speakerIndex, name, role, evidence }) => {
+      const si = String(speakerIndex);
+      const current = speakerLocks[si];
+      if (current) return { resolved: false, reason: current === name ? 'idempotent' : 'locked' };
+
+      // Reserve the live slot before DB I/O so another finalized segment
+      // cannot race through and assign it differently.
+      speakerLocks[si] = name;
+      speakerLockSources[si] = 'introduction_pending';
+      const speakerId = `Speaker ${speakerIndex + 1}`;
+      let result;
+      try {
+        result = await persistIntroductionResolution({
+          pool, meetingId, speakerIndex, name, evidence,
+        });
+      } catch (err) {
+        delete speakerLocks[si];
+        delete speakerLockSources[si];
+        throw err;
+      }
+      if (!result.resolved) {
+        delete speakerLocks[si];
+        delete speakerLockSources[si];
+        return result;
+      }
+
+      meeting.speaker_labels = result.speakerLabels;
+      meeting.speaker_label_evidence = result.speakerLabelEvidence;
+      speakerLocks[si] = name;
+      speakerLockSources[si] = 'introduction';
+      broadcastToMeeting(meetingId, {
+        type: 'speaker_lock',
+        speakerId,
+        name,
+        role,
+        source: 'introduction',
+        confidence: evidence.confidence,
+      });
+      fastify.log.info(`In-person introduction resolved ${speakerId} -> ${name} (${role}, ${evidence.pattern})`);
+      return { resolved: true };
+    },
+  });
 
   // ── Mid-call name-introduction: 15s collection window + confirm popup ─────
   // (2026-08-10, Gabe Bass intro-window fix). Two-part behavior:
@@ -3821,6 +3915,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   // now just accumulates candidates and delegates the elapsed-check/emit
   // to this function, and the sweep timer calls the exact same function.
   function maybeSuggestIntro(si, nowIntro) {
+    if (!isInPersonIntroductionMeeting) return;
     if (speakerLocks[si]) return;
     const elapsed = nowIntro - (speakerFirstSeen[si] ?? nowIntro);
     const cooldownOk = nowIntro >= (introSuggestCooldownUntil[si] || 0);
@@ -3877,6 +3972,8 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       // no-op success (idempotent for double-clicks / observer echoes).
       if (!speakerLocks[si]) {
         speakerLocks[si] = display;
+        speakerLockSources[si] = 'manual';
+        introductionLabeler.setManualLock(si, display);
         fastify.log.info(`Speaker intro CONFIRMED by user: Speaker ${parseInt(si, 10) + 1} -> ${display}`);
       }
       delete pendingIntroSuggestion[si];
@@ -3886,6 +3983,16 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
         name: speakerLocks[si],
       });
       return { ok: true, locked: speakerLocks[si] };
+    },
+    manualLock(speakerId, name) {
+      const si = this._siFromLabel(speakerId);
+      if (si === null) return { ok: false, error: 'bad speakerId' };
+      const display = String(name || '').trim();
+      if (!display) return { ok: false, error: 'empty name' };
+      speakerLocks[si] = display;
+      speakerLockSources[si] = 'manual';
+      introductionLabeler.setManualLock(si, display);
+      return { ok: true, locked: display };
     },
     reject(speakerId, name) {
       const si = this._siFromLabel(speakerId);
@@ -4015,6 +4122,9 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
   async function maybeMergeSpeaker(rawSi) {
     if (speakerAlias[rawSi] !== undefined) return; // already resolved
+    // A proven/manual identity is an authoritative boundary. Do not allow the
+    // coarse spectral deduper to collapse it into or out of another slot.
+    if (speakerLocks[String(rawSi)]) return;
     if (speakerRefFeatures[rawSi] !== undefined) return; // already its own canonical
     const chunks = speakerRefChunks[rawSi];
     if (!chunks) return;
@@ -4038,11 +4148,14 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       // step should only ever consolidate customer-side over-segmentation, not
       // reassign someone else's voice onto the rep.
       if (lockedSpeakerId !== null && Number(canonicalSi) === Number(lockedSpeakerId)) continue;
+      if (speakerLocks[String(canonicalSi)]) continue;
       const score = similarityScore(features, refFeatures);
       if (score > bestScore) { bestScore = score; bestMatch = Number(canonicalSi); }
     }
 
     if (bestMatch !== null && bestScore >= DEDUP_MERGE_THRESHOLD) {
+      const introAlias = introductionLabeler.addAlias(rawSi, bestMatch);
+      if (!introAlias.aliased && introAlias.reason === 'locked') return;
       speakerAlias[rawSi] = bestMatch;
       fastify.log.info(`Speaker dedup: Speaker ${rawSi + 1} merged into Speaker ${bestMatch + 1} (score=${bestScore.toFixed(3)})`);
 
@@ -4234,6 +4347,8 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
               if (bestScore >= MATCH_THRESHOLD && (marginOk || pastMaxWait)) {
                 speakerLocks[bestSi] = repName;
+                speakerLockSources[bestSi] = 'voiceprint';
+                introductionLabeler.setManualLock(bestSi, repName);
                 voiceMatchDone = true;
                 lockedSpeakerId = bestSi;
                 lastDriftCheckAt = now;
@@ -4357,7 +4472,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           const nowIntro = Date.now();
           if (speakerFirstSeen[si] === undefined) speakerFirstSeen[si] = nowIntro;
 
-          if (!speakerLocks[si]) {
+          if (isInPersonIntroductionMeeting && !speakerLocks[si]) {
             // Gather EVERY intro-trigger candidate in this segment (a rep may
             // say "I'm John, and this is Sarah" — both are captured; the human
             // confirmation step resolves any mis-attribution to the wrong slot).
@@ -4386,7 +4501,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
             maybeSuggestIntro(si, nowIntro);
           }
 
-          const groupLabel = speakerLocks[si] || `Speaker ${group.si + 1}`;
+          let groupLabel = speakerLocks[si] || `Speaker ${group.si + 1}`;
           // 2026-08-09: capture the newly-inserted row's UUID (RETURNING id)
           // so the 'final' broadcast below can carry the same stable id the
           // REST /segments route and WS sync_snapshot now expose, instead of
@@ -4394,14 +4509,35 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           // insert fails, insertedSegmentId stays undefined and the broadcast
           // simply omits `id` (unchanged fallback behavior for that segment).
           let insertedSegmentId;
+          let insertedSegmentTs;
           try {
             const insertResult = await pool.query(
-              `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id`,
+              `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id, ts`,
               [meetingId, groupLabel, groupText, groupWordCount, groupDurationMs]
             );
             insertedSegmentId = insertResult.rows[0]?.id;
+            insertedSegmentTs = insertResult.rows[0]?.ts;
           } catch (dbErr) {
             fastify.log.error('transcript_segments insert error:', dbErr);
+          }
+
+          // Introduction evidence references the transcript row just inserted;
+          // no second recording/audio copy is made. Resolution may relabel this
+          // and all prior rows before the live final event is emitted.
+          if (insertedSegmentId && introductionLabeler.enabled) {
+            try {
+              await introductionLabeler.onSegment({
+                id: insertedSegmentId,
+                speakerIndex: group.si,
+                text: groupText,
+                ts: insertedSegmentTs || new Date().toISOString(),
+                timestampMs: insertedSegmentTs ? new Date(insertedSegmentTs).getTime() : Date.now(),
+              });
+              groupLabel = speakerLocks[si] || groupLabel;
+            } catch (introErr) {
+              // Label inference must never interrupt recording/transcription.
+              fastify.log.error(`In-person introduction labeling error for ${meetingId}: ${introErr.message}`);
+            }
           }
           // ── 2026-08-05 live-sync ROOT-CAUSE FIX ──────────────────────────
           // This was socket.send() (owner-audio-socket only). That is the

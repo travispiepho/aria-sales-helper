@@ -2151,6 +2151,7 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
     updates.push(`auto_titled = false`);
   }
   let liveManualLabels = null;
+  const manualTranscriptRelabels = [];
   if (speaker_labels !== undefined) {
     if (!speaker_labels || typeof speaker_labels !== 'object' || Array.isArray(speaker_labels)) {
       return reply.code(400).send({ error: 'speaker_labels must be an object' });
@@ -2177,6 +2178,10 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
         liveManualLabels[speakerId] = name;
         if (evidenceKey !== null && meeting.speaker_label_evidence?.[evidenceKey]) {
           evidenceKeysToClear.push(evidenceKey);
+          const previousName = String(meeting.speaker_labels?.[speakerId] || '').trim();
+          if (previousName && previousName !== name) {
+            manualTranscriptRelabels.push({ speakerId, from: previousName, to: name });
+          }
         }
       }
     }
@@ -2211,6 +2216,18 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   // the rest of the active meeting.
   if (liveManualLabels) {
     const liveController = activeMeetingSpeakerControllers.get(id);
+    for (const { speakerId, from, to } of manualTranscriptRelabels) {
+      // Introduction rows are stored with the resolved name so history/export
+      // survive refresh. If a human corrects that name later, update those
+      // rows too; otherwise the manual label would appear to save while old
+      // history and exports continued showing the inferred name.
+      await pool.query(
+        `UPDATE transcript_segments SET speaker = $1 WHERE meeting_id = $2 AND speaker = $3`,
+        [to, id, from]
+      );
+      broadcastToMeeting(id, { type: 'speaker_merge', from, to, source: 'manual_override' });
+      broadcastToMeeting(id, { type: 'speaker_lock', speakerId, name: to, source: 'manual' });
+    }
     if (liveController?.manualLock) {
       for (const [speakerId, name] of Object.entries(liveManualLabels)) {
         liveController.manualLock(speakerId, name);

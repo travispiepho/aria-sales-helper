@@ -437,6 +437,9 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
       identity,
       customerPhone,
       customerId,
+      consumed: false,
+      meetingId: null,
+      error: null,
       expiresAtMs: Date.now() + BROWSER_PENDING_TTL_MS,
     });
 
@@ -458,6 +461,24 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     });
   });
 
+  // App-facing rendezvous for the asynchronous Twilio Voice URL below.
+  // Device.connect() cannot receive our server-created meeting UUID, so the
+  // authenticated browser polls this short-lived, rep-bound record until the
+  // signed /browser-outgoing webhook has linked the CallSid to a meeting.
+  // No phone number, token, Twilio SID, or other call trust data is exposed.
+  fastify.get('/telephony/browser-call/:pendingCallId', async (request, reply) => {
+    if (!request.user) return reply.code(401).send({ error: 'Unauthorized' });
+    const gated = browserGateReply(reply);
+    if (gated) return gated;
+
+    pruneBrowserPendingCalls();
+    const pending = browserPendingCalls.get(request.params?.pendingCallId);
+    if (!pending || pending.repId !== request.user.id) {
+      return reply.code(404).send({ error: 'Browser call not found or expired' });
+    }
+    return reply.send({ meetingId: pending.meetingId, error: pending.error });
+  });
+
   // Twilio-facing Voice URL for the dedicated browser TwiML App. Twilio
   // signs the SDK request, but its custom params remain user-controlled, so
   // only the opaque pendingCallId is accepted and all trusted fields are
@@ -476,7 +497,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     pruneBrowserPendingCalls();
     const pendingCallId = request.body?.pendingCallId;
     const pending = typeof pendingCallId === 'string' ? browserPendingCalls.get(pendingCallId) : null;
-    if (!pending) return reply.code(400).send({ error: 'Invalid or expired pending call' });
+    if (!pending || pending.consumed) return reply.code(400).send({ error: 'Invalid, expired, or already-used pending call' });
 
     // Twilio supplies the token identity as `From=client:<identity>` on an
     // outgoing SDK call. This prevents one authenticated browser from using
@@ -486,7 +507,10 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     }
     const customerNumber = normalizePhoneNumber(pending.customerPhone);
     if (!customerNumber) return reply.code(400).send({ error: 'Invalid pending customer number' });
-    browserPendingCalls.delete(pendingCallId);
+    // Consume before any asynchronous work so a Twilio retry cannot create a
+    // second customer dial/meeting. Keep the rep-bound status record only as
+    // a short-lived meeting-ID rendezvous for the browser UI.
+    pending.consumed = true;
 
     const callSid = request.body?.CallSid;
     if (!callSid) return reply.code(400).send({ error: 'Missing CallSid' });
@@ -502,9 +526,12 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
       // Meeting linkage is mandatory for browser calls: without it the media
       // stream cannot safely feed the correct transcript/coaching timeline.
       fastify.log.error(`/telephony/browser-outgoing meeting create failed: ${err.message}`);
+      pending.error = 'Meeting setup failed';
       const errorTwiml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response><Say>Sorry, we could not start this call. Goodbye.</Say><Hangup/></Response>`;
       return reply.type('text/xml').send(errorTwiml);
     }
+
+    pending.meetingId = meeting.id;
 
     const forwardedProto = request.headers['x-forwarded-proto'];
     const protocol = (forwardedProto ? forwardedProto.split(',')[0].trim() : null) || 'https';

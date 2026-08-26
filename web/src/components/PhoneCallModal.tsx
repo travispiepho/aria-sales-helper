@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Call, Device } from '@twilio/voice-sdk';
-import { createBrowserCall, startOutboundCall } from '../lib/api';
+import React, { useState } from 'react';
+import { startOutboundCall } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { browserCallStatusLabel, useBrowserCall } from '../lib/browserCall';
 
 interface Props {
   onClose: () => void;
@@ -9,16 +9,6 @@ interface Props {
 }
 
 type Mode = 'browser' | 'phone';
-type BrowserState =
-  | 'idle'
-  | 'initializing'
-  | 'ready'
-  | 'dialing'
-  | 'ringing'
-  | 'connecting'
-  | 'connected'
-  | 'ended'
-  | 'error';
 type PhoneState = 'idle' | 'placing' | 'ringing-rep' | 'failed';
 
 function looksLikePhoneNumber(raw: string): boolean {
@@ -39,37 +29,15 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
   const [customerPhone, setCustomerPhone] = useState('');
   const [repPhoneError, setRepPhoneError] = useState('');
   const [customerPhoneError, setCustomerPhoneError] = useState('');
-  const [browserState, setBrowserState] = useState<BrowserState>('idle');
   const [phoneState, setPhoneState] = useState<PhoneState>('idle');
   const [errorMsg, setErrorMsg] = useState('');
-  const [muted, setMuted] = useState(false);
-  const deviceRef = useRef<Device | null>(null);
-  const callRef = useRef<Call | null>(null);
-  const mountedRef = useRef(true);
+  const browserCall = useBrowserCall();
+  const browserState = browserCall.state;
+  const muted = browserCall.muted;
 
   const browserBusy = ['initializing', 'dialing', 'ringing', 'connecting', 'connected'].includes(browserState);
   const phoneBusy = phoneState === 'placing' || phoneState === 'ringing-rep';
   const busy = browserBusy || phoneBusy;
-
-  function cleanupCall() {
-    const call = callRef.current;
-    callRef.current = null;
-    if (call) {
-      call.removeAllListeners();
-      if (call.status() !== Call.State.Closed) call.disconnect();
-    }
-    const device = deviceRef.current;
-    deviceRef.current = null;
-    if (device) {
-      device.removeAllListeners();
-      device.destroy();
-    }
-  }
-
-  useEffect(() => () => {
-    mountedRef.current = false;
-    cleanupCall();
-  }, []);
 
   function validateCustomer(): boolean {
     if (!looksLikePhoneNumber(customerPhone)) {
@@ -81,10 +49,8 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
   }
 
   function usePhoneFallback(reason?: string) {
-    cleanupCall();
+    browserCall.clear();
     setMode('phone');
-    setBrowserState('idle');
-    setMuted(false);
     if (reason) setErrorMsg(`${reason} You can still call using your phone.`);
   }
 
@@ -93,54 +59,10 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
     setErrorMsg('');
     if (!validateCustomer()) return;
 
-    cleanupCall();
-    setBrowserState('initializing');
     try {
-      const setup = await createBrowserCall(customerPhone.trim());
-      if (!mountedRef.current) return;
-
-      const device = new Device(setup.token, {
-        appName: 'ARIA Web',
-        appVersion: '1.0.0',
-        logLevel: 4,
-      });
-      deviceRef.current = device;
-      device.on('error', (error) => {
-        if (!mountedRef.current) return;
-        setErrorMsg(error.message || 'Browser calling error');
-        setBrowserState('error');
-      });
-      setBrowserState('ready');
-
-      // Device.connect() obtains microphone permission through the SDK. No
-      // separate getUserMedia/autoplay workaround and no token persistence.
-      setBrowserState('dialing');
-      const call = await device.connect({
-        params: { pendingCallId: setup.pendingCallId },
-        rtcConstraints: { audio: true },
-      });
-      if (!mountedRef.current) {
-        call.disconnect();
-        device.destroy();
-        return;
-      }
-      callRef.current = call;
-      setBrowserState('connecting');
-
-      call.on('ringing', () => mountedRef.current && setBrowserState('ringing'));
-      call.on('accept', () => mountedRef.current && setBrowserState('connected'));
-      call.on('disconnect', () => mountedRef.current && setBrowserState('ended'));
-      call.on('cancel', () => mountedRef.current && setBrowserState('ended'));
-      call.on('reject', () => mountedRef.current && setBrowserState('ended'));
-      call.on('mute', (isMuted) => mountedRef.current && setMuted(isMuted));
-      call.on('error', (error) => {
-        if (!mountedRef.current) return;
-        setErrorMsg(error.message || 'Call failed');
-        setBrowserState('error');
-      });
+      const meetingId = await browserCall.start(customerPhone.trim());
+      onMeetingReady(meetingId);
     } catch (err) {
-      if (!mountedRef.current) return;
-      cleanupCall();
       usePhoneFallback(messageFromError(err));
     }
   }
@@ -167,32 +89,17 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
   }
 
   function hangUp() {
-    callRef.current?.disconnect();
-    setBrowserState('ended');
+    browserCall.hangUp();
   }
 
   function toggleMute() {
-    const next = !muted;
-    callRef.current?.mute(next);
-    setMuted(next);
+    browserCall.toggleMute();
   }
 
   function close() {
-    cleanupCall();
+    browserCall.clear();
     onClose();
   }
-
-  const browserStatus: Record<BrowserState, string> = {
-    idle: 'Ready to call from this browser',
-    initializing: 'Initializing secure browser calling…',
-    ready: 'Microphone ready',
-    dialing: 'Dialing…',
-    ringing: 'Customer phone is ringing…',
-    connecting: 'Connecting…',
-    connected: muted ? 'Connected · Muted' : 'Connected',
-    ended: 'Call ended',
-    error: 'Call error',
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
@@ -211,7 +118,11 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
             </p>
           </div>
 
-          {errorMsg && <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">{errorMsg}</div>}
+          {(errorMsg || browserCall.error) && (
+            <div className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">
+              {errorMsg || browserCall.error}
+            </div>
+          )}
 
           {mode === 'browser' ? (
             <form onSubmit={handleBrowserCall} className="space-y-4">
@@ -229,7 +140,7 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
                 {customerPhoneError && <p className="text-xs text-red-600 mt-1">{customerPhoneError}</p>}
               </div>
 
-              <div role="status" className="rounded-xl bg-blue-50 text-blue-900 px-4 py-3 text-sm">{browserStatus[browserState]}</div>
+              <div role="status" className="rounded-xl bg-blue-50 text-blue-900 px-4 py-3 text-sm">{browserCallStatusLabel(browserState, muted)}</div>
 
               {browserState === 'connected' ? (
                 <div className="grid grid-cols-2 gap-3">

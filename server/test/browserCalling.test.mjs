@@ -136,12 +136,29 @@ test('signed browser TwiML links meeting and preserves consent, dual recording a
   assert.equal(pool.meetings[0].customer_id, 'customer-1');
   assert.equal(pool.meetings[0].call_sid, params.CallSid);
 
+  const status = await app.inject({ method: 'GET', url: `/telephony/browser-call/${setup.pendingCallId}` });
+  assert.equal(status.statusCode, 200, status.body);
+  assert.deepEqual(status.json(), { meetingId: 'meeting-1', error: null });
+
   // Single-use pending record prevents a retry from creating another dial.
   const retryUrl = 'https://aria.example.test/telephony/browser-outgoing';
   const retry = await app.inject({ method: 'POST', url: '/telephony/browser-outgoing', payload: form(params), headers: signedHeaders(retryUrl, params) });
   assert.equal(retry.statusCode, 400);
   assert.equal(pool.meetings.length, 1);
   await app.close();
+});
+
+test('meeting-ID rendezvous is authenticated and bound to the rep that created the pending call', async () => {
+  const { app } = await buildApp();
+  const setup = await setupBrowserCall(app);
+  const missing = await app.inject({ method: 'GET', url: '/telephony/browser-call/not-real' });
+  assert.equal(missing.statusCode, 404);
+  await app.close();
+
+  const { app: anonymous } = await buildApp({ authenticated: false });
+  const denied = await anonymous.inject({ method: 'GET', url: `/telephony/browser-call/${setup.pendingCallId}` });
+  assert.equal(denied.statusCode, 401);
+  await anonymous.close();
 });
 
 test('signed request cannot swap token identity', async () => {

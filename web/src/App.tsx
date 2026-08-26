@@ -25,6 +25,7 @@ import SignupClaimPage from './pages/SignupClaimPage';
 // limited-UI dialog. See useMeetingSyncWatcher.ts and MeetingPage.tsx's
 // observer-mode render branches for the full rework.
 import { useMeetingSyncWatcher } from './lib/useMeetingSyncWatcher';
+import { BrowserCallProvider } from './lib/browserCall';
 
 function IOSWarning() {
   return (
@@ -104,8 +105,9 @@ export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
-        <AuthedSyncGate />
-        <Routes>
+        <BrowserCallProvider>
+          <AuthedSyncGate />
+          <Routes>
           <Route path="/login" element={<LoginPage />} />
           {/* Invite claim / signup (2026-08-18) — PUBLIC, no auth required.
               NOT email verification: a rep who was given an email + claim
@@ -207,7 +209,8 @@ export default function App() {
             }
           />
           <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+          </Routes>
+        </BrowserCallProvider>
       </BrowserRouter>
     </AuthProvider>
   );

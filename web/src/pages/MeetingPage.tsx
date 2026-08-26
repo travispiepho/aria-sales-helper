@@ -18,6 +18,8 @@ import CoachingReportCard from '../components/CoachingReportCard';
 import { getWsBase } from '../lib/wsBase';
 import { createReconnectTracker, ReconnectTracker } from '../lib/reconnectPolicy';
 import AppHeader from '../components/AppHeader';
+import BrowserCallControls from '../components/BrowserCallControls';
+import { useBrowserCall } from '../lib/browserCall';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -121,6 +123,7 @@ function formatDuration(startIso: string, endIso?: string): string {
 export default function MeetingPage() {
   const { id: meetingId } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const browserCall = useBrowserCall();
 
   // Meeting state
   const [meeting, setMeeting] = useState<Meeting | null>(null);
@@ -1429,6 +1432,7 @@ export default function MeetingPage() {
   // gains its own Twilio-bridged calling path in the future, this same
   // compound check keeps working with zero changes here.
   const isTwilioPhoneCall = meeting.channel === 'phone' && !!meeting.call_sid;
+  const isThisBrowserCall = !!meetingId && browserCall.meetingId === meetingId;
 
   return (
     <div className="min-h-screen bg-gray-200 flex flex-col">
@@ -1492,6 +1496,7 @@ export default function MeetingPage() {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 pb-32">
+        {meetingId && <BrowserCallControls meetingId={meetingId} />}
 
         {/* ── Active meeting: Record controls ── */}
         {isActive && (
@@ -1936,10 +1941,10 @@ export default function MeetingPage() {
           bypassing this UI entirely. Observer sessions get a plain
           "← Back to Home" instead, same as the post-meeting view every
           session sees once the mobile device ends the meeting. */}
-      <div
-        className="fixed bottom-0 left-0 right-0 px-4 pb-4 bg-white border-t border-gray-100 shadow-lg"
-        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
-      >
+      {!isThisBrowserCall && <div
+          className="fixed bottom-0 left-0 right-0 px-4 pb-4 bg-white border-t border-gray-100 shadow-lg"
+          style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+        >
         {isActive && isOwnerSession && isTwilioPhoneCall ? (
           // 2026-08-17 (ARIA meeting UI by type, Part 2) — Gabe, verbatim:
           // "For phone calls I want the end meeting button to say hang up to
@@ -1981,7 +1986,7 @@ export default function MeetingPage() {
             ← Back to Home
           </button>
         )}
-      </div>
+        </div>}
 
       {/* Consent modal */}
       {showConsentPrompt && (

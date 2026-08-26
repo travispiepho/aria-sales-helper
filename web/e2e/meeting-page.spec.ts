@@ -19,9 +19,9 @@ test('phone call, recording in progress: shows Recording (Twilio) indicator, Han
   await expect(page.getByText('End Meeting', { exact: false })).toHaveCount(0);
   // Header timer: must NOT contain the broken "-1:-1" pattern, and must be
   // a real "Active · m:ss" or "Recording · m:ss" shaped string.
-  const header = page.locator('h1', { hasText: 'Test Customer' }).locator('..').locator('p');
+  const header = page.getByText(/^(Active|Recording) · \d+:\d{2}$/);
+  await expect(header).toBeVisible();
   await expect(header).not.toContainText('-1:-1');
-  await expect(header).toContainText(/Active|Recording/);
   // Live transcript empty state should reflect the phone-call-specific
   // copy, NOT the generic "Start recording to see live transcript" (which
   // told Gabe to tap a control that does not exist for a phone call).
@@ -32,7 +32,8 @@ test('phone call, not yet recording: shows waiting state, Hang Up button, no cra
   await page.goto(`${BASE}/meetings/phone-not-recording`);
   await expect(page.getByText('Waiting to record…')).toBeVisible();
   await expect(page.getByText('📞 Hang Up')).toBeVisible();
-  const header = page.locator('h1', { hasText: 'Test Customer 2' }).locator('..').locator('p');
+  const header = page.getByText(/^(Active|Recording) · \d+:\d{2}$/);
+  await expect(header).toBeVisible();
   await expect(header).not.toContainText('-1:-1');
   await expect(page.getByText('Waiting for the customer to answer…')).toBeVisible();
 });
@@ -43,6 +44,42 @@ test('in-person meeting: keeps functional End Meeting button, Record button, gen
   await expect(page.getByText('📞 Hang Up')).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Record/ })).toBeVisible();
   await expect(page.getByText('Start recording to see live transcript')).toBeVisible();
+});
+
+test.describe('browser call live meeting surface', () => {
+  test.use({ viewport: { width: 1280, height: 800 } });
+
+  test('keeps transcript/coaching rendered with compact mute and hang-up controls', async ({ page }) => {
+    await page.addInitScript(() => {
+      sessionStorage.setItem('aria.browserCall.meetingId', 'browser-live');
+    });
+    await page.goto(`${BASE}/meetings/browser-live`);
+    await expect(page.getByRole('heading', { name: 'Live Transcript' })).toBeVisible();
+    await expect(page.getByText('I can see the live transcript.')).toBeVisible();
+    await expect(page.getByLabel('Browser call controls')).toBeVisible();
+    await expect(page.getByText(/Browser call · Call ended/)).toBeVisible();
+    await expect(page.getByText(/ARIA coaching will appear/i)).toBeVisible();
+    await page.screenshot({ path: 'test-results/browser-call-live-desktop.png', fullPage: true });
+  });
+});
+
+test.describe('browser call live meeting at 320px', () => {
+  test.use({ viewport: { width: 320, height: 700 } });
+
+  test('compact controls do not cover transcript content', async ({ page }) => {
+    await page.addInitScript(() => {
+      sessionStorage.setItem('aria.browserCall.meetingId', 'browser-live');
+    });
+    await page.goto(`${BASE}/meetings/browser-live`);
+    const controls = page.getByLabel('Browser call controls');
+    const transcript = page.getByText('I can see the live transcript.');
+    await expect(controls).toBeVisible();
+    await expect(transcript).toBeVisible();
+    const controlsBox = await controls.boundingBox();
+    const transcriptBox = await transcript.boundingBox();
+    expect(controlsBox && transcriptBox && controlsBox.y + controlsBox.height <= transcriptBox.y).toBeTruthy();
+    await page.screenshot({ path: 'test-results/browser-call-live-320.png', fullPage: true });
+  });
 });
 
 // 2026-08-18 (Deepgram reconnect hardening) — BEHAVIORAL verification (not

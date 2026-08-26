@@ -5,9 +5,11 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
 import PhoneCallModal from './PhoneCallModal';
+import { BrowserCallProvider } from '../lib/browserCall';
 
 const api = vi.hoisted(() => ({
   createBrowserCall: vi.fn(),
+  getBrowserCallStatus: vi.fn(),
   startOutboundCall: vi.fn(),
 }));
 
@@ -64,7 +66,16 @@ vi.mock('@twilio/voice-sdk', () => ({
 }));
 
 function renderModal(onClose = vi.fn()) {
-  return { ...render(<PhoneCallModal onClose={onClose} onMeetingReady={vi.fn()} />), onClose };
+  const onMeetingReady = vi.fn();
+  return {
+    ...render(
+      <BrowserCallProvider>
+        <PhoneCallModal onClose={onClose} onMeetingReady={onMeetingReady} />
+      </BrowserCallProvider>
+    ),
+    onClose,
+    onMeetingReady,
+  };
 }
 
 async function enterCustomerAndCall() {
@@ -78,8 +89,12 @@ beforeEach(() => {
   voice.state.call = null;
   voice.state.device = null;
   api.createBrowserCall.mockResolvedValue({ browserCalling: true, token: 'secret-jwt', pendingCallId: 'pending-123', expiresIn: 300 });
+  api.getBrowserCallStatus.mockResolvedValue({ meetingId: 'meeting-browser-1', error: null });
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  sessionStorage.clear();
+});
 
 describe('PhoneCallModal browser calling', () => {
   it('defaults to browser mode with customer field only and sends only opaque pendingCallId to Twilio', async () => {
@@ -104,6 +119,13 @@ describe('PhoneCallModal browser calling', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Hang Up' }));
     expect(voice.state.call?.disconnected).toBe(true);
     expect(await screen.findByText('Call ended')).toBeTruthy();
+  });
+
+  it('hands the server-created meeting ID to routing without disconnecting the SDK call', async () => {
+    const { onMeetingReady } = renderModal();
+    await enterCustomerAndCall();
+    await waitFor(() => expect(onMeetingReady).toHaveBeenCalledWith('meeting-browser-1'));
+    expect(voice.state.call?.disconnected).toBe(false);
   });
 
   it('falls back visibly when token/setup is disabled or unavailable', async () => {

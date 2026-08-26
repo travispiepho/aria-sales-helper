@@ -530,6 +530,12 @@ export async function createBrowserCall(customerPhone: string): Promise<BrowserC
   return request('POST', '/telephony/browser-token', { customerPhone });
 }
 
+export async function getBrowserCallStatus(
+  pendingCallId: string
+): Promise<{ meetingId: string | null; error: string | null }> {
+  return request('GET', `/telephony/browser-call/${encodeURIComponent(pendingCallId)}`);
+}
+
 // ─── Objections / Rebuttals library (2026-08-18) ─────────────────────
 // Troy Hacker's request ("Rebuttal list to objections" in HighPriority
 // Todos). Standalone reference library, shared across all reps — see

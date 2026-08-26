@@ -17,6 +17,18 @@ const now = new Date();
 const startedAt = now.toISOString();
 
 const MEETINGS = {
+  'browser-live': {
+    id: 'browser-live',
+    channel: 'phone',
+    call_sid: 'CAbrowserlive',
+    status: 'active',
+    started_at: startedAt,
+    ended_at: null,
+    recording_status: 'in-progress',
+    customer_name: 'Browser Call Customer',
+    is_owner_session: true,
+    title: 'Browser Call Customer',
+  },
   'phone-recording': {
     id: 'phone-recording',
     channel: 'phone',
@@ -90,7 +102,9 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname.match(/^\/api\/meetings\/[^/]+\/segments$/)) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ segments: [] }));
+    res.end(JSON.stringify({ segments: url.pathname.includes('browser-live') ? [
+      { id: 'segment-browser-1', speaker: 'Customer', text: 'I can see the live transcript.', ts: startedAt },
+    ] : [] }));
     return;
   }
 

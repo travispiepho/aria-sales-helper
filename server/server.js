@@ -631,6 +631,14 @@ async function ensureSessionsTable() {
   await pool.query(`
     ALTER TABLE meetings ADD COLUMN IF NOT EXISTS speaker_labels JSONB DEFAULT '{}'
   `);
+  // Persisted meeting title (used by MeetingPage, Home/history, transcript
+  // downloads and Docs exports). Some live databases predate the title UI;
+  // keeping this additive/idempotent boot migration here prevents their
+  // PATCH route from failing with undefined_column while fresh and already-
+  // migrated databases remain unchanged.
+  await pool.query(`
+    ALTER TABLE meetings ADD COLUMN IF NOT EXISTS title TEXT
+  `);
   // Word cadence / sequencing analytics (added 2026-08-02)
   await pool.query(`
     ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS word_count INTEGER

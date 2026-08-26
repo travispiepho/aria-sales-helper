@@ -7,6 +7,13 @@ import type { Role } from './roles';
 
 const BASE = import.meta.env.VITE_API_URL || '';
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 // Raw fetch with credentials + BASE URL — use when you need the full Response
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${BASE}${path}`, {
@@ -30,7 +37,7 @@ async function request<T>(
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(error.error || `HTTP ${res.status}`);
+    throw new ApiError(error.error || `HTTP ${res.status}`, res.status);
   }
 
   return res.json();
@@ -322,6 +329,47 @@ export async function updateMeeting(
   data: Partial<Pick<Meeting, 'status' | 'ended_at' | 'summary' | 'title' | 'speaker_labels'>>
 ): Promise<Meeting> {
   return request('PATCH', `/api/meetings/${id}`, data);
+}
+
+/**
+ * Persist a meeting title and read it back from the authenticated API.
+ *
+ * Browser/WebRTC calls create their meeting from a Twilio webhook, so the UI
+ * can learn the meeting ID at nearly the same time that the row becomes
+ * readable. Retry only the narrowly-defined 404 creation race; all auth,
+ * validation and server failures surface immediately. The final GET proves
+ * the value is in the database rather than treating an optimistic UI update
+ * as success.
+ */
+export async function renameMeeting(
+  id: string,
+  title: string,
+  options: { attempts?: number; retryDelayMs?: number } = {}
+): Promise<Meeting> {
+  const normalizedTitle = title.trim();
+  if (!normalizedTitle) throw new Error('Meeting title cannot be empty');
+
+  const attempts = Math.max(1, options.attempts ?? 3);
+  const retryDelayMs = Math.max(0, options.retryDelayMs ?? 300);
+  let updated: Meeting | null = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      updated = await updateMeeting(id, { title: normalizedTitle });
+      break;
+    } catch (error) {
+      const isPendingCreation = error instanceof ApiError && error.status === 404;
+      if (!isPendingCreation || attempt === attempts) throw error;
+      await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+    }
+  }
+
+  if (!updated) throw new Error('Meeting title was not saved');
+  const persisted = await getMeeting(id);
+  if (persisted.title !== normalizedTitle) {
+    throw new Error('The meeting title could not be verified. Reload and try again.');
+  }
+  return persisted;
 }
 
 // Post-meeting analytics: WPM, checklist sequencing/timing, Meeting Score

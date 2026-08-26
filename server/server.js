@@ -52,6 +52,7 @@ import {
 import { isLikelyName, toDisplayName } from './nameHeuristics.js';
 import { createReconnectTracker } from './dgReconnectPolicy.js';
 import { createReadinessTracker } from './readinessTracker.js';
+import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
 import {
   loadEnrolledVoicePrint,
   voiceFingerprintIdentificationPolicy,
@@ -2048,6 +2049,20 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   const { id } = request.params;
   const { status, ended_at, summary, title, speaker_labels } = request.body || {};
 
+  // Titles are a persisted user-facing name, not a free-form nullable patch.
+  // Normalize once at the API boundary so browser-call and ordinary meetings
+  // share the exact same contract and whitespace-only values never erase a
+  // valid title. The UI validates too, but the authenticated write must remain
+  // correct for stale clients and direct API callers.
+  let normalizedTitle;
+  if (title !== undefined) {
+    try {
+      normalizedTitle = normalizeMeetingTitle(title);
+    } catch (err) {
+      return reply.code(err.statusCode || 400).send({ error: err.message });
+    }
+  }
+
   // Verify meeting exists and belongs to user (or admin)
   const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
   if (existing.rows.length === 0) {
@@ -2099,7 +2114,7 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
   if (summary !== undefined) { updates.push(`summary = $${idx++}`); values.push(summary); }
   if (title !== undefined) {
     updates.push(`title = $${idx++}`);
-    values.push(title);
+    values.push(normalizedTitle);
     // Manual title edit/override (2026-08-05 auto_titled follow-up): this
     // is the ONE existing path in this repo that writes `title` from a
     // client request body (the web PWA's "Add a title…" field, per
@@ -2126,7 +2141,15 @@ fastify.patch('/api/meetings/:id', { preHandler: [requireAuth] }, async (request
     values
   );
 
-  const updated = result.rows[0];
+  // The ownership read above makes a zero-row update unexpected (the meeting
+  // was deleted between SELECT and UPDATE). Never return a silent 200 with an
+  // undefined body in that race; make the failed persistence visible.
+  let updated;
+  try {
+    updated = requireSingleMeetingUpdate(result);
+  } catch (err) {
+    return reply.code(err.statusCode || 409).send({ error: err.message });
+  }
 
   // Live meeting sync: if this PATCH just finalized the meeting, tell any
   // connected observer sockets (the synced read-only dialog) and any other

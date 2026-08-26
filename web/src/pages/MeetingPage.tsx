@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   getMeeting,
   updateMeeting,
+  renameMeeting,
   getMeetingSegments,
   getLatestCoaching,
   getCoachingReport,
@@ -19,6 +20,7 @@ import { getWsBase } from '../lib/wsBase';
 import { createReconnectTracker, ReconnectTracker } from '../lib/reconnectPolicy';
 import AppHeader from '../components/AppHeader';
 import BrowserCallControls from '../components/BrowserCallControls';
+import MeetingTitleEditor from '../components/MeetingTitleEditor';
 import { useBrowserCall } from '../lib/browserCall';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -208,6 +210,7 @@ export default function MeetingPage() {
   const [speakerSuggestionBusy, setSpeakerSuggestionBusy] = useState(false);
   const [title, setTitle] = useState<string>('');
   const [titleSaving, setTitleSaving] = useState(false);
+  const [titleError, setTitleError] = useState<string | null>(null);
 
   // Refs for audio pipeline
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -1028,13 +1031,27 @@ export default function MeetingPage() {
   // ─── Save title ───────────────────────────────────────────────────────────
 
   async function handleSaveTitle() {
-    if (!meetingId || !title.trim()) return;
+    const trimmedTitle = title.trim();
+    if (!meetingId) {
+      setTitleError('This meeting is still being created. Try again in a moment.');
+      return;
+    }
+    if (!trimmedTitle) {
+      setTitleError('Title cannot be empty.');
+      return;
+    }
+    if (titleSaving || trimmedTitle === (meeting?.title || '').trim()) return;
     setTitleSaving(true);
+    setTitleError(null);
     try {
-      const updated = await updateMeeting(meetingId, { title: title.trim() });
+      const updated = await renameMeeting(meetingId, trimmedTitle);
+      if (updated.title !== trimmedTitle) {
+        throw new Error('The saved title did not match. Please try again.');
+      }
+      setTitle(updated.title || trimmedTitle);
       setMeeting(prev => prev ? { ...prev, title: updated.title } : prev);
-    } catch {
-      // silent fail
+    } catch (err) {
+      setTitleError(err instanceof Error ? err.message : 'Failed to save meeting title.');
     } finally {
       setTitleSaving(false);
     }
@@ -1477,7 +1494,7 @@ export default function MeetingPage() {
       )}
 
       <AppHeader
-        title={meeting.customer_name || 'Meeting'}
+        title={meeting.title || meeting.customer_name || 'Meeting'}
         subtitle={
           isRecording
             ? `Recording · ${formatElapsed(elapsedSec)}`
@@ -1775,29 +1792,18 @@ export default function MeetingPage() {
             )}
 
             {/* Editable Title */}
-            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">
-                Meeting Title
-              </h3>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={title}
-                  onChange={e => setTitle(e.target.value)}
-                  onBlur={handleSaveTitle}
-                  onKeyDown={e => e.key === 'Enter' && handleSaveTitle()}
-                  placeholder={meeting?.customer_name || 'Add a title…'}
-                  className="flex-1 rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500"
-                />
-                <button
-                  onClick={handleSaveTitle}
-                  disabled={titleSaving}
-                  className="px-3 py-2 bg-brand-700 hover:bg-brand-800 disabled:opacity-50 text-white text-sm font-medium rounded-xl transition-colors"
-                >
-                  {titleSaving ? '…' : 'Save'}
-                </button>
-              </div>
-            </div>
+            <MeetingTitleEditor
+              value={title}
+              savedValue={meeting.title}
+              placeholder={meeting.customer_name || 'Add a title…'}
+              saving={titleSaving}
+              error={titleError}
+              onChange={value => {
+                setTitle(value);
+                setTitleError(null);
+              }}
+              onSave={handleSaveTitle}
+            />
 
             {/* Post-meeting analytics: WPM, checklist timing, Meeting Score */}
             {!isActive && meetingId && <MeetingScoreCard meetingId={meetingId} />}

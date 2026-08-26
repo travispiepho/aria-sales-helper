@@ -214,9 +214,9 @@ export default function HomePage() {
   return (
     <div className="min-h-screen bg-gray-100">
       {/* Header */}
-      <div className="bg-brand-700 text-white px-5 pt-6 pb-8 safe-top">
-        <div className="flex items-center justify-between gap-4">
-          <div className="space-y-1">
+      <div className="bg-brand-700 text-white px-5 py-8 min-h-[9rem] flex items-center">
+        <div className="w-full flex items-center justify-between gap-4">
+          <div className="min-w-0 space-y-1">
             <h1 className="text-2xl font-bold leading-tight">ARIA</h1>
             <p className="text-brand-100 text-base leading-relaxed">Hey {user?.name?.split(' ')[0]} 👋</p>
           </div>

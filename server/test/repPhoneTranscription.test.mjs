@@ -21,7 +21,10 @@ const CALL_SID = 'CA55555555555555555555555555555555';
 const MEETING_ID = 'meeting-rep-phone-1';
 const REP_ID = 'rep-account-1';
 const REP_NAME = 'Ada Rep';
-const STREAM_URL = 'https://aria.example.test/telephony/stream';
+// Twilio signs the exact WebSocket URL from <Stream>, including the wss://
+// scheme. The production regression on 2026-08-26 came from validating the
+// same host/path as https:// instead, which rejects every real Media Stream.
+const STREAM_URL = 'wss://aria.example.test/telephony/stream';
 
 function waitFor(predicate, timeoutMs = 2_000) {
   return new Promise((resolve, reject) => {
@@ -217,10 +220,13 @@ test('signed dual-track fixture routes distinct mu-law audio independently and p
   await app.close();
 });
 
-test('Media Stream rejects missing/tampered signatures before opening STT sessions', async () => {
+test('Media Stream rejects missing/tampered/wrong-scheme signatures before opening STT sessions', async () => {
   const { app, state } = await buildApp();
   await assert.rejects(app.injectWS('/telephony/stream'), /Unexpected server response: 403/);
-  await assert.rejects(app.injectWS('/telephony/stream', signedStreamUpgrade('https://evil.example/telephony/stream')), /Unexpected server response: 403/);
+  await assert.rejects(app.injectWS('/telephony/stream', signedStreamUpgrade('wss://evil.example/telephony/stream')), /Unexpected server response: 403/);
+  // Regression guard: the WebSocket upgrade is signed as wss://, not its
+  // superficially equivalent https:// URL.
+  await assert.rejects(app.injectWS('/telephony/stream', signedStreamUpgrade('https://aria.example.test/telephony/stream')), /Unexpected server response: 403/);
   assert.equal(state.sessions.length, 0);
   await app.close();
 });

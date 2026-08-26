@@ -167,10 +167,11 @@ function validateTwilioMediaStreamUpgrade(request) {
   const signatureHeader = request.headers['x-twilio-signature'];
   if (!signatureHeader) return { ok: false, reason: 'missing_signature_header' };
   const { host } = requestPublicOrigin(request);
-  // Twilio signs the original HTTPS-equivalent URL for the initial WebSocket
-  // handshake. A Media Stream upgrade has no form body and <Stream> URLs
-  // cannot carry query parameters.
-  const url = `https://${host}${request.url}`;
+  // Twilio signs the exact URL supplied in <Stream>. For a Media Stream that
+  // URL uses wss:// — it is NOT the superficially equivalent https:// URL.
+  // Production call logs caught the wrong-scheme validation rejecting every
+  // authentic Twilio upgrade before any audio could reach Deepgram.
+  const url = `wss://${host}${request.url}`;
   return twilio.validateRequest(TWILIO_AUTH_TOKEN, signatureHeader, url, {})
     ? { ok: true, reason: null }
     : { ok: false, reason: 'signature_mismatch' };

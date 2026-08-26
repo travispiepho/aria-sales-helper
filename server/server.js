@@ -52,6 +52,10 @@ import {
 import { isLikelyName, toDisplayName } from './nameHeuristics.js';
 import { createReconnectTracker } from './dgReconnectPolicy.js';
 import { createReadinessTracker } from './readinessTracker.js';
+import {
+  loadEnrolledVoicePrint,
+  voiceFingerprintIdentificationPolicy,
+} from './voiceFingerprintIdentification.js';
 
 const { Pool } = pg;
 
@@ -64,6 +68,9 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_KEY;
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production';
 const PORT = parseInt(process.env.PORT || '3000', 10);
+const voiceFingerprintPolicy = voiceFingerprintIdentificationPolicy(
+  process.env.ENABLE_VOICE_FINGERPRINT_IDENTIFICATION
+);
 
 if (!DATABASE_URL) {
   console.error('ERROR: DATABASE_URL environment variable is not set.');
@@ -87,6 +94,10 @@ if (!pyannote.isConfigured()) {
 
 if (!OPENROUTER_API_KEY) {
   console.warn('WARN: OPENROUTER_API_KEY (or OPENROUTER_KEY) not set — coaching endpoint will be unavailable.');
+}
+
+if (!voiceFingerprintPolicy.automaticIdentification) {
+  console.warn('Automatic voice-fingerprint identification is disabled by feature flag (ENABLE_VOICE_FINGERPRINT_IDENTIFICATION=false).');
 }
 
 // ─── Knowledge base (loaded at startup) ─────────────────────────────────────
@@ -3687,18 +3698,18 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   // And on socket.on('close', ...): `if (pyannoteStream) pyannoteStream.end();`
 
   // ── Voice fingerprint matching setup ──────────────────────────────────────
-  let enrolledFeatures = null;
   let repName = user.name || 'Rep';
-  const vpResult = await pool.query(
-    'SELECT features FROM voice_prints WHERE user_id = $1', [user.id]
-  );
-  if (vpResult.rows.length > 0) {
-    enrolledFeatures = vpResult.rows[0].features;
+  const enrolledFeatures = await loadEnrolledVoicePrint(voiceFingerprintPolicy, async () => {
+    const vpResult = await pool.query(
+      'SELECT features FROM voice_prints WHERE user_id = $1', [user.id]
+    );
+    if (vpResult.rows.length === 0) return null;
     fastify.log.info(`Voice print loaded for ${repName}`);
-  }
+    return vpResult.rows[0].features;
+  });
 
-  // Rolling audio ring buffer (16kHz) — always active, independent of rep
-  // enrollment. Feeds both rep-voiceprint matching and speaker de-duplication
+  // Rolling audio ring buffer (16kHz) — always active for speaker
+  // de-duplication. When enabled it also feeds rep-voiceprint matching.
   // below. A 60s window comfortably covers Deepgram's processing latency
   // without buffering an entire (potentially hour-long) call in memory.
   const RING_SECONDS = 60;
@@ -4145,7 +4156,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           }
 
           // Rep-voiceprint accumulation (resolved/canonical index)
-          if (enrolledFeatures && !voiceMatchDone) {
+          if (voiceFingerprintPolicy.accumulateMatchingAudio && enrolledFeatures && !voiceMatchDone) {
             const canonicalSi = String(resolveSpeaker(rawSi));
             if (!speakerChunks[canonicalSi]) speakerChunks[canonicalSi] = [];
             speakerChunks[canonicalSi].push(wordAudio);
@@ -4153,7 +4164,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
           // Drift re-verification accumulation (only for the currently-locked
           // rep speaker, only after a lock exists)
-          if (enrolledFeatures && voiceMatchDone && lockedSpeakerId !== null) {
+          if (voiceFingerprintPolicy.runDriftUnlock && enrolledFeatures && voiceMatchDone && lockedSpeakerId !== null) {
             const canonicalSi = String(resolveSpeaker(rawSi));
             if (canonicalSi === lockedSpeakerId) {
               driftChunks.push(wordAudio);
@@ -4162,7 +4173,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
         }
 
         // ── Wait-and-compare: evaluate rep-match candidates, lock on best-with-margin ──
-        if (enrolledFeatures && !voiceMatchDone) {
+        if (voiceFingerprintPolicy.runAutomaticMatchAndLock && enrolledFeatures && !voiceMatchDone) {
           const now = Date.now();
           for (const [si, chunks] of Object.entries(speakerChunks)) {
             if (speakerLocks[si]) continue;
@@ -4218,7 +4229,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
               }
             }
           }
-        } else if (enrolledFeatures && voiceMatchDone && lockedSpeakerId !== null) {
+        } else if (voiceFingerprintPolicy.runDriftUnlock && enrolledFeatures && voiceMatchDone && lockedSpeakerId !== null) {
           // ── Drift re-verification: is the lock still holding up? ──
           const driftTotal = driftChunks.reduce((s, c) => s + c.length, 0);
           const now = Date.now();
@@ -4510,8 +4521,8 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       const totalBuffered = audioQueue.reduce((s, b) => s + b.byteLength, 0);
       if (totalBuffered < 960_000) audioQueue.push(Buffer.from(data));
     }
-    // Feed the rolling audio ring buffer — always on, powers both rep
-    // voiceprint matching and speaker de-duplication.
+    // Feed the rolling audio ring buffer — always on for speaker de-duplication;
+    // the automatic rep matcher reads from it only when its feature flag is on.
     const int16 = new Int16Array(data.buffer ?? data, data.byteOffset ?? 0, (data.byteLength ?? data.length) / 2);
     ringWrite(int16);
   });

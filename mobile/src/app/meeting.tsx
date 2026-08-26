@@ -119,6 +119,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { createMeeting, getStoredSessionId, getWsBase, Meeting, MeetingChannel, updateMeeting } from '@/lib/api';
+import { DEMO_DISABLED_MESSAGE, IS_DEMO_MODE } from '@/lib/demo';
 import { createReconnectTracker, ReconnectTracker } from '@/lib/reconnectPolicy';
 import {
   armRecordingSession,
@@ -334,6 +335,10 @@ export default function MeetingScreen() {
   }, [navigation]);
 
   async function handleStart() {
+    if (IS_DEMO_MODE) {
+      setErrorMsg(DEMO_DISABLED_MESSAGE);
+      return;
+    }
     endedIntentionallyRef.current = false;
     hasConnectedOnceRef.current = false;
     setErrorMsg(null);
@@ -755,8 +760,8 @@ export default function MeetingScreen() {
               than being shown the Start-Meeting button as if nothing were
               recording. */}
           {stage === 'idle' || stage === 'mic-denied' || stage === 'ws-error' ? (
-            <Pressable onPress={handleStart} style={[styles.button, styles.startButton]}>
-              <ThemedText style={styles.buttonText}>🎙️ Start Meeting</ThemedText>
+            <Pressable disabled={IS_DEMO_MODE} onPress={handleStart} style={[styles.button, styles.startButton, IS_DEMO_MODE && { opacity: 0.45 }]}>
+              <ThemedText style={styles.buttonText}>{IS_DEMO_MODE ? 'Recording Disabled in ARIA TEST' : '🎙️ Start Meeting'}</ThemedText>
             </Pressable>
           ) : stage === 'connected' || stage === 'reconnecting' ? (
             <Pressable onPress={handleEnd} style={[styles.button, styles.endButton]}>

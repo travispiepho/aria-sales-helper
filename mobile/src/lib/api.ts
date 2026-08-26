@@ -44,6 +44,48 @@ import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
 import { VoiceFeatures } from '@/lib/voiceFeatures';
+import { IS_DEMO_MODE } from '@/lib/demo';
+
+const DEMO_USER: User = {
+  id: 'demo-user',
+  name: 'ARIA Tester',
+  email: 'offline-demo@aria.test',
+  role: 'rep',
+};
+
+const DEMO_MEETINGS: Meeting[] = [
+  {
+    id: 'demo-meeting-1',
+    rep_id: DEMO_USER.id,
+    started_at: '2026-08-26T14:00:00.000Z',
+    ended_at: '2026-08-26T14:24:00.000Z',
+    status: 'completed',
+    title: 'Sample living room consultation',
+    customer_name: 'Demo Homeowner',
+    channel: 'in_person',
+    summary: 'Offline sample: discussed prep, color choices, and a follow-up estimate. No customer or production data is shown.',
+  },
+];
+
+const DEMO_SEGMENTS: TranscriptSegment[] = [
+  { speaker: 'ARIA Tester', text: 'This is a local sample transcript for navigation testing.', ts: '2026-08-26T14:00:00.000Z' },
+  { speaker: 'Demo Homeowner', text: 'No recording was made and no server was contacted.', ts: '2026-08-26T14:00:05.000Z' },
+];
+
+const DEMO_OBJECTIONS: ObjectionWithRebuttals[] = [
+  {
+    id: 'demo-objection-1',
+    text: 'I need more time to compare options.',
+    category: 'Timing',
+    created_at: '2026-08-01T00:00:00.000Z',
+    updated_at: '2026-08-01T00:00:00.000Z',
+    rebuttal_count: 2,
+    rebuttals: [
+      { id: 'demo-rebuttal-1', objection_id: 'demo-objection-1', text: 'Absolutely—what details would make the comparison easier?', created_at: '2026-08-01T00:00:00.000Z', updated_at: '2026-08-01T00:00:00.000Z' },
+      { id: 'demo-rebuttal-2', objection_id: 'demo-objection-1', text: 'We can review scope, preparation, and warranty side by side.', created_at: '2026-08-01T00:00:00.000Z', updated_at: '2026-08-01T00:00:00.000Z' },
+    ],
+  },
+];
 
 const CACHED_USER_KEY = 'aria_cached_user';
 // Native-client WS-auth fallback (2026-08-03): confirmed on a real device that
@@ -88,10 +130,14 @@ export const API_BASE =
   process.env.EXPO_PUBLIC_API_URL || 'https://ariasaleshelper-production.up.railway.app';
 
 export function getWsBase(): string {
+  if (IS_DEMO_MODE) return 'ws://127.0.0.1:9';
   return API_BASE.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  if (IS_DEMO_MODE) {
+    throw new Error(`Network access blocked in ARIA TEST (${method} ${path})`);
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : {},
@@ -121,6 +167,7 @@ export interface User {
 }
 
 export async function login(email: string, password: string): Promise<{ user: User }> {
+  if (IS_DEMO_MODE) return { user: DEMO_USER };
   const result = await request<{ user: User; sessionId?: string }>('POST', '/api/auth/login', { email, password });
   await secureStore.setItemAsync(CACHED_USER_KEY, JSON.stringify(result.user));
   if (result.sessionId) {
@@ -130,6 +177,7 @@ export async function login(email: string, password: string): Promise<{ user: Us
 }
 
 export async function logout(): Promise<void> {
+  if (IS_DEMO_MODE) return;
   try {
     await request('POST', '/api/auth/logout');
   } finally {
@@ -141,6 +189,7 @@ export async function logout(): Promise<void> {
 // Used by the meeting screen to append `?session=` to the WS URL — see
 // SESSION_ID_KEY note above for why this fallback exists.
 export async function getStoredSessionId(): Promise<string | null> {
+  if (IS_DEMO_MODE) return null;
   return secureStore.getItemAsync(SESSION_ID_KEY);
 }
 
@@ -159,6 +208,7 @@ export async function getStoredSessionId(): Promise<string | null> {
 // it on every getMe() call (which auth.tsx runs on every app open) closes
 // that gap without requiring an explicit log-out/log-in cycle.
 export async function getMe(): Promise<{ user: User; sessionId?: string }> {
+  if (IS_DEMO_MODE) return { user: DEMO_USER };
   const result = await request<{ user: User; sessionId?: string }>('GET', '/api/auth/me');
   await secureStore.setItemAsync(CACHED_USER_KEY, JSON.stringify(result.user));
   if (result.sessionId) {
@@ -168,6 +218,7 @@ export async function getMe(): Promise<{ user: User; sessionId?: string }> {
 }
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
+  if (IS_DEMO_MODE) throw new Error('Password changes are disabled in ARIA TEST.');
   return request('PATCH', '/api/account/password', { currentPassword, newPassword });
 }
 
@@ -176,6 +227,7 @@ export async function changePassword(currentPassword: string, newPassword: strin
 // saved number. Same EXISTING backend route as web (server.js's
 // PATCH /api/profile) — not a new endpoint.
 export async function updateProfile(phone: string | null): Promise<{ user: User }> {
+  if (IS_DEMO_MODE) throw new Error('Profile changes are disabled in ARIA TEST.');
   return request('PATCH', '/api/profile', { phone });
 }
 
@@ -196,6 +248,7 @@ export interface VoicePrintStatus {
 // confirmed against server.js: `{ enrolled: false }` or
 // `{ enrolled: true, duration_ms, created_at }`.
 export async function getVoicePrintStatus(): Promise<VoicePrintStatus> {
+  if (IS_DEMO_MODE) return { enrolled: false };
   return request('GET', '/api/profile/voice-print');
 }
 
@@ -205,15 +258,18 @@ export async function getVoicePrintStatus(): Promise<VoicePrintStatus> {
 // VoiceFeatures object from voiceFeatures.ts's extractVoiceFeatures(),
 // stored as-is (`JSON.stringify(features)`), same object shape web sends.
 export async function saveVoicePrint(features: VoiceFeatures, durationMs: number): Promise<{ ok: boolean }> {
+  if (IS_DEMO_MODE) throw new Error('Voice enrollment is disabled in ARIA TEST.');
   return request('POST', '/api/profile/voice-print', { features, duration_ms: durationMs });
 }
 
 // DELETE /api/profile/voice-print — remove enrollment.
 export async function deleteVoicePrint(): Promise<{ ok: boolean }> {
+  if (IS_DEMO_MODE) throw new Error('Voice enrollment changes are disabled in ARIA TEST.');
   return request('DELETE', '/api/profile/voice-print');
 }
 
 export async function getCachedUser(): Promise<User | null> {
+  if (IS_DEMO_MODE) return DEMO_USER;
   const raw = await secureStore.getItemAsync(CACHED_USER_KEY);
   if (!raw) return null;
   try {
@@ -273,6 +329,7 @@ export type MeetingChannel = 'in_person' | 'phone';
 // server-side (see server.js) so this remains backwards compatible with any
 // other caller that doesn't pass it.
 export async function createMeeting(customerId?: string, channel?: MeetingChannel): Promise<Meeting> {
+  if (IS_DEMO_MODE) throw new Error('Recording is disabled in ARIA TEST.');
   return request('POST', '/api/meetings', {
     customer_id: customerId,
     origin_client: 'mobile',
@@ -289,11 +346,13 @@ export async function createMeeting(customerId?: string, channel?: MeetingChanne
 // keeps mobile's existing "show what the server gives us" behavior
 // (first page, i.e. the most recent `limit` meetings) unchanged.
 export async function listMeetings(): Promise<Meeting[]> {
+  if (IS_DEMO_MODE) return DEMO_MEETINGS;
   const page = await request<{ meetings: Meeting[] }>('GET', '/api/meetings');
   return page.meetings;
 }
 
 export async function getMeeting(id: string): Promise<Meeting> {
+  if (IS_DEMO_MODE) return DEMO_MEETINGS.find((meeting) => meeting.id === id) || DEMO_MEETINGS[0];
   return request('GET', `/api/meetings/${id}`);
 }
 
@@ -301,6 +360,7 @@ export async function updateMeeting(
   id: string,
   data: Partial<Pick<Meeting, 'status' | 'ended_at' | 'summary' | 'title' | 'speaker_labels'>>
 ): Promise<Meeting> {
+  if (IS_DEMO_MODE) throw new Error('Meeting changes are disabled in ARIA TEST.');
   return request('PATCH', `/api/meetings/${id}`, data);
 }
 
@@ -316,6 +376,7 @@ export interface TranscriptSegment {
 }
 
 export async function getMeetingSegments(id: string): Promise<{ segments: TranscriptSegment[] }> {
+  if (IS_DEMO_MODE) return { segments: id === 'demo-meeting-1' ? DEMO_SEGMENTS : [] };
   return request('GET', `/api/meetings/${id}/segments`);
 }
 
@@ -331,12 +392,14 @@ export async function getMeetingSegments(id: string): Promise<{ segments: Transc
 // automatic on every mobile meeting-end, which would add an unconditional
 // Anthropic API cost per call and diverge from web's own UX.
 export async function generateSummary(id: string): Promise<{ summary: string }> {
+  if (IS_DEMO_MODE) throw new Error('Summary generation is disabled in ARIA TEST.');
   return request('POST', `/api/meetings/${id}/summary`, {});
 }
 
 // ─── Outbound phone meeting (web parity, 2026-08-22) ────────────────
 export interface OutboundCallResult { callSid: string; meetingId: string | null; }
 export async function startOutboundCall(repPhone: string, customerPhone: string, customerId?: string): Promise<OutboundCallResult> {
+  if (IS_DEMO_MODE) throw new Error('Customer calling is disabled in ARIA TEST.');
   return request('POST', '/telephony/outbound-call', { repPhone, customerPhone, ...(customerId ? { customerId } : {}) });
 }
 
@@ -359,7 +422,7 @@ export interface Objection {
   rebuttal_count?: number;
 }
 export interface ObjectionWithRebuttals extends Objection { rebuttals: Rebuttal[]; }
-export async function listObjections(): Promise<Objection[]> { return request('GET', '/api/objections'); }
-export async function getObjection(id: string): Promise<ObjectionWithRebuttals> { return request('GET', `/api/objections/${id}`); }
+export async function listObjections(): Promise<Objection[]> { if (IS_DEMO_MODE) return DEMO_OBJECTIONS; return request('GET', '/api/objections'); }
+export async function getObjection(id: string): Promise<ObjectionWithRebuttals> { if (IS_DEMO_MODE) return DEMO_OBJECTIONS.find((item) => item.id === id) || DEMO_OBJECTIONS[0]; return request('GET', `/api/objections/${id}`); }
 export async function createObjection(text: string, category?: string): Promise<Objection> { return request('POST', '/api/objections', { text, category }); }
 export async function createRebuttal(objectionId: string, text: string): Promise<Rebuttal> { return request('POST', `/api/objections/${objectionId}/rebuttals`, { text }); }

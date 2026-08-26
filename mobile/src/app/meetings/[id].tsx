@@ -30,6 +30,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { generateSummary, getMeeting, getMeetingSegments, Meeting, TranscriptSegment } from '@/lib/api';
+import { IS_DEMO_MODE } from '@/lib/demo';
 
 export default function MeetingDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -121,12 +122,12 @@ export default function MeetingDetailScreen() {
                     </ThemedText>
                     <Pressable
                       onPress={handleGenerateSummary}
-                      disabled={summaryLoading || segments.length === 0}
-                      style={[styles.generateButton, (summaryLoading || segments.length === 0) && styles.generateButtonDisabled]}>
+                      disabled={IS_DEMO_MODE || summaryLoading || segments.length === 0}
+                      style={[styles.generateButton, (IS_DEMO_MODE || summaryLoading || segments.length === 0) && styles.generateButtonDisabled]}>
                       {summaryLoading ? (
                         <ActivityIndicator color="#fff" />
                       ) : (
-                        <ThemedText style={styles.generateButtonText}>✨ Generate Summary</ThemedText>
+                        <ThemedText style={styles.generateButtonText}>{IS_DEMO_MODE ? 'Summary Generation Disabled' : '✨ Generate Summary'}</ThemedText>
                       )}
                     </Pressable>
                     {segments.length === 0 && (

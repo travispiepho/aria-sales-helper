@@ -5,6 +5,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
 import { getCachedUser, getMe, login as apiLogin, logout as apiLogout, User } from './api';
+import { IS_DEMO_MODE } from './demo';
 
 interface AuthContextValue {
   user: User | null;
@@ -47,6 +48,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let mounted = true;
     (async () => {
+      if (IS_DEMO_MODE) {
+        const { user: demoUser } = await getMe();
+        if (mounted) {
+          setUser(demoUser);
+          setLoading(false);
+        }
+        return;
+      }
       // Paint instantly from the cached profile (if any) while we confirm
       // the session cookie is still valid against the server.
       try {
@@ -76,6 +85,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
+    if (IS_DEMO_MODE) return;
     await apiLogout();
     setUser(null);
   };

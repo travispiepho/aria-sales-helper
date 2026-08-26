@@ -37,6 +37,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import { useAuth } from '@/lib/auth';
+import { IS_DEMO_MODE } from '@/lib/demo';
 import { changePassword, deleteVoicePrint, getVoicePrintStatus, saveVoicePrint, updateProfile, VoicePrintStatus } from '@/lib/api';
 import {
   ENROLL_DURATION_MS,
@@ -252,7 +253,7 @@ export default function ProfileScreen() {
       <SafeAreaView style={styles.fill} edges={['top']}>
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
           <ThemedText type="title" style={styles.title}>
-            Profile
+            {IS_DEMO_MODE ? 'Test Profile' : 'Profile'}
           </ThemedText>
 
           <ThemedView style={styles.card} type="backgroundElement">
@@ -303,7 +304,7 @@ export default function ProfileScreen() {
                         </ThemedText>
                       )}
                     </ThemedView>
-                    <Pressable onPress={handleDeleteVoicePrint}>
+                    <Pressable disabled={IS_DEMO_MODE} onPress={handleDeleteVoicePrint}>
                       <ThemedText type="small" style={styles.vpRemoveText}>
                         Remove
                       </ThemedText>
@@ -339,10 +340,10 @@ export default function ProfileScreen() {
                 ) : (
                   <Pressable
                     onPress={handleStartRecording}
-                    disabled={vpSaving}
+                    disabled={IS_DEMO_MODE || vpSaving}
                     style={({ pressed }) => [styles.vpButton, pressed && styles.pwButtonPressed, vpSaving && styles.pwButtonDisabled]}>
                     <ThemedText style={styles.pwButtonText}>
-                      🎙️ {vpStatus?.enrolled ? 'Re-record Voice Sample' : 'Record Voice Sample (30s)'}
+                      {IS_DEMO_MODE ? 'Voice Enrollment Disabled' : `🎙️ ${vpStatus?.enrolled ? 'Re-record Voice Sample' : 'Record Voice Sample (30s)'}`}
                     </ThemedText>
                   </Pressable>
                 )}
@@ -375,7 +376,7 @@ export default function ProfileScreen() {
               keyboardType="phone-pad"
               value={phone}
               onChangeText={setPhone}
-              editable={!phoneSaving}
+              editable={!IS_DEMO_MODE && !phoneSaving}
             />
             {phoneMsg && (
               <ThemedText type="small" style={phoneMsg.type === 'success' ? styles.pwSuccess : styles.pwError}>
@@ -384,9 +385,9 @@ export default function ProfileScreen() {
             )}
             <Pressable
               onPress={handleSavePhone}
-              disabled={phoneSaving}
+              disabled={IS_DEMO_MODE || phoneSaving}
               style={({ pressed }) => [styles.pwButton, pressed && styles.pwButtonPressed, phoneSaving && styles.pwButtonDisabled]}>
-              {phoneSaving ? <ActivityIndicator color="#fff" /> : <ThemedText style={styles.pwButtonText}>Save Phone Number</ThemedText>}
+              {phoneSaving ? <ActivityIndicator color="#fff" /> : <ThemedText style={styles.pwButtonText}>{IS_DEMO_MODE ? 'Profile Changes Disabled' : 'Save Phone Number'}</ThemedText>}
             </Pressable>
           </ThemedView>
 
@@ -401,7 +402,7 @@ export default function ProfileScreen() {
               textContentType="password"
               value={currentPassword}
               onChangeText={setCurrentPassword}
-              editable={!pwSaving}
+              editable={!IS_DEMO_MODE && !pwSaving}
             />
             <TextInput
               style={styles.input}
@@ -410,7 +411,7 @@ export default function ProfileScreen() {
               textContentType="newPassword"
               value={newPassword}
               onChangeText={setNewPassword}
-              editable={!pwSaving}
+              editable={!IS_DEMO_MODE && !pwSaving}
             />
             <TextInput
               style={styles.input}
@@ -419,7 +420,7 @@ export default function ProfileScreen() {
               textContentType="newPassword"
               value={confirmPassword}
               onChangeText={setConfirmPassword}
-              editable={!pwSaving}
+              editable={!IS_DEMO_MODE && !pwSaving}
               onSubmitEditing={handleChangePassword}
             />
             {pwMsg && (
@@ -429,17 +430,23 @@ export default function ProfileScreen() {
             )}
             <Pressable
               onPress={handleChangePassword}
-              disabled={pwSaving}
+              disabled={IS_DEMO_MODE || pwSaving}
               style={({ pressed }) => [styles.pwButton, pressed && styles.pwButtonPressed, pwSaving && styles.pwButtonDisabled]}>
-              {pwSaving ? <ActivityIndicator color="#fff" /> : <ThemedText style={styles.pwButtonText}>Update Password</ThemedText>}
+              {pwSaving ? <ActivityIndicator color="#fff" /> : <ThemedText style={styles.pwButtonText}>{IS_DEMO_MODE ? 'Password Changes Disabled' : 'Update Password'}</ThemedText>}
             </Pressable>
           </ThemedView>
 
-          <Pressable
-            onPress={logout}
-            style={({ pressed }) => [styles.logoutButton, pressed && styles.logoutPressed]}>
-            <ThemedText style={styles.logoutText}>Sign Out</ThemedText>
-          </Pressable>
+          {IS_DEMO_MODE ? (
+            <ThemedText type="small" themeColor="textSecondary" style={{ textAlign: 'center' }}>
+              ARIA TEST uses a local sample profile. Sign-in, sign-out, and account changes are unavailable.
+            </ThemedText>
+          ) : (
+            <Pressable
+              onPress={logout}
+              style={({ pressed }) => [styles.logoutButton, pressed && styles.logoutPressed]}>
+              <ThemedText style={styles.logoutText}>Sign Out</ThemedText>
+            </Pressable>
+          )}
         </ScrollView>
       </SafeAreaView>
     </ThemedView>

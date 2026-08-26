@@ -5,6 +5,18 @@
     "appVersionSource": "remote"
   },
   "build": {
+    "demo-testing": {
+      "distribution": "internal",
+      "autoIncrement": true,
+      "channel": "demo-testing",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_DEMO_MODE": "true",
+        "EXPO_PUBLIC_API_URL": "http://127.0.0.1:9"
+      }
+    },
     "development": {
       "distribution": "internal",
       "channel": "development",

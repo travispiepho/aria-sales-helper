@@ -6,6 +6,7 @@ import { useEffect } from 'react';
 import { ActivityIndicator, useColorScheme } from 'react-native';
 
 import { ThemedView } from '@/components/themed-view';
+import { DemoBanner } from '@/components/demo-banner';
 import { AuthProvider, useAuth } from '@/lib/auth';
 
 // Root layout (restructured 2026-08-04 for the bottom tab-bar nav change —
@@ -70,6 +71,7 @@ function ThemedRoot() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+      <DemoBanner />
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Protected guard={!!user}>
           <Stack.Screen name="(tabs)" />

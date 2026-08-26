@@ -396,7 +396,7 @@ export default function AdminUsersPage() {
                     disabled={inviting}
                     className={`flex-1 text-sm font-semibold py-2 rounded-xl border transition-colors ${
                       selected
-                        ? 'bg-brand-700 text-white border-brand-700'
+                        ? 'bg-brand-100 text-brand-900 border-brand-500 ring-1 ring-brand-500'
                         : 'bg-white text-gray-600 border-gray-200 hover:border-brand-300'
                     }`}
                   >

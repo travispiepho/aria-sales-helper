@@ -35,7 +35,7 @@ export default function SettingsPage() {
   const isAdmin = hasAdminAccess(user?.role);
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-gray-200">
       <AppHeader title="Settings" backTo="/" />
 
       <div className="px-4 py-6 max-w-lg mx-auto space-y-4">

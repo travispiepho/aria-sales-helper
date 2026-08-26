@@ -230,7 +230,7 @@ export default function ProfilePage() {
   const secondsLeft = Math.max(0, Math.ceil((ENROLL_DURATION_MS - elapsed) / 1000));
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-gray-200">
       <AppHeader title="Profile" backTo="/" />
 
       <div className="px-4 py-6 max-w-lg mx-auto space-y-4">

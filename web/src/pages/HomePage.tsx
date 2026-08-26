@@ -213,7 +213,7 @@ export default function HomePage() {
   );
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-gray-200">
       <AppHeader title="ARIA" subtitle={<>Hey {user?.name?.split(' ')[0]} 👋</>} />
 
       {/* Content */}

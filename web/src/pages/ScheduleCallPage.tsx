@@ -16,7 +16,7 @@ export default function ScheduleCallPage() {
   const navigate = useNavigate();
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-gray-200">
       <AppHeader title="Schedule a Call" backTo="/schedule" backLabel="Back to Schedule" />
 
       <div className="px-4 -mt-2 pb-24 max-w-lg mx-auto">

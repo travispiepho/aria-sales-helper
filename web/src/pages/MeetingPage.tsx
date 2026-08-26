@@ -1390,7 +1390,7 @@ export default function MeetingPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="min-h-screen bg-gray-200 flex items-center justify-center">
         <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
       </div>
     );
@@ -1431,7 +1431,7 @@ export default function MeetingPage() {
   const isTwilioPhoneCall = meeting.channel === 'phone' && !!meeting.call_sid;
 
   return (
-    <div className="min-h-screen bg-gray-100 flex flex-col">
+    <div className="min-h-screen bg-gray-200 flex flex-col">
       {/* Recording banner — owner-only; an observer session never captures
           audio on this device, so "keep screen on" would be misleading
           (this page's wake lock is only ever acquired by startRecording(),

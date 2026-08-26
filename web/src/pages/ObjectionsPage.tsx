@@ -99,7 +99,7 @@ function ObjectionsList({ onOpen, onBack }: { onOpen: (id: string) => void; onBa
   }
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-gray-200">
       <AppHeader
         title="Objections"
         subtitle="Browse common customer objections and the rebuttals that work."
@@ -328,7 +328,7 @@ function ObjectionDetail({ id, onBack }: { id: string; onBack: () => void }) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-gray-200">
       <AppHeader title="Objection" onBack={onBack} backLabel="Back to Objections" />
 
       <div className="px-4 -mt-2 pb-24 max-w-lg mx-auto">

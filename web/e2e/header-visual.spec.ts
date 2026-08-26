@@ -35,6 +35,29 @@ async function mockAuthenticatedApi(page: import('@playwright/test').Page) {
 
 test.beforeEach(async ({ page }) => mockAuthenticatedApi(page));
 
+const authenticatedRoutes = [
+  '/',
+  '/profile',
+  '/admin/users',
+  '/settings',
+  '/schedule',
+  '/schedule/call',
+  '/schedule/visit',
+  '/objections',
+];
+
+test('authenticated route canvases use gray-200 with white content panels', async ({ page }) => {
+  for (const route of authenticatedRoutes) {
+    await page.goto(`http://127.0.0.1:5173${route}`);
+    const canvas = page.locator('#root > div').first();
+    await expect(canvas).toHaveCSS('background-color', 'rgb(229, 231, 235)');
+    const whitePanel = canvas.locator('.bg-white').first();
+    if (await whitePanel.count()) {
+      await expect(whitePanel).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+    }
+  }
+});
+
 test('desktop shared compact header evidence', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://127.0.0.1:5173/settings');

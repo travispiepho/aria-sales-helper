@@ -264,7 +264,7 @@ export default function AdminUsersPage() {
   // Server also returns 403 so this is a UX niceness, not a security gate.
   if (!loading && !hasAdminAccess(user?.role)) {
     return (
-      <div className="min-h-screen bg-gray-100">
+      <div className="min-h-screen bg-gray-200">
         <AppHeader title="Admin — Users" backTo="/" />
         <div className="px-4 py-6 max-w-lg mx-auto">
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 text-center">
@@ -283,7 +283,7 @@ export default function AdminUsersPage() {
   const deactivated = (users || []).filter((u) => u.deactivated_at);
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="min-h-screen bg-gray-200">
       <AppHeader title="Admin — Users" backTo="/" />
 
       <div className="px-4 py-6 max-w-lg mx-auto space-y-4">

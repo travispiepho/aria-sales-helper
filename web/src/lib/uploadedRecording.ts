@@ -10,6 +10,7 @@ export const UPLOADED_RECORDING_CONTRACT = {
   websocketPath: (meetingId: string) => `/meetings/${meetingId}/uploaded-recording`,
   messageTypes: {
     start: 'start',
+    started: 'started',
     pause: 'pause',
     resume: 'resume',
     end: 'end',
@@ -109,6 +110,10 @@ type SocketFactory = (url: string) => SocketLike;
 export class UploadedRecordingTransport {
   private socket: SocketLike | null = null;
   private ended = false;
+  private started = false;
+  private startPromise: Promise<void> | null = null;
+  private resolveStart: (() => void) | null = null;
+  private rejectStart: ((error: Error) => void) | null = null;
   private completion: unknown | null = null;
   private completionError: Error | null = null;
   private completionWaiters: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
@@ -128,7 +133,12 @@ export class UploadedRecordingTransport {
       if (typeof event.data !== 'string') return;
       try {
         const message = JSON.parse(event.data);
-        if (message?.type === 'completed') {
+        if (message?.type === UPLOADED_RECORDING_CONTRACT.messageTypes.started) {
+          this.started = true;
+          this.resolveStart?.();
+        } else if (message?.type === 'error' && !this.started) {
+          this.rejectStart?.(new Error(typeof message.error === 'string' ? message.error : 'ARIA rejected the recording metadata.'));
+        } else if (message?.type === 'completed') {
           this.completion = message;
           for (const waiter of this.completionWaiters.splice(0)) waiter.resolve(message);
         }
@@ -140,11 +150,14 @@ export class UploadedRecordingTransport {
       let settled = false;
       socket.onopen = () => { settled = true; resolve(); };
       socket.onerror = () => {
-        if (!settled) reject(new Error('Could not connect to ARIA. Check your connection and retry.'));
+        const error = new Error('Could not connect to ARIA. Check your connection and retry.');
+        if (!settled) reject(error);
+        if (!this.started) this.rejectStart?.(error);
       };
       socket.onclose = () => {
         const error = new Error('ARIA closed the connection before analysis completed. Retry.');
         if (!settled) reject(error);
+        if (!this.started) this.rejectStart?.(error);
         if (!this.completion) {
           this.completionError = error;
           for (const waiter of this.completionWaiters.splice(0)) waiter.reject(error);
@@ -153,12 +166,23 @@ export class UploadedRecordingTransport {
     });
   }
 
-  start(metadata: RecordingMetadata): void {
-    this.sendJson(startMessage(metadata));
+  start(metadata: RecordingMetadata, timeoutMs = 10_000): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('ARIA did not acknowledge the recording metadata. Retry.')), timeoutMs);
+      this.resolveStart = () => { clearTimeout(timer); resolve(); };
+      this.rejectStart = error => { clearTimeout(timer); reject(error); };
+      try {
+        this.sendJson(startMessage(metadata));
+      } catch (error) {
+        this.rejectStart(error instanceof Error ? error : new Error('Could not start ARIA playback.'));
+      }
+    });
+    return this.startPromise;
   }
 
   sendPcm(buffer: ArrayBuffer): void {
-    if (this.ended || buffer.byteLength === 0 || !this.isOpen()) return;
+    if (!this.started || this.ended || buffer.byteLength === 0 || !this.isOpen()) return;
     this.socket!.send(buffer);
   }
 
@@ -191,6 +215,7 @@ export class UploadedRecordingTransport {
   }
 
   close(): void {
+    if (!this.started) this.rejectStart?.(new Error('ARIA playback was closed before recording metadata was acknowledged.'));
     this.socket?.close(1000, 'cleanup');
     this.socket = null;
   }

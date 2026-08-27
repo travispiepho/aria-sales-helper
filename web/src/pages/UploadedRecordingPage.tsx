@@ -180,7 +180,7 @@ export default function UploadedRecordingPage() {
       transportRef.current = transport;
       await transport.connect(applyLiveMessage);
 
-      transport.start({
+      await transport.start({
         durationSeconds: player.durationSeconds,
       });
       await player.play({

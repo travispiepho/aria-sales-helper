@@ -77,13 +77,18 @@ describe('uploaded recording helpers', () => {
     expect(Array.from(new Int16Array(encoder.encode([left, right])))).toEqual([32767, 0]);
   });
 
-  it('sends protocol in order, streams only binary PCM, and finalizes exactly once', async () => {
+  it('waits for the started acknowledgement before sending any PCM, then finalizes exactly once', async () => {
     const socket = new FakeSocket();
     const transport = new UploadedRecordingTransport('meeting-1', undefined, () => socket);
     const connecting = transport.connect(vi.fn());
     socket.open();
     await connecting;
-    transport.start({ durationSeconds: 1 });
+    const starting = transport.start({ durationSeconds: 1 });
+    transport.sendPcm(new ArrayBuffer(4));
+    expect(socket.sent.map(frame => typeof frame === 'string' ? JSON.parse(frame).type : 'pcm')).toEqual(['start']);
+
+    socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'started' }) }));
+    await starting;
     transport.sendPcm(new ArrayBuffer(4));
     transport.pause();
     transport.resume();

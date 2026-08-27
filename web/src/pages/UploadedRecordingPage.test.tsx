@@ -66,6 +66,7 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
   mocks.createMeeting.mockResolvedValue({ id: 'meeting-upload-1', upload_ws_path: '/meetings/meeting-upload-1/uploaded-recording' });
   mocks.connect.mockResolvedValue(undefined);
+  mocks.start.mockResolvedValue(undefined);
   mocks.load.mockResolvedValue(undefined);
   mocks.stop.mockResolvedValue(undefined);
   mocks.pause.mockResolvedValue(undefined);
@@ -98,6 +99,19 @@ describe('UploadedRecordingPage', () => {
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', true);
     await userEvent.click(screen.getByRole('checkbox'));
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', false);
+  });
+
+  it('waits for the server start acknowledgement before local playback begins', async () => {
+    let acknowledgeStart: (() => void) | undefined;
+    mocks.start.mockImplementation(() => new Promise<void>(resolve => { acknowledgeStart = resolve; }));
+    renderPage();
+    await selectAudio();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledWith({ durationSeconds: 12 }));
+    expect(mocks.play).not.toHaveBeenCalled();
+    acknowledgeStart!();
+    await waitFor(() => expect(mocks.play).toHaveBeenCalledTimes(1));
   });
 
   it('creates the uploaded_recording meeting, locks seek/rate, and exposes pause/stop controls', async () => {

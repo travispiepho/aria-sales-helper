@@ -18,6 +18,18 @@ export const UPLOADED_RECORDING_CONTRACT = {
 
 export const TARGET_PCM_SAMPLE_RATE = 16_000;
 export const PLAYBACK_RATE = 1;
+export const UPLOADED_RECORDING_ACCEPT = 'audio/*,video/mp4,.mp4';
+
+export function isMp4RecordingFile(file: Pick<File, 'name' | 'type'>): boolean {
+  return file.type.toLowerCase() === 'video/mp4' || file.name.toLowerCase().endsWith('.mp4');
+}
+
+export function recordingDecodeError(file: Pick<File, 'name' | 'type'>): Error {
+  if (isMp4RecordingFile(file)) {
+    return new Error('ARIA could not find a decodable audio track in this MP4 file. Choose an MP4 with audio and retry.');
+  }
+  return new Error('ARIA could not decode this audio file. Choose another file and retry.');
+}
 
 export interface RecordingMetadata {
   durationSeconds: number;
@@ -225,9 +237,22 @@ export class LocalRecordingPlayer {
     const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioContextCtor) throw new Error('This browser cannot decode audio files.');
     this.context = new AudioContextCtor();
-    const bytes = await file.arrayBuffer();
-    this.buffer = await this.context.decodeAudioData(bytes.slice(0));
-    if (!Number.isFinite(this.buffer.duration) || this.buffer.duration <= 0) throw new Error('The selected audio has no playable content.');
+    try {
+      // decodeAudioData selects the audio track from supported containers,
+      // including audio-bearing MP4s. The local source bytes are never sent.
+      const bytes = await file.arrayBuffer();
+      this.buffer = await this.context.decodeAudioData(bytes.slice(0));
+      if (
+        this.buffer.numberOfChannels <= 0
+        || !Number.isFinite(this.buffer.duration)
+        || this.buffer.duration <= 0
+      ) throw recordingDecodeError(file);
+    } catch {
+      if (this.context.state !== 'closed') await this.context.close().catch(() => {});
+      this.context = null;
+      this.buffer = null;
+      throw recordingDecodeError(file);
+    }
 
     this.processor = this.context.createScriptProcessor(4096, Math.max(1, this.buffer.numberOfChannels), 1);
     this.encoder = new MonoPcm16Encoder(this.context.sampleRate);
@@ -322,9 +347,11 @@ export class LocalRecordingPlayer {
 
 export function validateRecordingFile(file: File | null): string | null {
   if (!file) return 'Choose an audio recording first.';
-  if (!file.type.toLowerCase().startsWith('audio/')) return 'Choose a supported audio file.';
+  if (!file.type.toLowerCase().startsWith('audio/') && !isMp4RecordingFile(file)) {
+    return 'Choose a supported audio file or an MP4 file with audio.';
+  }
   if (file.size <= 0) return 'The selected file is empty.';
-  if (file.size > 250 * 1024 * 1024) return 'Choose an audio file smaller than 250 MB.';
+  if (file.size > 250 * 1024 * 1024) return 'Choose a recording smaller than 250 MB.';
   return null;
 }
 

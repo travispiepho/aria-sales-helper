@@ -53,7 +53,7 @@ function renderPage() {
 
 async function selectAudio() {
   const file = new File(['audio'], 'customer-call.wav', { type: 'audio/wav' });
-  await userEvent.upload(screen.getByLabelText('Local audio file'), file);
+  await userEvent.upload(screen.getByLabelText('Local audio or MP4 file'), file);
   const audio = screen.getByLabelText('Selected recording playback');
   Object.defineProperty(audio, 'duration', { configurable: true, value: 12 });
   fireEvent.loadedMetadata(audio);
@@ -79,6 +79,14 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('UploadedRecordingPage', () => {
+  it('makes MP4 recordings selectable alongside existing audio formats', () => {
+    renderPage();
+    const input = screen.getByLabelText('Local audio or MP4 file');
+    expect(input.getAttribute('accept')).toContain('audio/*');
+    expect(input.getAttribute('accept')).toContain('video/mp4');
+    expect(input.getAttribute('accept')).toContain('.mp4');
+  });
+
   it('shows privacy copy, file metadata, and gates start on authority acknowledgment', async () => {
     renderPage();
     expect(screen.getByText(/source file stays on this device/i)).toBeTruthy();
@@ -99,6 +107,7 @@ describe('UploadedRecordingPage', () => {
     await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
     await waitFor(() => expect(mocks.start).toHaveBeenCalledWith({ durationSeconds: 12 }));
     expect(mocks.createMeeting).toHaveBeenCalledWith(12);
+    expect(mocks.load).toHaveBeenCalledBefore(mocks.createMeeting);
     expect(screen.getByText(/Seeking and playback-speed changes are locked/)).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: /Pause/ }));
     expect(mocks.pause).toHaveBeenCalled();
@@ -134,6 +143,21 @@ describe('UploadedRecordingPage', () => {
     await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
     expect((await screen.findByRole('alert')).textContent).toContain('Network unavailable');
     expect(screen.getByRole('button', { name: /Retry Analysis/ })).toBeTruthy();
+  });
+
+  it('surfaces an MP4 audio-track decode error without creating a server meeting', async () => {
+    mocks.load.mockRejectedValueOnce(new Error('ARIA could not find a decodable audio track in this MP4 file. Choose an MP4 with audio and retry.'));
+    renderPage();
+    const file = new File(['video-only'], 'silent.mp4', { type: 'video/mp4' });
+    await userEvent.upload(screen.getByLabelText('Local audio or MP4 file'), file);
+    const audio = screen.getByLabelText('Selected recording playback');
+    Object.defineProperty(audio, 'duration', { configurable: true, value: 12 });
+    fireEvent.loadedMetadata(audio);
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/decodable audio track.*MP4/i);
+    expect(mocks.createMeeting).not.toHaveBeenCalled();
+    expect(mocks.connect).not.toHaveBeenCalled();
   });
 
   it('revokes its local object URL on replacement/unmount', async () => {

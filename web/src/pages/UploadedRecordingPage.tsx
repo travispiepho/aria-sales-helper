@@ -10,8 +10,11 @@ import {
 } from '../lib/api';
 import {
   formatRecordingDuration,
+  isMp4RecordingFile,
   LocalRecordingPlayer,
   PLAYBACK_RATE,
+  recordingDecodeError,
+  UPLOADED_RECORDING_ACCEPT,
   UploadedRecordingTransport,
   validateRecordingFile,
 } from '../lib/uploadedRecording';
@@ -164,16 +167,19 @@ export default function UploadedRecordingPage() {
     }
 
     try {
-      const meeting = await createUploadedRecordingMeeting(duration);
+      // Decode locally before creating a server meeting. In particular, this
+      // rejects video-only or unsupported MP4s without sending source bytes.
+      const player = new LocalRecordingPlayer();
+      playerRef.current = player;
+      await player.load(file!);
+
+      const meeting = await createUploadedRecordingMeeting(player.durationSeconds);
       setMeetingId(meeting.id);
       meetingIdRef.current = meeting.id;
       const transport = new UploadedRecordingTransport(meeting.id, meeting.upload_ws_path);
       transportRef.current = transport;
       await transport.connect(applyLiveMessage);
 
-      const player = new LocalRecordingPlayer();
-      playerRef.current = player;
-      await player.load(file!);
       transport.start({
         durationSeconds: player.durationSeconds,
       });
@@ -221,11 +227,11 @@ export default function UploadedRecordingPage() {
           </div>
 
           <label className="block">
-            <span className="text-sm font-medium text-gray-700">Local audio file</span>
+            <span className="text-sm font-medium text-gray-700">Local audio or MP4 file</span>
             <input
-              aria-label="Local audio file"
+              aria-label="Local audio or MP4 file"
               type="file"
-              accept="audio/*"
+              accept={UPLOADED_RECORDING_ACCEPT}
               disabled={active}
               onChange={event => resetSelectedFile(event.target.files?.[0] ?? null)}
               className="mt-2 block w-full min-h-11 text-sm text-gray-700 file:min-h-11 file:mr-3 file:px-4 file:border-0 file:rounded-xl file:bg-blue-50 file:text-blue-700 file:font-semibold disabled:opacity-60"
@@ -252,7 +258,10 @@ export default function UploadedRecordingPage() {
                   setMetadataLoading(false);
                   if (!Number.isFinite(value) || value <= 0) setError('ARIA could not read this audio file. Choose another file and retry.');
                 }}
-                onError={() => { setMetadataLoading(false); setError('ARIA could not decode this audio file. Choose another file and retry.'); }}
+                onError={() => {
+                  setMetadataLoading(false);
+                  setError(isMp4RecordingFile(file) ? recordingDecodeError(file).message : 'ARIA could not decode this audio file. Choose another file and retry.');
+                }}
                 onRateChange={event => { event.currentTarget.playbackRate = PLAYBACK_RATE; }}
                 onSeeking={event => {
                   if (active) event.currentTarget.currentTime = progress;

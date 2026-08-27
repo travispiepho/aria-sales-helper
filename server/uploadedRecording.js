@@ -10,6 +10,8 @@ export const UPLOADED_RECORDING_PROTOCOL = Object.freeze({
   maxChunkBytes: 64 * 1024,
   maxDurationSeconds: 8 * 60 * 60,
   paceBurstBytes: 96_000,
+  maxSetupQueuedFrames: 16,
+  maxSetupQueuedBytes: 256 * 1024,
 });
 
 function protocolError(message, closeCode = 4400) {
@@ -195,9 +197,57 @@ export async function registerUploadedRecordingRoutes(fastify, {
 
   fastify.get('/meetings/:meetingId/uploaded-recording', { websocket: true }, async (socket, request) => {
     const { meetingId } = request.params;
-    const { user, sessionId } = await authWebSocketWithSession(request);
-    if (!user) return rejectSocket(socket, protocolError('Unauthorized', 4001));
-    if (!apiKey) return rejectSocket(socket, protocolError('Transcription is not configured', 1011));
+    const setupFrames = [];
+    let setupQueuedBytes = 0;
+    let setupClosed = false;
+    let dispatchFrame = null;
+
+    const discardSetupFrames = () => {
+      setupFrames.length = 0;
+      setupQueuedBytes = 0;
+    };
+    const stopSetup = () => {
+      setupClosed = true;
+      discardSetupFrames();
+    };
+    const rejectDuringSetup = (error) => {
+      if (setupClosed) return;
+      stopSetup();
+      rejectSocket(socket, error);
+    };
+    const queueOrDispatchFrame = (data, isBinary) => {
+      if (setupClosed) return;
+      if (dispatchFrame) return dispatchFrame(data, isBinary);
+
+      const retained = Buffer.from(data);
+      if (
+        setupFrames.length >= UPLOADED_RECORDING_PROTOCOL.maxSetupQueuedFrames ||
+        setupQueuedBytes + retained.byteLength > UPLOADED_RECORDING_PROTOCOL.maxSetupQueuedBytes
+      ) {
+        return rejectDuringSetup(protocolError('Too much recording data arrived during setup', 4409));
+      }
+      setupFrames.push({ data: retained, isBinary });
+      setupQueuedBytes += retained.byteLength;
+    };
+
+    // Fastify does not buffer application messages while an async WebSocket
+    // route awaits. Attach synchronously so start/audio sent on browser open
+    // cannot disappear during auth, lookup, or transcription construction.
+    socket.on('message', queueOrDispatchFrame);
+    socket.on('close', stopSetup);
+    socket.on('error', stopSetup);
+
+    let auth;
+    try {
+      auth = await authWebSocketWithSession(request);
+    } catch (error) {
+      fastify.log.error(`uploaded recording authentication failed: ${error.message}`);
+      return rejectDuringSetup(protocolError('Internal error', 1011));
+    }
+    if (setupClosed) return;
+    const { user, sessionId } = auth || {};
+    if (!user) return rejectDuringSetup(protocolError('Unauthorized', 4001));
+    if (!apiKey) return rejectDuringSetup(protocolError('Transcription is not configured', 1011));
 
     let meeting;
     try {
@@ -205,16 +255,17 @@ export async function registerUploadedRecordingRoutes(fastify, {
       meeting = result.rows[0];
     } catch (error) {
       fastify.log.error(`uploaded recording meeting lookup failed: ${error.message}`);
-      return rejectSocket(socket, protocolError('Internal error', 1011));
+      return rejectDuringSetup(protocolError('Internal error', 1011));
     }
-    if (!meeting) return rejectSocket(socket, protocolError('Meeting not found', 4004));
+    if (setupClosed) return;
+    if (!meeting) return rejectDuringSetup(protocolError('Meeting not found', 4004));
     if (
       meeting.rep_id !== user.id ||
       !meeting.owner_session_id ||
       meeting.owner_session_id !== sessionId
-    ) return rejectSocket(socket, protocolError('Forbidden', 4003));
+    ) return rejectDuringSetup(protocolError('Forbidden', 4003));
     if (meeting.channel !== UPLOADED_RECORDING_CHANNEL || meeting.status !== 'active') {
-      return rejectSocket(socket, protocolError('Meeting is not an active uploaded recording', 4003));
+      return rejectDuringSetup(protocolError('Meeting is not an active uploaded recording', 4003));
     }
 
     const protocol = createUploadedRecordingProtocol({ now });
@@ -280,7 +331,7 @@ export async function registerUploadedRecordingRoutes(fastify, {
       });
     } catch (error) {
       unregisterMeetingSocket(meetingId, socket);
-      return rejectSocket(socket, protocolError('Could not start transcription', 1011));
+      return rejectDuringSetup(protocolError('Could not start transcription', 1011));
     }
 
     const complete = async () => {
@@ -299,8 +350,8 @@ export async function registerUploadedRecordingRoutes(fastify, {
       socket.close(1000, 'Completed');
     };
 
-    socket.on('message', (data, isBinary) => {
-      if (closed) return;
+    dispatchFrame = (data, isBinary) => {
+      if (closed || setupClosed) return;
       try {
         if (ending) throw protocolError('Recording has already ended', 4409);
         if (isBinary) {
@@ -315,9 +366,11 @@ export async function registerUploadedRecordingRoutes(fastify, {
           rejectSocket(socket, protocolError('Completion failed', 1011));
         });
       } catch (error) {
+        setupClosed = true;
+        discardSetupFrames();
         rejectSocket(socket, error);
       }
-    });
+    };
 
     const cleanup = () => {
       if (closed) return;
@@ -332,7 +385,16 @@ export async function registerUploadedRecordingRoutes(fastify, {
         ).catch((error) => fastify.log.error(`uploaded recording interruption update failed: ${error.message}`));
       }
     };
+    socket.off('close', stopSetup);
+    socket.off('error', stopSetup);
     socket.on('close', cleanup);
     socket.on('error', cleanup);
+
+    const retainedSetupFrames = setupFrames.splice(0);
+    setupQueuedBytes = 0;
+    for (const frame of retainedSetupFrames) {
+      if (closed || setupClosed) break;
+      dispatchFrame(frame.data, frame.isBinary);
+    }
   });
 }

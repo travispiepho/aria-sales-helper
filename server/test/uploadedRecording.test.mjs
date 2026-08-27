@@ -8,6 +8,7 @@ import {
   createUploadedRecordingProtocol,
   registerUploadedRecordingRoutes,
   UPLOADED_RECORDING_CHANNEL,
+  UPLOADED_RECORDING_PROTOCOL,
 } from '../uploadedRecording.js';
 
 const REP_ID = 'rep-1';
@@ -25,6 +26,16 @@ function waitFor(predicate, timeoutMs = 2_000) {
     };
     tick();
   });
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function makePool() {
@@ -74,7 +85,14 @@ function makeTranscriptionFactory(state) {
   };
 }
 
-async function buildApp({ authenticated = true, wsUserId = REP_ID, wsSessionId = SESSION_ID, apiKey = 'dg-key' } = {}) {
+async function buildApp({
+  authenticated = true,
+  wsUserId = REP_ID,
+  wsSessionId = SESSION_ID,
+  apiKey = 'dg-key',
+  wsAuthGate = null,
+  createTranscriptionSession = null,
+} = {}) {
   const app = Fastify({ logger: false });
   await app.register(cookie);
   await app.register(websocketPlugin);
@@ -88,11 +106,14 @@ async function buildApp({ authenticated = true, wsUserId = REP_ID, wsSessionId =
       if (!authenticated) return reply.code(401).send({ error: 'Unauthorized' });
       request.user = { id: REP_ID, role: 'rep', name: 'Ada' };
     },
-    authWebSocketWithSession: async () => ({
-      user: authenticated ? { id: wsUserId, role: 'rep', name: 'Ada' } : null,
-      sessionId: authenticated ? wsSessionId : null,
-    }),
-    createTranscriptionSession: makeTranscriptionFactory(state),
+    authWebSocketWithSession: async () => {
+      if (wsAuthGate) await wsAuthGate.promise;
+      return {
+        user: authenticated ? { id: wsUserId, role: 'rep', name: 'Ada' } : null,
+        sessionId: authenticated ? wsSessionId : null,
+      };
+    },
+    createTranscriptionSession: createTranscriptionSession || makeTranscriptionFactory(state),
     broadcastToMeeting: (meetingId, payload) => state.broadcasts.push({ meetingId, payload }),
     registerMeetingSocket: (meetingId) => state.registered.push(meetingId),
     unregisterMeetingSocket: (meetingId) => state.unregistered.push(meetingId),
@@ -205,6 +226,82 @@ test('WebSocket is owner-bound by rep and exact creating session', async () => {
     assert.ok([4001, 4003].includes(code), `unexpected close ${code}`);
     assert.equal(built.state.sessions.length, 0);
     await built.app.close();
+  }
+});
+
+test('WebSocket retains immediate start and PCM frames in strict order during async setup', async () => {
+  const wsAuthGate = deferred();
+  const { app, state } = await buildApp({ wsAuthGate });
+  await createMeeting(app, 4);
+  const ws = await app.injectWS(`/meetings/${MEETING_ID}/uploaded-recording`);
+  const pcm1 = Buffer.alloc(12_000, 0x11);
+  const pcm2 = Buffer.alloc(20_000, 0x22);
+
+  ws.send(start(4));
+  ws.send(pcm1);
+  ws.send(pcm2);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(state.sessions.length, 0, 'async authentication should still be blocked');
+
+  wsAuthGate.resolve();
+  await waitFor(() => state.sessions[0]?.sent.length === 2);
+  assert.deepEqual(state.sessions[0].sent, [pcm1, pcm2]);
+
+  ws.close();
+  await once(ws, 'close');
+  await app.close();
+});
+
+test('WebSocket setup queue rejects count and byte overflow without starting transcription', async () => {
+  for (const overflow of ['count', 'bytes']) {
+    const wsAuthGate = deferred();
+    const { app, state } = await buildApp({ wsAuthGate });
+    await createMeeting(app, 20);
+    const ws = await app.injectWS(`/meetings/${MEETING_ID}/uploaded-recording`);
+    const closed = once(ws, 'close');
+
+    if (overflow === 'count') {
+      for (let index = 0; index <= UPLOADED_RECORDING_PROTOCOL.maxSetupQueuedFrames; index += 1) {
+        ws.send(JSON.stringify({ type: 'pause', index }));
+      }
+    } else {
+      ws.send(start(20));
+      const chunk = Buffer.alloc(UPLOADED_RECORDING_PROTOCOL.maxChunkBytes);
+      for (let index = 0; index < 5; index += 1) ws.send(chunk);
+    }
+
+    const [code] = await closed;
+    assert.equal(code, 4409, `${overflow} overflow should be rejected`);
+    wsAuthGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(state.sessions.length, 0);
+    await app.close();
+  }
+});
+
+test('WebSocket auth, meeting, and transcription setup failures close and discard queued frames', async () => {
+  for (const failure of ['auth', 'meeting', 'transcription']) {
+    const wsAuthGate = deferred();
+    const { app, state } = await buildApp({
+      wsAuthGate,
+      createTranscriptionSession: failure === 'transcription'
+        ? () => { throw new Error('synthetic transcription setup failure'); }
+        : null,
+    });
+    if (failure !== 'meeting') await createMeeting(app, 2);
+    const ws = await app.injectWS(`/meetings/${MEETING_ID}/uploaded-recording`);
+    ws.send(start(2));
+    ws.send(Buffer.alloc(32_000, 7));
+    const closed = once(ws, 'close');
+    if (failure === 'auth') wsAuthGate.reject(new Error('synthetic auth failure'));
+    else wsAuthGate.resolve();
+
+    const [code] = await closed;
+    assert.equal(code, failure === 'meeting' ? 4004 : 1011, `${failure} failure close code`);
+    assert.equal(state.sessions.length, 0, `${failure} failure must not consume queued PCM`);
+    assert.deepEqual(state.registered, failure === 'transcription' ? [MEETING_ID] : []);
+    assert.deepEqual(state.unregistered, failure === 'transcription' ? [MEETING_ID] : []);
+    await app.close();
   }
 });
 

@@ -55,15 +55,19 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+function renderMeeting() {
+  render(
+    <MemoryRouter initialEntries={['/meetings/meeting-upload-1']}>
+      <Routes>
+        <Route path="/meetings/:id" element={<MeetingPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
 describe('MeetingPage completed uploaded recording', () => {
   it('renders the same post-meeting analysis/details branch as End Meeting, with no recording-start controls', async () => {
-    render(
-      <MemoryRouter initialEntries={['/meetings/meeting-upload-1']}>
-        <Routes>
-          <Route path="/meetings/:id" element={<MeetingPage />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMeeting();
 
     expect(await screen.findByText('Completed uploaded recording summary.')).toBeTruthy();
     expect(screen.getByText('Uploaded transcript row.')).toBeTruthy();
@@ -76,5 +80,37 @@ describe('MeetingPage completed uploaded recording', () => {
     expect(screen.queryByRole('button', { name: /End Meeting/i })).toBeNull();
     expect(screen.queryByText(/Start recording to see live transcript/i)).toBeNull();
     expect(screen.getByRole('button', { name: '← Back to Home' })).toBeTruthy();
+  });
+});
+
+describe('MeetingPage Google Docs export visibility', () => {
+  it.each([
+    ['active', 'in_person'],
+    ['active', 'phone'],
+    ['active', 'uploaded_recording'],
+    ['completed', 'in_person'],
+    ['completed', 'phone'],
+    ['completed', 'uploaded_recording'],
+  ] as const)('does not render an export control for a %s %s meeting', async (status, channel) => {
+    mocks.getMeeting.mockResolvedValue({
+      id: 'meeting-upload-1',
+      rep_id: 'rep-1',
+      status,
+      channel,
+      origin_client: 'web',
+      is_owner_session: true,
+      started_at: '2026-08-27T20:00:00.000Z',
+      ended_at: status === 'completed' ? '2026-08-27T20:12:00.000Z' : undefined,
+      summary: 'Completed uploaded recording summary.',
+      speaker_labels: {},
+    });
+
+    renderMeeting();
+
+    expect(await screen.findByRole('heading', {
+      name: status === 'active' ? 'Live Transcript' : 'Transcript',
+    })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /export.*google|google.*doc/i })).toBeNull();
+    expect(screen.queryByText(/export.*google|google.*doc/i)).toBeNull();
   });
 });

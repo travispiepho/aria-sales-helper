@@ -13,12 +13,14 @@ export const UPLOADED_RECORDING_CONTRACT = {
     started: 'started',
     pause: 'pause',
     resume: 'resume',
+    heartbeat: 'heartbeat',
     end: 'end',
   },
 } as const;
 
 export const TARGET_PCM_SAMPLE_RATE = 16_000;
 export const PLAYBACK_RATE = 1;
+export const PLAYBACK_HEARTBEAT_INTERVAL_MS = 20_000;
 export const UPLOADED_RECORDING_ACCEPT = 'audio/*,video/mp4,.mp4';
 
 export function isMp4RecordingFile(file: Pick<File, 'name' | 'type'>): boolean {
@@ -117,6 +119,9 @@ export class UploadedRecordingTransport {
   private completion: unknown | null = null;
   private completionError: Error | null = null;
   private completionWaiters: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private disconnectError: Error | null = null;
+  private onDisconnect: ((error: Error) => void) | null = null;
 
   constructor(
     private readonly meetingId: string,
@@ -124,8 +129,12 @@ export class UploadedRecordingTransport {
     private readonly socketFactory: SocketFactory = url => new WebSocket(url),
   ) {}
 
-  async connect(onMessage: (message: unknown) => void): Promise<void> {
+  async connect(
+    onMessage: (message: unknown) => void,
+    onDisconnect?: (error: Error) => void,
+  ): Promise<void> {
     if (this.socket) throw new Error('Playback connection already created');
+    this.onDisconnect = onDisconnect ?? null;
     const socket = this.socketFactory(uploadedRecordingWsUrl(this.meetingId, this.serverPath));
     this.socket = socket;
     socket.binaryType = 'arraybuffer';
@@ -135,6 +144,7 @@ export class UploadedRecordingTransport {
         const message = JSON.parse(event.data);
         if (message?.type === UPLOADED_RECORDING_CONTRACT.messageTypes.started) {
           this.started = true;
+          this.startHeartbeat();
           this.resolveStart?.();
         } else if (message?.type === 'error' && !this.started) {
           this.rejectStart?.(new Error(typeof message.error === 'string' ? message.error : 'ARIA rejected the recording metadata.'));
@@ -150,17 +160,22 @@ export class UploadedRecordingTransport {
       let settled = false;
       socket.onopen = () => { settled = true; resolve(); };
       socket.onerror = () => {
-        const error = new Error('Could not connect to ARIA. Check your connection and retry.');
+        const error = this.started
+          ? new Error('ARIA lost the playback connection. Playback stopped to prevent missing or duplicated transcript audio. Retry the analysis.')
+          : new Error('Could not connect to ARIA. Check your connection and retry.');
         if (!settled) reject(error);
         if (!this.started) this.rejectStart?.(error);
+        else this.reportDisconnect(error);
       };
       socket.onclose = () => {
-        const error = new Error('ARIA closed the connection before analysis completed. Retry.');
+        this.stopHeartbeat();
+        const error = new Error('ARIA lost the playback connection. Playback stopped to prevent missing or duplicated transcript audio. Retry the analysis.');
         if (!settled) reject(error);
         if (!this.started) this.rejectStart?.(error);
         if (!this.completion) {
           this.completionError = error;
           for (const waiter of this.completionWaiters.splice(0)) waiter.reject(error);
+          this.reportDisconnect(error);
         }
       };
     });
@@ -182,7 +197,11 @@ export class UploadedRecordingTransport {
   }
 
   sendPcm(buffer: ArrayBuffer): void {
-    if (!this.started || this.ended || buffer.byteLength === 0 || !this.isOpen()) return;
+    if (!this.started || this.ended || buffer.byteLength === 0) return;
+    if (!this.isOpen()) {
+      this.reportDisconnect(new Error('ARIA lost the playback connection. Playback stopped to prevent missing or duplicated transcript audio. Retry the analysis.'));
+      return;
+    }
     this.socket!.send(buffer);
   }
 
@@ -191,8 +210,13 @@ export class UploadedRecordingTransport {
 
   end(): boolean {
     if (this.ended) return false;
+    if (!this.isOpen()) {
+      this.reportDisconnect(new Error('ARIA lost the playback connection. Playback stopped to prevent missing or duplicated transcript audio. Retry the analysis.'));
+      return false;
+    }
     this.ended = true;
-    if (this.isOpen()) this.socket!.send(JSON.stringify({ type: UPLOADED_RECORDING_CONTRACT.messageTypes.end }));
+    this.stopHeartbeat();
+    this.socket!.send(JSON.stringify({ type: UPLOADED_RECORDING_CONTRACT.messageTypes.end }));
     return true;
   }
 
@@ -215,9 +239,34 @@ export class UploadedRecordingTransport {
   }
 
   close(): void {
+    this.stopHeartbeat();
+    this.onDisconnect = null;
     if (!this.started) this.rejectStart?.(new Error('ARIA playback was closed before recording metadata was acknowledged.'));
     this.socket?.close(1000, 'cleanup');
     this.socket = null;
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.ended) return this.stopHeartbeat();
+      if (!this.isOpen()) {
+        this.reportDisconnect(new Error('ARIA lost the playback connection. Playback stopped to prevent missing or duplicated transcript audio. Retry the analysis.'));
+        return this.stopHeartbeat();
+      }
+      this.socket!.send(JSON.stringify({ type: UPLOADED_RECORDING_CONTRACT.messageTypes.heartbeat }));
+    }, PLAYBACK_HEARTBEAT_INTERVAL_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
+  private reportDisconnect(error: Error): void {
+    if (this.ended || this.disconnectError) return;
+    this.disconnectError = error;
+    this.onDisconnect?.(error);
   }
 
   private isOpen(): boolean {
@@ -225,7 +274,11 @@ export class UploadedRecordingTransport {
   }
 
   private sendJson(message: object): void {
-    if (!this.isOpen()) throw new Error('ARIA playback connection is not open');
+    if (!this.isOpen()) {
+      const error = new Error('ARIA lost the playback connection. Playback stopped to prevent missing or duplicated transcript audio. Retry the analysis.');
+      this.reportDisconnect(error);
+      throw error;
+    }
     this.socket!.send(JSON.stringify(message));
   }
 }

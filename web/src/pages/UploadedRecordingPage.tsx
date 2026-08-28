@@ -190,6 +190,20 @@ export default function UploadedRecordingPage() {
     return task;
   }, [cleanupResources, navigate]);
 
+  async function handlePlaybackDisconnect(cause: Error) {
+    // There is no safe resume point after transport loss: some PCM may have
+    // reached transcription without an acknowledgement. Stop local playback
+    // immediately rather than silently playing ahead or reconnecting with a
+    // duplicate/gapped transcript.
+    const player = playerRef.current;
+    playerRef.current = null;
+    if (player) await Promise.resolve(player.stop()).catch(() => {});
+    transportRef.current?.close();
+    transportRef.current = null;
+    setError(cause.message);
+    setState('error');
+  }
+
   async function handleStart() {
     const validationError = validateRecordingFile(file);
     if (validationError) { setError(validationError); return; }
@@ -222,7 +236,7 @@ export default function UploadedRecordingPage() {
       meetingIdRef.current = meeting.id;
       const transport = new UploadedRecordingTransport(meeting.id, meeting.upload_ws_path);
       transportRef.current = transport;
-      await transport.connect(applyLiveMessage);
+      await transport.connect(applyLiveMessage, cause => { void handlePlaybackDisconnect(cause); });
 
       await transport.start({
         durationSeconds: player.durationSeconds,

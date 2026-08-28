@@ -97,6 +97,14 @@ export function createUploadedRecordingProtocol({ now = () => Date.now() } = {})
         return { type: 'resumed' };
       }
 
+      // Application heartbeat keeps a legitimately paused browser/server
+      // stream from looking idle to intermediaries. It carries no playback
+      // position and intentionally changes neither pace nor pause accounting.
+      if (message.type === 'heartbeat') {
+        if (state !== 'streaming' && state !== 'paused') throw protocolError('heartbeat is only valid after start and before end');
+        return { type: 'heartbeat' };
+      }
+
       if (message.type === 'end') {
         if (state !== 'streaming' && state !== 'paused') throw protocolError('end is out of order');
         if (receivedBytes === 0) throw protocolError('Cannot end before any PCM audio is received');

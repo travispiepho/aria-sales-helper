@@ -11,7 +11,10 @@ import {
   validateRecordingFile,
 } from './uploadedRecording';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 class FakeSocket {
   readyState: number = WebSocket.CONNECTING;
@@ -24,6 +27,41 @@ class FakeSocket {
   close = vi.fn(() => { this.readyState = WebSocket.CLOSED; });
   send(data: string | ArrayBuffer) { this.sent.push(data); }
   open() { this.readyState = WebSocket.OPEN; this.onopen?.(new Event('open')); }
+  receive(message: object) {
+    this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(message) }));
+  }
+}
+
+class IdleClosingFakeSocket extends FakeSocket {
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  override open() {
+    super.open();
+    this.armIdleClose();
+  }
+
+  override send(data: string | ArrayBuffer) {
+    super.send(data);
+    this.armIdleClose();
+  }
+
+  override receive(message: object) {
+    super.receive(message);
+    this.armIdleClose();
+  }
+
+  override close = vi.fn(() => {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.readyState = WebSocket.CLOSED;
+  });
+
+  private armIdleClose() {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.readyState = WebSocket.CLOSED;
+      this.onclose?.(new CloseEvent('close', { code: 1006 }));
+    }, 60_000);
+  }
 }
 
 describe('uploaded recording helpers', () => {
@@ -102,6 +140,58 @@ describe('uploaded recording helpers', () => {
     await expect(transport.waitForCompletion()).resolves.toMatchObject({ type: 'completed' });
     transport.close();
     expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a paused multi-minute playback alive, resumes PCM near minute five, and still ends exactly once', async () => {
+    vi.useFakeTimers();
+    const socket = new IdleClosingFakeSocket();
+    const disconnect = vi.fn();
+    const transport = new UploadedRecordingTransport('meeting-1', undefined, () => socket);
+    const connecting = transport.connect(vi.fn(), disconnect);
+    socket.open();
+    await connecting;
+    const starting = transport.start({ durationSeconds: 360 });
+    socket.receive({ type: 'started' });
+    await starting;
+
+    // Four minutes of realistic 1x activity keep the connection busy.
+    for (let second = 0; second < 240; second += 10) {
+      transport.sendPcm(new ArrayBuffer(32_000));
+      vi.advanceTimersByTime(10_000);
+    }
+
+    // A one-minute pause used to leave the browser/server WebSocket wholly
+    // idle, allowing a 60-second intermediary idle timeout to close it. The
+    // next resume then threw "ARIA playback connection is not open".
+    transport.pause();
+    vi.advanceTimersByTime(65_000);
+    expect(() => transport.resume()).not.toThrow();
+    transport.sendPcm(new ArrayBuffer(32_000));
+    expect(disconnect).not.toHaveBeenCalled();
+
+    expect(transport.end()).toBe(true);
+    expect(transport.end()).toBe(false);
+    socket.receive({ type: 'completed' });
+    await expect(transport.waitForCompletion()).resolves.toMatchObject({ type: 'completed' });
+    expect(socket.sent.filter(frame => typeof frame === 'string' && JSON.parse(frame).type === 'heartbeat').length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('reports an unexpected mid-playback close instead of silently dropping PCM', async () => {
+    const socket = new FakeSocket();
+    const disconnect = vi.fn();
+    const transport = new UploadedRecordingTransport('meeting-1', undefined, () => socket);
+    const connecting = transport.connect(vi.fn(), disconnect);
+    socket.open();
+    await connecting;
+    const starting = transport.start({ durationSeconds: 10 });
+    socket.receive({ type: 'started' });
+    await starting;
+
+    socket.readyState = WebSocket.CLOSED;
+    socket.onclose?.(new CloseEvent('close', { code: 1006 }));
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(() => transport.sendPcm(new ArrayBuffer(4))).not.toThrow();
+    expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces a visible/retryable connection failure before start', async () => {

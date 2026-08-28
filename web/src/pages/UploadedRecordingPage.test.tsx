@@ -163,6 +163,26 @@ describe('UploadedRecordingPage', () => {
     expect(mocks.stop).toHaveBeenCalled();
   });
 
+  it('stops local playback and shows a truthful error when transport disconnects midstream', async () => {
+    let disconnect: ((error: Error) => void) | undefined;
+    mocks.connect.mockImplementation(async (_handler: (message: unknown) => void, onDisconnect: (error: Error) => void) => {
+      disconnect = onDisconnect;
+    });
+    renderPage();
+    await selectAudio();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await waitFor(() => expect(disconnect).toBeTruthy());
+
+    disconnect!(new Error('ARIA lost the playback connection. Playback stopped to prevent missing or duplicated transcript audio. Retry the analysis.'));
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/lost the playback connection.*Playback stopped/i);
+    await waitFor(() => expect(mocks.stop).toHaveBeenCalledTimes(1));
+    expect(mocks.close).toHaveBeenCalledTimes(1);
+    expect(mocks.end).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Retry Analysis/ })).toBeTruthy();
+  });
+
   it('handles duplicate EOF callbacks with one end/finalization', async () => {
     let playbackCallbacks: { onEnded: () => void } | undefined;
     mocks.play.mockImplementation(async (callbacks: { onEnded: () => void }) => { playbackCallbacks = callbacks; });

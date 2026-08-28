@@ -180,6 +180,36 @@ test('protocol enforces ordering, bounded frames, 1x metadata, pause/resume, pos
   assert.throws(() => protocol.handleControl(JSON.stringify({ type: 'end' })), /already ended/);
 });
 
+test('protocol preserves pause/resume pacing through minute five and accepts bounded heartbeats', () => {
+  let now = 0;
+  const protocol = createUploadedRecordingProtocol({ now: () => now });
+  assert.deepEqual(protocol.handleControl(start(360)), { type: 'started' });
+
+  // Real-time PCM through minute four.
+  for (let second = 0; second < 240; second += 1) {
+    protocol.handleBinary(Buffer.alloc(UPLOADED_RECORDING_PROTOCOL.bytesPerSecond));
+    now += 1_000;
+  }
+
+  assert.deepEqual(protocol.handleControl(JSON.stringify({ type: 'pause' })), { type: 'paused' });
+  for (let elapsed = 0; elapsed < 65_000; elapsed += 20_000) {
+    now += 20_000;
+    assert.deepEqual(protocol.handleControl(JSON.stringify({ type: 'heartbeat' })), { type: 'heartbeat' });
+  }
+  assert.deepEqual(protocol.handleControl(JSON.stringify({ type: 'resume' })), { type: 'resumed' });
+
+  // Continued PCM at roughly minute five must retain the pre-pause pacing
+  // allowance rather than resetting or counting paused wall time as audio.
+  for (let second = 0; second < 5; second += 1) {
+    now += 1_000;
+    protocol.handleBinary(Buffer.alloc(UPLOADED_RECORDING_PROTOCOL.bytesPerSecond));
+  }
+  assert.deepEqual(protocol.handleControl(JSON.stringify({ type: 'end' })), {
+    type: 'ended',
+    receivedBytes: 245 * UPLOADED_RECORDING_PROTOCOL.bytesPerSecond,
+  });
+});
+
 test('protocol rejects declared-duration overflow and faster-than-real-time unbounded bursts', () => {
   let now = 0;
   const paced = createUploadedRecordingProtocol({ now: () => now });
@@ -315,6 +345,8 @@ test('synthetic valid PCM streams to transcription, persists/fans out transcript
   const { app, pool, state } = await buildApp();
   await createMeeting(app, 4);
   const ws = await app.injectWS(`/meetings/${MEETING_ID}/uploaded-recording`);
+  const messages = [];
+  ws.on('message', (data) => messages.push(JSON.parse(data.toString())));
   ws.send(start(4));
   await waitFor(() => state.sessions.length === 1);
   const pcm = Buffer.alloc(32_000, 7);
@@ -338,6 +370,11 @@ test('synthetic valid PCM streams to transcription, persists/fans out transcript
   assert.ok(state.broadcasts.some(({ payload }) => payload.type === 'interim'));
   assert.equal(state.broadcasts.filter(({ payload }) => payload.type === 'final').length, 3);
   assert.ok(state.broadcasts.some(({ payload }) => payload.type === 'coaching'));
+
+  ws.send(JSON.stringify({ type: 'pause' }));
+  ws.send(JSON.stringify({ type: 'heartbeat' }));
+  ws.send(JSON.stringify({ type: 'resume' }));
+  await waitFor(() => messages.some(({ type }) => type === 'heartbeat'));
 
   ws.send(JSON.stringify({ type: 'end' }));
   ws.send(JSON.stringify({ type: 'end' })); // duplicate completion is rejected/ignored, never finalized twice

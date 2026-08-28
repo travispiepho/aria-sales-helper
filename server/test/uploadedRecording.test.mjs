@@ -57,6 +57,9 @@ function makePool() {
       if (sql === 'SELECT * FROM meetings WHERE id = $1') {
         return { rows: meetings.filter((m) => m.id === params[0]) };
       }
+      if (sql === 'SELECT status FROM meetings WHERE id = $1') {
+        return { rows: meetings.filter((m) => m.id === params[0]).map(({ status }) => ({ status })) };
+      }
       if (sql.includes('INSERT INTO transcript_segments')) {
         const row = { id: `segment-${segments.length + 1}`, ts: new Date(), meeting_id: params[0], speaker: params[1], text: params[2] };
         segments.push(row);
@@ -92,6 +95,7 @@ async function buildApp({
   apiKey = 'dg-key',
   wsAuthGate = null,
   createTranscriptionSession = null,
+  finalizeMeeting = null,
 } = {}) {
   const app = Fastify({ logger: false });
   await app.register(cookie);
@@ -121,14 +125,16 @@ async function buildApp({
       state.coachingCalls += 1;
       return { stage: { current: 'proposal' } };
     },
-    finalizeMeeting: async (meetingId) => {
-      const meeting = pool.meetings.find((m) => m.id === meetingId);
-      assert.equal(meeting.status, 'active');
-      meeting.status = 'completed';
-      meeting.summary = 'Synthetic summary';
-      state.completed.push(meetingId);
-      return { summary: meeting.summary };
-    },
+    finalizeMeeting: finalizeMeeting
+      ? (meetingId) => finalizeMeeting({ meetingId, pool, state })
+      : async (meetingId) => {
+        const meeting = pool.meetings.find((m) => m.id === meetingId);
+        assert.equal(meeting.status, 'active');
+        meeting.status = 'completed';
+        meeting.summary = 'Synthetic summary';
+        state.completed.push(meetingId);
+        return { summary: meeting.summary };
+      },
     transcriptDrainMs: 0,
   });
   await app.ready();
@@ -345,6 +351,58 @@ test('synthetic valid PCM streams to transcription, persists/fans out transcript
   // Completion closed normally and did not run the interruption update.
   assert.ok(!pool.sqlLog.some((sql) => sql.includes("status = 'interrupted'")));
   assert.deepEqual(Object.keys(pool.meetings[0]).filter((key) => /audio|file|blob|path|url/i.test(key)), []);
+  await app.close();
+});
+
+test('post-status summary failure still acknowledges the finalized meeting instead of Completion failed', async () => {
+  const { app, pool, state } = await buildApp({
+    finalizeMeeting: async ({ meetingId, pool: testPool, state: testState }) => {
+      const meeting = testPool.meetings.find((row) => row.id === meetingId);
+      assert.equal(meeting.status, 'active');
+      meeting.status = 'completed';
+      testState.completed.push(meetingId);
+      throw new Error('synthetic summary generation failure');
+    },
+  });
+  await createMeeting(app, 2);
+  const ws = await app.injectWS(`/meetings/${MEETING_ID}/uploaded-recording`);
+  const messages = [];
+  ws.on('message', (data) => messages.push(JSON.parse(data.toString())));
+  ws.send(start(2));
+  await waitFor(() => state.sessions.length === 1);
+  ws.send(Buffer.alloc(32_000, 7));
+  await waitFor(() => state.sessions[0].sent.length === 1);
+  ws.send(JSON.stringify({ type: 'end' }));
+
+  const [code] = await once(ws, 'close');
+  assert.equal(code, 1000);
+  assert.equal(pool.meetings[0].status, 'completed');
+  assert.deepEqual(state.completed, [MEETING_ID]);
+  assert.equal(messages.filter(({ type }) => type === 'completed').length, 1);
+  assert.equal(messages.some(({ type, error }) => type === 'error' && error === 'Completion failed'), false);
+  await app.close();
+});
+
+test('pre-status finalization failure remains a truthful Completion failed protocol error', async () => {
+  const { app, pool, state } = await buildApp({
+    finalizeMeeting: async () => { throw new Error('synthetic status update failure'); },
+  });
+  await createMeeting(app, 2);
+  const ws = await app.injectWS(`/meetings/${MEETING_ID}/uploaded-recording`);
+  const messages = [];
+  ws.on('message', (data) => messages.push(JSON.parse(data.toString())));
+  ws.send(start(2));
+  await waitFor(() => state.sessions.length === 1);
+  ws.send(Buffer.alloc(32_000, 7));
+  await waitFor(() => state.sessions[0].sent.length === 1);
+  ws.send(JSON.stringify({ type: 'end' }));
+
+  const [code] = await once(ws, 'close');
+  assert.equal(code, 1011);
+  assert.equal(pool.meetings[0].status, 'active');
+  assert.deepEqual(state.completed, []);
+  assert.equal(messages.some(({ type, error }) => type === 'error' && error === 'Completion failed'), true);
+  assert.equal(messages.some(({ type }) => type === 'completed'), false);
   await app.close();
 });
 

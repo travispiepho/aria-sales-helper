@@ -344,10 +344,45 @@ export async function registerUploadedRecordingRoutes(fastify, {
       });
       await persistQueue;
       if (coachingInFlight) await coachingInFlight;
-      const completion = await finalizeMeeting(meetingId);
-      broadcastToMeeting(meetingId, { type: 'meeting_ended', meetingId, status: 'completed' });
-      safeSend(socket, { type: 'completed', meetingId, summary: completion?.summary ?? null });
-      socket.close(1000, 'Completed');
+      let completion;
+      try {
+        completion = await finalizeMeeting(meetingId);
+      } catch (error) {
+        // Uploaded-recording finalization marks the meeting completed before
+        // optional summary/sync/title follow-ups run. If one of those throws,
+        // do not turn the already-terminal meeting into a false protocol
+        // failure. Confirm the persisted status first; an active (or
+        // unreadable) meeting still follows the genuine failure path below.
+        let status = null;
+        try {
+          const result = await pool.query('SELECT status FROM meetings WHERE id = $1', [meetingId]);
+          status = result.rows[0]?.status ?? null;
+        } catch (statusError) {
+          fastify.log.error(`uploaded recording completion status readback failed: ${statusError.message}`);
+        }
+        if (status !== 'completed') throw error;
+        fastify.log.error(`uploaded recording non-critical follow-up failed after meeting completed: ${error.message}`);
+        completion = null;
+      }
+
+      // Once finalization is persisted, broadcasts, the acknowledgement send,
+      // and close ordering are all best-effort follow-ups. None may emit a
+      // contradictory "Completion failed" frame for a completed meeting.
+      try {
+        broadcastToMeeting(meetingId, { type: 'meeting_ended', meetingId, status: 'completed' });
+      } catch (error) {
+        fastify.log.error(`uploaded recording completion broadcast failed: ${error.message}`);
+      }
+      try {
+        safeSend(socket, { type: 'completed', meetingId, summary: completion?.summary ?? null });
+      } catch (error) {
+        fastify.log.error(`uploaded recording completion acknowledgement failed: ${error.message}`);
+      }
+      try {
+        socket.close(1000, 'Completed');
+      } catch (error) {
+        fastify.log.error(`uploaded recording completion socket close failed: ${error.message}`);
+      }
     };
 
     dispatchFrame = (data, isBinary) => {

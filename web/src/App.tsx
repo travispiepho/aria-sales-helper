@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './lib/auth';
 import { isIOSTooOld } from './lib/iosCheck';
 import LoginPage from './pages/LoginPage';
 import HomePage from './pages/HomePage';
+import MeetingsPage from './pages/MeetingsPage';
 import MeetingPage from './pages/MeetingPage';
 import ProfilePage from './pages/ProfilePage';
 import AdminUsersPage from './pages/AdminUsersPage';
@@ -122,6 +123,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <HomePage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/meetings"
+            element={
+              <RequireAuth>
+                <MeetingsPage />
               </RequireAuth>
             }
           />

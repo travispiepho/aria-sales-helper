@@ -34,14 +34,22 @@ describe('AppHeader', () => {
     expect(header?.className).toContain('min-h-[6.5rem]');
     expect(screen.getByRole('heading', { name: 'ARIA' })).toBeTruthy();
     expect(screen.getByText('Hey Gabe 👋')).toBeTruthy();
-    expect(screen.getByRole('navigation', { name: 'Authenticated navigation' })).toBeTruthy();
+    const navigation = screen.getByRole('navigation', { name: 'Authenticated navigation' });
+    expect(navigation).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Meetings' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Settings' })).toBeTruthy();
+    expect(Array.from(navigation.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
+      'Meetings', 'Settings', 'Objections', 'Profile',
+    ]);
     expect(screen.getByRole('link', { name: 'Objections' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Profile' }).textContent).toBe('G');
   });
 
   it('routes all shared controls and marks the current route accessibly', async () => {
-    const { unmount } = renderHeader('/settings');
+    const { unmount } = renderHeader('/meetings/detail-1');
+    expect(screen.getByRole('link', { name: 'Meetings' }).getAttribute('aria-current')).toBe('page');
+    await userEvent.click(screen.getByRole('link', { name: 'Settings' }));
+    expect(screen.getByLabelText('current path').textContent).toBe('/settings');
     expect(screen.getByRole('link', { name: 'Settings' }).getAttribute('aria-current')).toBe('page');
     await userEvent.click(screen.getByRole('link', { name: 'Objections' }));
     expect(screen.getByLabelText('current path').textContent).toBe('/objections');
@@ -60,15 +68,19 @@ describe('AppHeader', () => {
     const nav = screen.getByRole('navigation', { name: 'Authenticated navigation' });
     const controls = [
       screen.getByRole('link', { name: 'Back to Schedule' }),
+      screen.getByRole('link', { name: 'Meetings' }),
       screen.getByRole('link', { name: 'Settings' }),
       screen.getByRole('link', { name: 'Objections' }),
       screen.getByRole('link', { name: 'Profile' }),
     ];
 
     expect(nav.className).toContain('max-[480px]:w-full');
+    expect(Array.from(nav.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
+      'Meetings', 'Settings', 'Objections', 'Profile',
+    ]);
     expect(container.querySelector('.max-\\[480px\\]\\:flex-none')).toBeTruthy();
     for (const control of controls) {
-      expect(control.className).toContain('w-11');
+      expect(control.className).toMatch(/(?:w-11|min-w-11)/);
       expect(control.className).toContain('h-11');
     }
   });

@@ -27,7 +27,9 @@ export default function AppHeader({
   const { user } = useAuth();
   const { pathname } = useLocation();
   const current = (path: string) =>
-    path === '/objections' ? pathname.startsWith(path) : pathname === path;
+    path === '/objections' || path === '/meetings'
+      ? pathname === path || pathname.startsWith(`${path}/`)
+      : pathname === path;
 
   const primary = (
     <div className="flex min-w-0 flex-1 items-center gap-2 max-[480px]:w-full max-[480px]:flex-none">
@@ -71,6 +73,19 @@ export default function AppHeader({
           aria-label="Authenticated navigation"
           className="ml-auto flex flex-shrink-0 items-center justify-center gap-2 max-[480px]:mx-auto max-[480px]:w-full"
         >
+          <Link
+            to="/meetings"
+            aria-label="Meetings"
+            aria-current={current('/meetings') ? 'page' : undefined}
+            className={`h-11 min-w-11 px-3 rounded-full bg-white/10 border-2 border-white/25 hover:bg-white/20 flex items-center justify-center gap-2 text-white transition-colors flex-shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-brand-700 ${current('/meetings') ? 'ring-2 ring-white' : ''}`}
+          >
+            <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+              <path d="M8 2v4M16 2v4M3 10h18" />
+              <rect x="3" y="4" width="18" height="17" rx="2" />
+              <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01" />
+            </svg>
+            <span className="text-sm font-semibold">Meetings</span>
+          </Link>
           <Link
             to="/settings"
             aria-label="Settings"

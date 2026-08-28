@@ -37,6 +37,7 @@ test.beforeEach(async ({ page }) => mockAuthenticatedApi(page));
 
 const authenticatedRoutes = [
   '/',
+  '/meetings',
   '/profile',
   '/admin/users',
   '/settings',
@@ -73,16 +74,17 @@ test('narrow header wraps without hiding navigation', async ({ page }) => {
   await page.goto('http://127.0.0.1:5173/schedule/call');
   const header = page.locator('[data-app-header="compact"]');
   await expect(header).toBeVisible();
-  for (const name of ['Back to Schedule', 'Settings', 'Objections', 'Profile']) {
+  for (const name of ['Back to Schedule', 'Meetings', 'Settings', 'Objections', 'Profile']) {
     await expect(page.getByRole('link', { name })).toBeVisible();
   }
   const boxes = await Promise.all([
+    page.getByRole('link', { name: 'Meetings' }).boundingBox(),
     page.getByRole('link', { name: 'Settings' }).boundingBox(),
     page.getByRole('link', { name: 'Objections' }).boundingBox(),
     page.getByRole('link', { name: 'Profile' }).boundingBox(),
   ]);
   for (const box of boxes) {
-    expect(box?.width).toBe(44);
+    expect(box?.width).toBeGreaterThanOrEqual(44);
     expect(box?.height).toBe(44);
     expect((box?.x || 0) + (box?.width || 0)).toBeLessThanOrEqual(320);
   }

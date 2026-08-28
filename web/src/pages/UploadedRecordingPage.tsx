@@ -7,6 +7,7 @@ import {
   getMeeting,
   getMeetingSegments,
   TranscriptSegment,
+  updateMeeting,
 } from '../lib/api';
 import {
   formatRecordingDuration,
@@ -36,6 +37,7 @@ export default function UploadedRecordingPage() {
   const [segments, setSegments] = useState<LiveSegment[]>([]);
   const [interimText, setInterimText] = useState('');
   const [coaching, setCoaching] = useState<CoachingData | null>(null);
+  const [speakerLabels, setSpeakerLabels] = useState<Record<string, string>>({});
   const [meetingId, setMeetingId] = useState<string | null>(null);
   const meetingIdRef = useRef<string | null>(null);
   const playerRef = useRef<LocalRecordingPlayer | null>(null);
@@ -81,6 +83,7 @@ export default function UploadedRecordingPage() {
     setDuration(0);
     setConsent(false);
     setProgress(0);
+    setSpeakerLabels({});
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     setObjectUrl('');
     setFile(nextFile);
@@ -234,6 +237,7 @@ export default function UploadedRecordingPage() {
       const meeting = await createUploadedRecordingMeeting(player.durationSeconds);
       setMeetingId(meeting.id);
       meetingIdRef.current = meeting.id;
+      setSpeakerLabels(meeting.speaker_labels || {});
       const transport = new UploadedRecordingTransport(meeting.id, meeting.upload_ws_path);
       transportRef.current = transport;
       await transport.connect(applyLiveMessage, cause => { void handlePlaybackDisconnect(cause); });
@@ -271,6 +275,19 @@ export default function UploadedRecordingPage() {
   }
 
   const canStart = !!file && duration > 0 && consent && !metadataLoading && !active;
+  const showAnalysisWorkspace = !!file || active || segments.length > 0 || !!coaching;
+  const uniqueSpeakers = Array.from(new Set(segments.map(segment => segment.speaker).filter(Boolean)));
+
+  function getDisplayLabel(rawSpeaker: string): string {
+    return speakerLabels[rawSpeaker] || rawSpeaker;
+  }
+
+  function handleSpeakerLabelChange(rawSpeaker: string, label: string) {
+    const next = { ...speakerLabels, [rawSpeaker]: label };
+    setSpeakerLabels(next);
+    const id = meetingIdRef.current;
+    if (id) updateMeeting(id, { speaker_labels: next }).catch(() => {});
+  }
 
   return (
     <div className="min-h-screen bg-gray-200 flex flex-col">
@@ -295,6 +312,58 @@ export default function UploadedRecordingPage() {
               className="mt-2 block w-full min-h-11 text-sm text-gray-700 file:min-h-11 file:mr-3 file:px-4 file:border-0 file:rounded-xl file:bg-blue-50 file:text-blue-700 file:font-semibold disabled:opacity-60"
             />
           </label>
+        </section>
+
+        {showAnalysisWorkspace && (
+          <>
+            <section aria-label="ARIA Coaching">
+              <CoachingPanel coaching={coaching} defaultCollapsed={false} />
+            </section>
+            <section aria-label="Transcript" className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+              <h2 className="font-semibold text-gray-900 mb-3">Live transcript</h2>
+              <div
+                ref={transcriptContainerRef}
+                onScroll={handleTranscriptScroll}
+                aria-label="Live transcript"
+                aria-live="polite"
+                className="max-h-80 overflow-y-auto space-y-2"
+              >
+                {segments.length === 0 && !interimText && <p className="text-sm text-gray-500">Transcript will appear as the recording plays…</p>}
+                {segments.map((segment, index) => (
+                  <div key={segment.id ?? `${segment.ts}-${index}`} className="text-sm">
+                    <span className="font-semibold text-blue-700">{getDisplayLabel(segment.speaker || 'Speaker')}: </span>
+                    <span className="text-gray-800">{segment.text}</span>
+                  </div>
+                ))}
+                {interimText && <p className="text-sm text-gray-500 italic">{interimText}</p>}
+              </div>
+            </section>
+          </>
+        )}
+
+        {uniqueSpeakers.length > 0 && (
+          <section aria-label="Rename Speakers" className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+            <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Rename Speakers</h2>
+            <div className="space-y-2">
+              {uniqueSpeakers.map(speaker => (
+                <div key={speaker} className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500 w-24 flex-shrink-0">{speaker}</span>
+                  <input
+                    aria-label={`Rename ${speaker}`}
+                    type="text"
+                    placeholder={`Rename ${speaker}`}
+                    value={speakerLabels[speaker] || ''}
+                    onChange={event => handleSpeakerLabelChange(speaker, event.target.value)}
+                    className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section aria-label="Playback and analysis controls" className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
+          <h2 className="font-semibold text-gray-900">Playback &amp; analysis controls</h2>
 
           {objectUrl && file && (
             <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-3">
@@ -347,6 +416,16 @@ export default function UploadedRecordingPage() {
             </div>
           )}
 
+          {(active || state === 'complete') && (
+            <div aria-live="polite" className="space-y-1">
+              <div className="flex justify-between text-xs text-gray-600">
+                <span>{state === 'paused' ? 'Paused' : state === 'stopping' ? 'Finalizing…' : state === 'complete' ? 'Complete' : 'Analyzing at 1x'}</span>
+                <span>{formatRecordingDuration(progress)} / {formatRecordingDuration(duration)}</span>
+              </div>
+              <progress aria-label="Playback progress" max={duration || 1} value={Math.min(progress, duration || 1)} className="w-full h-2" />
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <button
               onClick={handleStart}
@@ -371,47 +450,15 @@ export default function UploadedRecordingPage() {
             </button>
           </div>
 
-          {(active || state === 'complete') && (
-            <div aria-live="polite" className="space-y-1">
-              <div className="flex justify-between text-xs text-gray-600">
-                <span>{state === 'paused' ? 'Paused' : state === 'stopping' ? 'Finalizing…' : state === 'complete' ? 'Complete' : 'Analyzing at 1x'}</span>
-                <span>{formatRecordingDuration(progress)} / {formatRecordingDuration(duration)}</span>
-              </div>
-              <progress aria-label="Playback progress" max={duration || 1} value={Math.min(progress, duration || 1)} className="w-full h-2" />
-            </div>
+          {meetingId && (
+            <button
+              onClick={() => navigate(`/meetings/${meetingId}`)}
+              className="w-full min-h-11 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4"
+            >
+              View meeting analysis/details
+            </button>
           )}
         </section>
-
-        {(active || segments.length > 0 || coaching) && (
-          <>
-            <CoachingPanel coaching={coaching} />
-            <section className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-              <h2 className="font-semibold text-gray-900 mb-3">Live transcript</h2>
-              <div
-                ref={transcriptContainerRef}
-                onScroll={handleTranscriptScroll}
-                aria-label="Live transcript"
-                aria-live="polite"
-                className="max-h-80 overflow-y-auto space-y-2"
-              >
-                {segments.length === 0 && !interimText && <p className="text-sm text-gray-500">Transcript will appear as the recording plays…</p>}
-                {segments.map((segment, index) => (
-                  <div key={segment.id ?? `${segment.ts}-${index}`} className="text-sm">
-                    <span className="font-semibold text-blue-700">{segment.speaker || 'Speaker'}: </span>
-                    <span className="text-gray-800">{segment.text}</span>
-                  </div>
-                ))}
-                {interimText && <p className="text-sm text-gray-500 italic">{interimText}</p>}
-              </div>
-            </section>
-          </>
-        )}
-
-        {state === 'complete' && meetingId && (
-          <button onClick={() => navigate(`/meetings/${meetingId}`)} className="w-full min-h-11 rounded-xl bg-blue-600 text-white font-semibold">
-            View completed meeting
-          </button>
-        )}
       </main>
     </div>
   );

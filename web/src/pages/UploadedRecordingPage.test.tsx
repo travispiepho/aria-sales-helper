@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   createMeeting: vi.fn(),
   getMeeting: vi.fn(),
   getSegments: vi.fn(),
+  updateMeeting: vi.fn(),
   load: vi.fn(), play: vi.fn(), pause: vi.fn(), resume: vi.fn(), stop: vi.fn(),
   connect: vi.fn(), start: vi.fn(), sendPcm: vi.fn(), transportPause: vi.fn(), transportResume: vi.fn(), end: vi.fn(), waitForCompletion: vi.fn(), close: vi.fn(),
   scrollIntoView: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock('../lib/api', () => ({
   createUploadedRecordingMeeting: mocks.createMeeting,
   getMeeting: mocks.getMeeting,
   getMeetingSegments: mocks.getSegments,
+  updateMeeting: mocks.updateMeeting,
 }));
 vi.mock('../lib/uploadedRecording', async importOriginal => {
   const actual = await importOriginal<typeof import('../lib/uploadedRecording')>();
@@ -104,6 +106,7 @@ beforeEach(() => {
   mocks.waitForCompletion.mockResolvedValue({ type: 'completed' });
   mocks.getMeeting.mockResolvedValue({ id: 'meeting-upload-1', status: 'completed' });
   mocks.getSegments.mockResolvedValue({ segments: [] });
+  mocks.updateMeeting.mockResolvedValue({ id: 'meeting-upload-1', status: 'active', speaker_labels: {} });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -127,6 +130,23 @@ describe('UploadedRecordingPage', () => {
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', true);
     await userEvent.click(screen.getByRole('checkbox'));
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', false);
+  });
+
+  it('orders coaching above the transcript and groups playback details, progress, and controls below it', async () => {
+    await startAnalysis();
+
+    const coaching = screen.getByRole('region', { name: 'ARIA Coaching' });
+    const transcript = screen.getByRole('region', { name: 'Transcript' });
+    const controls = screen.getByRole('region', { name: 'Playback and analysis controls' });
+
+    expect(coaching.compareDocumentPosition(transcript) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(transcript.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(controls.contains(screen.getByText('customer-call.wav'))).toBe(true);
+    expect(controls.contains(screen.getByLabelText('Selected recording playback'))).toBe(true);
+    expect(controls.contains(screen.getByLabelText('Playback progress'))).toBe(true);
+    expect(controls.contains(screen.getByRole('button', { name: /Start Analysis/ }))).toBe(true);
+    expect(controls.contains(screen.getByRole('button', { name: /Pause/ }))).toBe(true);
+    expect(controls.contains(screen.getByRole('button', { name: /Stop/ }))).toBe(true);
   });
 
   it('waits for the server start acknowledgement before local playback begins', async () => {
@@ -161,6 +181,28 @@ describe('UploadedRecordingPage', () => {
     await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1'));
     expect(mocks.end).toHaveBeenCalledTimes(1);
     expect(mocks.stop).toHaveBeenCalled();
+  });
+
+  it('updates transcript labels immediately and persists speaker renames through the meeting API', async () => {
+    const applyLiveMessage = await startAnalysis();
+    applyLiveMessage({ type: 'final', id: 'segment-1', speaker: 'Speaker 1', text: 'Thanks for meeting today.' });
+
+    await screen.findByText('Thanks for meeting today.');
+    const rename = screen.getByRole('textbox', { name: 'Rename Speaker 1' });
+    await userEvent.type(rename, 'Taylor');
+
+    expect(screen.getByText('Taylor:')).toBeTruthy();
+    await waitFor(() => expect(mocks.updateMeeting).toHaveBeenLastCalledWith('meeting-upload-1', {
+      speaker_labels: { 'Speaker 1': 'Taylor' },
+    }));
+  });
+
+  it('links to the normal meeting analysis/details route without claiming a final summary is ready', async () => {
+    await startAnalysis();
+    const analysisButton = screen.getByRole('button', { name: 'View meeting analysis/details' });
+    expect(screen.queryByText(/summary is ready/i)).toBeNull();
+    await userEvent.click(analysisButton);
+    expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1');
   });
 
   it('stops local playback and shows a truthful error when transport disconnects midstream', async () => {

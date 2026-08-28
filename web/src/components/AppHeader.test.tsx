@@ -39,11 +39,11 @@ describe('AppHeader', () => {
     expect(screen.getByRole('link', { name: 'Home' }).getAttribute('href')).toBe('/');
     const navigation = screen.getByRole('navigation', { name: 'Authenticated navigation' });
     expect(navigation).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Record' }).getAttribute('href')).toBe('/');
-    expect(screen.getByRole('link', { name: 'Meetings' })).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Settings' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Meet' }).getAttribute('href')).toBe('/');
+    expect(screen.getByRole('link', { name: 'Recorded' }).getAttribute('href')).toBe('/meetings');
+    expect(screen.getByRole('link', { name: 'Settings' }).getAttribute('href')).toBe('/settings');
     expect(Array.from(navigation.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
-      'Record', 'Meetings', 'Objections', 'Settings', 'Profile',
+      'Meet', 'Recorded', 'Objections', 'Settings', 'Profile',
     ]);
     expect(screen.getByRole('link', { name: 'Objections' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Profile' }).textContent).toBe('G');
@@ -52,8 +52,8 @@ describe('AppHeader', () => {
   it('routes all shared controls and marks the current route accessibly', async () => {
     const { unmount } = renderHeader('/meetings/detail-1');
     expect(screen.getByRole('link', { name: 'Home' }).getAttribute('aria-current')).toBeNull();
-    expect(screen.getByRole('link', { name: 'Record' }).getAttribute('aria-current')).toBeNull();
-    expect(screen.getByRole('link', { name: 'Meetings' }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('link', { name: 'Meet' }).getAttribute('aria-current')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Recorded' }).getAttribute('aria-current')).toBe('page');
     await userEvent.click(screen.getByRole('link', { name: 'Settings' }));
     expect(screen.getByLabelText('current path').textContent).toBe('/settings');
     expect(screen.getByRole('link', { name: 'Settings' }).getAttribute('aria-current')).toBe('page');
@@ -65,15 +65,15 @@ describe('AppHeader', () => {
     expect(screen.getByRole('link', { name: 'Profile' }).getAttribute('aria-current')).toBe('page');
   });
 
-  it('treats Home and Record as interchangeable current-page links on the homepage', async () => {
+  it('treats Home and Meet as interchangeable current-page links on the homepage', async () => {
     renderHeader('/meetings');
     await userEvent.click(screen.getByRole('link', { name: 'Home' }));
     expect(screen.getByLabelText('current path').textContent).toBe('/');
     expect(screen.getByRole('link', { name: 'Home' }).getAttribute('aria-current')).toBe('page');
-    expect(screen.getByRole('link', { name: 'Record' }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('link', { name: 'Meet' }).getAttribute('aria-current')).toBe('page');
 
-    await userEvent.click(screen.getByRole('link', { name: 'Meetings' }));
-    await userEvent.click(screen.getByRole('link', { name: 'Record' }));
+    await userEvent.click(screen.getByRole('link', { name: 'Recorded' }));
+    await userEvent.click(screen.getByRole('link', { name: 'Meet' }));
     expect(screen.getByLabelText('current path').textContent).toBe('/');
   });
 
@@ -86,8 +86,8 @@ describe('AppHeader', () => {
     const nav = screen.getByRole('navigation', { name: 'Authenticated navigation' });
     const controls = [
       screen.getByRole('link', { name: 'Home' }),
-      screen.getByRole('link', { name: 'Record' }),
-      screen.getByRole('link', { name: 'Meetings' }),
+      screen.getByRole('link', { name: 'Meet' }),
+      screen.getByRole('link', { name: 'Recorded' }),
       screen.getByRole('link', { name: 'Settings' }),
       screen.getByRole('link', { name: 'Objections' }),
       screen.getByRole('link', { name: 'Profile' }),
@@ -96,7 +96,7 @@ describe('AppHeader', () => {
     expect(nav.className).toContain('max-[480px]:w-full');
     expect(nav.className).not.toMatch(/\b(?:absolute|fixed|sticky)\b/);
     expect(Array.from(nav.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
-      'Record', 'Meetings', 'Objections', 'Settings', 'Profile',
+      'Meet', 'Recorded', 'Objections', 'Settings', 'Profile',
     ]);
     expect(screen.queryByRole('link', { name: 'Back to Schedule' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Back to Schedule' })).toBeNull();

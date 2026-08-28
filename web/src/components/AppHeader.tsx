@@ -60,15 +60,15 @@ export default function AppHeader({
         >
           <Link
             to="/"
-            aria-label="Record"
+            aria-label="Meet"
             aria-current={current('/') ? 'page' : undefined}
             className={`h-11 min-w-11 px-3 rounded-full bg-white/10 border-2 border-white/25 hover:bg-white/20 flex items-center justify-center text-white text-sm font-semibold transition-colors flex-shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-brand-700 ${current('/') ? 'ring-2 ring-white' : ''}`}
           >
-            Record
+            Meet
           </Link>
           <Link
             to="/meetings"
-            aria-label="Meetings"
+            aria-label="Recorded"
             aria-current={current('/meetings') ? 'page' : undefined}
             className={`h-11 min-w-11 px-3 rounded-full bg-white/10 border-2 border-white/25 hover:bg-white/20 flex items-center justify-center gap-2 text-white transition-colors flex-shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-brand-700 ${current('/meetings') ? 'ring-2 ring-white' : ''}`}
           >
@@ -77,7 +77,7 @@ export default function AppHeader({
               <rect x="3" y="4" width="18" height="17" rx="2" />
               <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01" />
             </svg>
-            <span className="text-sm font-semibold">Meetings</span>
+            <span className="text-sm font-semibold">Recorded</span>
           </Link>
           <Link
             to="/objections"

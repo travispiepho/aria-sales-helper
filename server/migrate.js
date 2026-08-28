@@ -74,7 +74,13 @@ CREATE TABLE IF NOT EXISTS meetings (
   started_at TIMESTAMPTZ DEFAULT NOW(),
   ended_at TIMESTAMPTZ,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'cancelled')),
-  summary TEXT
+  summary TEXT,
+  scheduled_for TIMESTAMPTZ,
+  scheduled_timezone TEXT,
+  scheduled_customer_name TEXT,
+  scheduled_customer_phone TEXT,
+  scheduled_customer_address TEXT,
+  scheduled_started_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS transcript_segments (

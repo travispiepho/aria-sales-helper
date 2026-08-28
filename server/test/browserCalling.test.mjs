@@ -25,7 +25,15 @@ function makePool() {
     meetings,
     async query(sql, params = []) {
       if (sql.includes('FROM customers WHERE phone')) return { rows: [{ id: 'customer-1', phone: '6165550123' }] };
+      if (sql.includes('SELECT id FROM meetings WHERE id = $1')) return { rows: meetings.filter((m) => m.id === params[0] && m.rep_id === params[1] && !m.scheduled_started_at).map(({ id }) => ({ id })) };
+      if (sql.includes('SELECT * FROM meetings WHERE id = $1 AND rep_id')) return { rows: meetings.filter((m) => m.id === params[0] && m.rep_id === params[1] && m.scheduled_call_sid === params[2]) };
       if (sql.includes('SELECT * FROM meetings WHERE call_sid')) return { rows: meetings.filter((m) => m.call_sid === params[0]) };
+      if (sql.includes('UPDATE meetings SET call_sid')) {
+        const row = meetings.find((m) => m.id === params[1] && m.rep_id === params[2] && !m.scheduled_started_at);
+        if (!row) return { rows: [] };
+        row.call_sid = params[0]; row.scheduled_call_sid = params[0]; row.scheduled_started_at = new Date();
+        return { rows: [row] };
+      }
       if (sql.includes('INSERT INTO meetings')) {
         const row = { id: `meeting-${meetings.length + 1}`, customer_id: params[0], rep_id: params[1], channel: 'phone', call_sid: params[2], status: 'active' };
         meetings.push(row);
@@ -61,8 +69,11 @@ function signedHeaders(url, params) {
 
 function form(params) { return new URLSearchParams(params).toString(); }
 
-async function setupBrowserCall(app) {
-  const res = await app.inject({ method: 'POST', url: '/telephony/browser-token', payload: { customerPhone: '(616) 555-0123' } });
+async function setupBrowserCall(app, scheduledMeetingId = null) {
+  const res = await app.inject({ method: 'POST', url: '/telephony/browser-token', payload: {
+    customerPhone: '(616) 555-0123',
+    ...(scheduledMeetingId ? { scheduledMeetingId } : {}),
+  } });
   assert.equal(res.statusCode, 200, res.body);
   return res.json();
 }
@@ -146,6 +157,22 @@ test('signed browser TwiML links meeting and preserves consent, dual recording a
   const retry = await app.inject({ method: 'POST', url: '/telephony/browser-outgoing', payload: form(params), headers: signedHeaders(retryUrl, params) });
   assert.equal(retry.statusCode, 400);
   assert.equal(pool.meetings.length, 1);
+  await app.close();
+});
+
+test('scheduled browser call claims the scheduled record in place without duplicate insertion', async () => {
+  const { app, pool } = await buildApp();
+  pool.meetings.push({ id: 'scheduled-1', rep_id: 'rep-user@example.com', status: 'active', channel: 'phone', scheduled_for: new Date('2030-01-01T15:00:00Z'), scheduled_started_at: null });
+  const setup = await setupBrowserCall(app, 'scheduled-1');
+  const identity = JSON.parse(Buffer.from(setup.token.split('.')[1], 'base64url').toString()).grants.identity;
+  const params = { CallSid: 'CA77777777777777777777777777777777', From: `client:${identity}`, pendingCallId: setup.pendingCallId };
+  const url = 'https://aria.example.test/telephony/browser-outgoing';
+  const response = await app.inject({ method: 'POST', url: '/telephony/browser-outgoing', payload: form(params), headers: signedHeaders(url, params) });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(pool.meetings.length, 1);
+  assert.equal(pool.meetings[0].id, 'scheduled-1');
+  assert.equal(pool.meetings[0].call_sid, params.CallSid);
+  assert.ok(pool.meetings[0].scheduled_started_at);
   await app.close();
 });
 

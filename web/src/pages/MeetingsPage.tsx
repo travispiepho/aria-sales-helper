@@ -161,8 +161,9 @@ export default function MeetingsPage() {
   }
 
   const today = new Date().toDateString();
-  const todayMeetings = meetings.filter(meeting => new Date(meeting.started_at).toDateString() === today);
-  const previousMeetings = meetings.filter(meeting => new Date(meeting.started_at).toDateString() !== today);
+  const recordedMeetings = meetings.filter(meeting => !meeting.scheduled_for || !!meeting.scheduled_started_at);
+  const todayMeetings = recordedMeetings.filter(meeting => new Date(meeting.started_at).toDateString() === today);
+  const previousMeetings = recordedMeetings.filter(meeting => new Date(meeting.started_at).toDateString() !== today);
 
   function meetingList(items: Meeting[]) {
     return (

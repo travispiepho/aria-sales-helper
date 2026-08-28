@@ -18,7 +18,7 @@ interface BrowserCallContextValue {
   meetingId: string | null;
   muted: boolean;
   error: string;
-  start: (customerPhone: string) => Promise<string>;
+  start: (customerPhone: string, scheduledMeetingId?: string) => Promise<string>;
   toggleMute: () => void;
   hangUp: () => void;
   waitForTerminal: () => Promise<string | null>;
@@ -97,7 +97,7 @@ export function BrowserCallProvider({ children }: { children: React.ReactNode })
     throw new Error('The call started, but the meeting screen could not be opened. Hang up and try again.');
   }, []);
 
-  const start = useCallback(async (customerPhone: string) => {
+  const start = useCallback(async (customerPhone: string, scheduledMeetingId?: string) => {
     if (BUSY_STATES.includes(state)) throw new Error('A browser call is already in progress');
     cleanupSdk();
     sessionStorage.removeItem(STORAGE_KEY);
@@ -108,7 +108,9 @@ export function BrowserCallProvider({ children }: { children: React.ReactNode })
     const generation = generationRef.current;
 
     try {
-      const setup = await createBrowserCall(customerPhone);
+      const setup = scheduledMeetingId
+        ? await createBrowserCall(customerPhone, scheduledMeetingId)
+        : await createBrowserCall(customerPhone);
       if (generationRef.current !== generation) throw new Error('Call cancelled');
       const device = new Device(setup.token, { appName: 'ARIA Web', appVersion: '1.0.0', logLevel: 4 });
       deviceRef.current = device;

@@ -6,6 +6,7 @@ import { inRecordingPath } from '../lib/meetingRoutes';
 import CustomerIntakeModal from '../components/CustomerIntakeModal';
 import PhoneCallModal from '../components/PhoneCallModal';
 import AppPageLayout from '../components/AppPageLayout';
+import UpcomingMeetings from '../components/UpcomingMeetings';
 
 export default function HomePage() {
   const { user } = useAuth();
@@ -67,6 +68,8 @@ export default function HomePage() {
             </button>
           </div>
         </div>
+
+      <UpcomingMeetings />
 
       {showIntake && (
         <CustomerIntakeModal

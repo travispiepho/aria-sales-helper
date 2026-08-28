@@ -65,12 +65,12 @@ vi.mock('@twilio/voice-sdk', () => ({
   Call: { State: { Closed: 'closed' } },
 }));
 
-function renderModal(onClose = vi.fn()) {
+function renderModal(onClose = vi.fn(), props: { initialCustomerPhone?: string; scheduledMeetingId?: string } = {}) {
   const onMeetingReady = vi.fn();
   return {
     ...render(
       <BrowserCallProvider>
-        <PhoneCallModal onClose={onClose} onMeetingReady={onMeetingReady} />
+        <PhoneCallModal onClose={onClose} onMeetingReady={onMeetingReady} {...props} />
       </BrowserCallProvider>
     ),
     onClose,
@@ -104,6 +104,14 @@ describe('PhoneCallModal browser calling', () => {
     await enterCustomerAndCall();
     expect(api.createBrowserCall).toHaveBeenCalledWith('6165550123');
     expect(voice.state.device?.connect).toHaveBeenCalledWith({ params: { pendingCallId: 'pending-123' }, rtcConstraints: { audio: true } });
+  });
+
+  it('prefills and binds a scheduled call to the existing scheduled record', async () => {
+    renderModal(vi.fn(), { initialCustomerPhone: '6165559999', scheduledMeetingId: 'scheduled-1' });
+    expect((screen.getByLabelText("Customer's Phone Number") as HTMLInputElement).value).toBe('6165559999');
+    expect(screen.queryByRole('button', { name: 'Use My Phone Instead' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Call from Browser' }));
+    await waitFor(() => expect(api.createBrowserCall).toHaveBeenCalledWith('6165559999', 'scheduled-1'));
   });
 
   it('shows ringing/connected state and supports mute and hang up', async () => {

@@ -11,6 +11,7 @@ import SettingsPage from './pages/SettingsPage';
 import SchedulePage from './pages/SchedulePage';
 import ScheduleCallPage from './pages/ScheduleCallPage';
 import ScheduleVisitPage from './pages/ScheduleVisitPage';
+import EditScheduledMeetingPage from './pages/EditScheduledMeetingPage';
 import ObjectionsPage from './pages/ObjectionsPage';
 import SignupClaimPage from './pages/SignupClaimPage';
 import InRecordingPage from './pages/InRecordingPage';
@@ -212,6 +213,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <ScheduleVisitPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/schedule/:id/edit"
+            element={
+              <RequireAuth>
+                <EditScheduledMeetingPage />
               </RequireAuth>
             }
           />

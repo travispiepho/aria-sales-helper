@@ -25,6 +25,7 @@ vi.mock('./pages/SettingsPage', () => ({ default: () => null }));
 vi.mock('./pages/SchedulePage', () => ({ default: () => null }));
 vi.mock('./pages/ScheduleCallPage', () => ({ default: () => null }));
 vi.mock('./pages/ScheduleVisitPage', () => ({ default: () => null }));
+vi.mock('./pages/EditScheduledMeetingPage', () => ({ default: () => <h1>Edit scheduled meeting page</h1> }));
 vi.mock('./pages/ObjectionsPage', () => ({ default: () => null }));
 vi.mock('./pages/SignupClaimPage', () => ({ default: () => null }));
 
@@ -45,6 +46,16 @@ describe('meeting routes', () => {
     go('/meetings');
     expect(await screen.findByRole('heading', { name: 'Login page' })).toBeTruthy();
     expect(window.location.pathname).toBe('/login');
+  });
+
+  it('protects and refreshes the scheduled-edit deep link', async () => {
+    const anonymous = go('/schedule/meeting-1/edit');
+    expect(await screen.findByRole('heading', { name: 'Login page' })).toBeTruthy();
+    anonymous.unmount();
+    auth.user = { id: 'rep-1', name: 'Gabe Rivera' };
+    go('/schedule/meeting-1/edit');
+    expect(await screen.findByRole('heading', { name: 'Edit scheduled meeting page' })).toBeTruthy();
+    expect(window.location.pathname).toBe('/schedule/meeting-1/edit');
   });
 
   it('resolves the authenticated index and detail routes independently', async () => {

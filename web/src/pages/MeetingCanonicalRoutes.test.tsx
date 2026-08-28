@@ -49,6 +49,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('canonical meeting routes', () => {
+  it('keeps an unstarted scheduled legacy deep link out of recording mode', async () => {
+    mocks.getMeeting.mockResolvedValue({ id: 'scheduled-1', status: 'active', scheduled_for: '2030-01-01T15:00:00Z', scheduled_started_at: null });
+    render(<MemoryRouter initialEntries={['/meetings/scheduled-1']}><Routes>
+      <Route path="/meetings/:id" element={<MeetingRouteResolver />} />
+      <Route path="*" element={<Probe />} />
+    </Routes></MemoryRouter>);
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/schedule/scheduled-1/edit'));
+  });
+
   it.each([
     ['active', '/meetings/meeting-1/active'],
     ['completed', '/meetings/meeting-1/post'],

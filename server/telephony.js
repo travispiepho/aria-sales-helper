@@ -406,14 +406,33 @@ export async function resolveCustomerByPhone(pool, rawCallerNumber) {
  * existing in-person `POST /api/meetings` flow's rep_id handling.
  *
  * @param {import('pg').Pool} pool
- * @param {{ callSid: string, customerId: string|null, repId?: string|null }} params
+ * @param {{ callSid: string, customerId: string|null, repId?: string|null, scheduledMeetingId?: string|null }} params
  */
-export async function findOrCreatePhoneMeeting(pool, { callSid, customerId, repId = null }) {
+export async function findOrCreatePhoneMeeting(pool, { callSid, customerId, repId = null, scheduledMeetingId = null }) {
   if (!callSid) throw new Error('findOrCreatePhoneMeeting requires callSid');
 
   const existing = await pool.query('SELECT * FROM meetings WHERE call_sid = $1', [callSid]);
   if (existing.rows.length > 0) {
     return { meeting: existing.rows[0], created: false };
+  }
+
+  if (scheduledMeetingId) {
+    const claimed = await pool.query(
+      `UPDATE meetings SET call_sid = $1, scheduled_call_sid = $1,
+         scheduled_started_at = COALESCE(scheduled_started_at, NOW()), started_at = NOW()
+       WHERE id = $2 AND rep_id = $3 AND status = 'active'
+         AND channel = 'phone' AND scheduled_for IS NOT NULL
+         AND scheduled_started_at IS NULL AND scheduled_call_sid IS NULL
+       RETURNING *`,
+      [callSid, scheduledMeetingId, repId]
+    );
+    if (claimed.rows[0]) return { meeting: claimed.rows[0], created: false };
+    const alreadyClaimed = await pool.query(
+      'SELECT * FROM meetings WHERE id = $1 AND rep_id = $2 AND scheduled_call_sid = $3',
+      [scheduledMeetingId, repId, callSid]
+    );
+    if (alreadyClaimed.rows[0]) return { meeting: alreadyClaimed.rows[0], created: false };
+    throw new Error('Scheduled meeting is unavailable or already started');
   }
 
   const inserted = await pool.query(
@@ -466,8 +485,19 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     pruneBrowserPendingCalls();
     const pendingCallId = randomUUID();
     const identity = browserIdentityForUser(request.user.id);
+    const scheduledMeetingId = typeof request.body?.scheduledMeetingId === 'string'
+      ? request.body.scheduledMeetingId : null;
+    if (scheduledMeetingId) {
+      const scheduled = await pool.query(
+        `SELECT id FROM meetings WHERE id = $1 AND rep_id = $2 AND status = 'active'
+         AND channel = 'phone' AND scheduled_for IS NOT NULL AND scheduled_started_at IS NULL`,
+        [scheduledMeetingId, request.user.id]
+      );
+      if (!scheduled.rows[0]) return reply.code(409).send({ error: 'Scheduled meeting is unavailable or already started' });
+    }
     browserPendingCalls.set(pendingCallId, {
       repId: request.user.id,
+      scheduledMeetingId,
       identity,
       customerPhone,
       customerId,
@@ -555,6 +585,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
         callSid,
         customerId: pending.customerId,
         repId: pending.repId,
+        scheduledMeetingId: pending.scheduledMeetingId,
       }));
     } catch (err) {
       // Meeting linkage is mandatory for browser calls: without it the media
@@ -778,7 +809,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
       return notConfiguredReply(reply);
     }
 
-    const { repPhone, customerPhone, customerId: customerIdHint } = request.body || {};
+    const { repPhone, customerPhone, customerId: customerIdHint, scheduledMeetingId } = request.body || {};
     const normalizedRepPhone = normalizePhoneNumber(repPhone);
     const normalizedCustomerPhone = normalizePhoneNumber(customerPhone);
 
@@ -829,6 +860,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
         callSid: call.sid,
         customerId,
         repId: request.user.id,
+        scheduledMeetingId: typeof scheduledMeetingId === 'string' ? scheduledMeetingId : null,
       });
       meeting = m;
       fastify.log.info(

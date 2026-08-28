@@ -278,6 +278,44 @@ export interface Meeting {
   recording_status?: string | null;
   recording_sid?: string | null;
   recording_url?: string | null;
+  scheduled_for?: string | null;
+  scheduled_timezone?: 'America/Detroit' | string | null;
+  scheduled_customer_name?: string | null;
+  scheduled_customer_phone?: string | null;
+  scheduled_customer_address?: string | null;
+  scheduled_started_at?: string | null;
+  scheduled_call_sid?: string | null;
+}
+
+export type ScheduledMeetingType = 'phone' | 'in_person';
+export interface ScheduledMeetingInput {
+  scheduled_local: string;
+  timezone: 'America/Detroit';
+  channel: ScheduledMeetingType;
+  title: string;
+  customer_name: string;
+  customer_phone?: string;
+  customer_address?: string;
+}
+
+export async function createScheduledMeeting(data: ScheduledMeetingInput): Promise<Meeting> {
+  return request('POST', '/api/scheduled-meetings', data);
+}
+
+export async function listScheduledMeetings(): Promise<{ meetings: Meeting[] }> {
+  return request('GET', '/api/scheduled-meetings');
+}
+
+export async function updateScheduledMeeting(id: string, data: ScheduledMeetingInput): Promise<Meeting> {
+  return request('PATCH', `/api/scheduled-meetings/${id}`, data);
+}
+
+export async function cancelScheduledMeeting(id: string): Promise<Meeting> {
+  return request('POST', `/api/scheduled-meetings/${id}/cancel`);
+}
+
+export async function startScheduledMeeting(id: string): Promise<Meeting> {
+  return request('POST', `/api/scheduled-meetings/${id}/start`);
 }
 
 export async function createMeeting(customerId?: string): Promise<Meeting> {
@@ -574,12 +612,14 @@ export interface OutboundCallResult {
 export async function startOutboundCall(
   repPhone: string,
   customerPhone: string,
-  customerId?: string
+  customerId?: string,
+  scheduledMeetingId?: string
 ): Promise<OutboundCallResult> {
   return request('POST', '/telephony/outbound-call', {
     repPhone,
     customerPhone,
     ...(customerId ? { customerId } : {}),
+    ...(scheduledMeetingId ? { scheduledMeetingId } : {}),
   });
 }
 
@@ -595,8 +635,11 @@ export interface BrowserCallSetup {
  * returned to the caller and kept only in component memory; api.ts never
  * persists or logs it.
  */
-export async function createBrowserCall(customerPhone: string): Promise<BrowserCallSetup> {
-  return request('POST', '/telephony/browser-token', { customerPhone });
+export async function createBrowserCall(customerPhone: string, scheduledMeetingId?: string): Promise<BrowserCallSetup> {
+  return request('POST', '/telephony/browser-token', {
+    customerPhone,
+    ...(scheduledMeetingId ? { scheduledMeetingId } : {}),
+  });
 }
 
 export async function getBrowserCallStatus(

@@ -22,7 +22,12 @@ export default function MeetingRouteResolver() {
   }, [id]);
 
   if (failed) return <Navigate to="/meetings" replace />;
-  if (meeting) return <Navigate to={canonicalMeetingPath(meeting)} replace />;
+  if (meeting) {
+    if (meeting.scheduled_for && !meeting.scheduled_started_at && meeting.status === 'active') {
+      return <Navigate to={`/schedule/${encodeURIComponent(meeting.id)}/edit`} replace />;
+    }
+    return <Navigate to={canonicalMeetingPath(meeting)} replace />;
+  }
   return (
     <div className="min-h-screen bg-gray-200 flex items-center justify-center" role="status" aria-label="Loading meeting">
       <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />

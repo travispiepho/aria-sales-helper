@@ -6,6 +6,8 @@ import { browserCallStatusLabel, useBrowserCall } from '../lib/browserCall';
 interface Props {
   onClose: () => void;
   onMeetingReady: (meetingId: string) => void;
+  initialCustomerPhone?: string;
+  scheduledMeetingId?: string;
 }
 
 type Mode = 'browser' | 'phone';
@@ -22,11 +24,11 @@ function messageFromError(err: unknown): string {
   return err instanceof Error ? err.message : 'Browser calling is unavailable';
 }
 
-export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
+export default function PhoneCallModal({ onClose, onMeetingReady, initialCustomerPhone = '', scheduledMeetingId }: Props) {
   const { user } = useAuth();
   const [mode, setMode] = useState<Mode>('browser');
   const [repPhone, setRepPhone] = useState(user?.phone || '');
-  const [customerPhone, setCustomerPhone] = useState('');
+  const [customerPhone, setCustomerPhone] = useState(initialCustomerPhone);
   const [repPhoneError, setRepPhoneError] = useState('');
   const [customerPhoneError, setCustomerPhoneError] = useState('');
   const [phoneState, setPhoneState] = useState<PhoneState>('idle');
@@ -60,10 +62,14 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
     if (!validateCustomer()) return;
 
     try {
-      const meetingId = await browserCall.start(customerPhone.trim());
+      const meetingId = await browserCall.start(customerPhone.trim(), scheduledMeetingId);
       onMeetingReady(meetingId);
     } catch (err) {
-      usePhoneFallback(messageFromError(err));
+      if (scheduledMeetingId) {
+        setErrorMsg(`${messageFromError(err)} The scheduled meeting was not started.`);
+      } else {
+        usePhoneFallback(messageFromError(err));
+      }
     }
   }
 
@@ -79,7 +85,7 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
 
     setPhoneState('placing');
     try {
-      const result = await startOutboundCall(repPhone.trim(), customerPhone.trim());
+      const result = await startOutboundCall(repPhone.trim(), customerPhone.trim(), undefined, scheduledMeetingId);
       setPhoneState('ringing-rep');
       if (result.meetingId) onMeetingReady(result.meetingId);
     } catch (err) {
@@ -155,9 +161,9 @@ export default function PhoneCallModal({ onClose, onMeetingReady }: Props) {
                 <button type="submit" className="w-full bg-brand-700 hover:bg-brand-800 text-white font-semibold py-4 rounded-xl text-lg">Call from Browser</button>
               )}
 
-              <button type="button" disabled={browserBusy} onClick={() => usePhoneFallback()} className="w-full text-sm text-gray-600 hover:text-gray-800 underline disabled:opacity-40">
+              {!scheduledMeetingId && <button type="button" disabled={browserBusy} onClick={() => usePhoneFallback()} className="w-full text-sm text-gray-600 hover:text-gray-800 underline disabled:opacity-40">
                 Use My Phone Instead
-              </button>
+              </button>}
             </form>
           ) : (
             <form onSubmit={handlePhoneCall} className="space-y-4">

@@ -2,17 +2,20 @@
 import React from 'react';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import HomePage from './HomePage';
 
-const mocks = vi.hoisted(() => ({ createMeeting: vi.fn(), updateMeeting: vi.fn(), listMeetings: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createMeeting: vi.fn(), updateMeeting: vi.fn(), listMeetings: vi.fn(), listScheduledMeetings: vi.fn() }));
 vi.mock('../lib/auth', () => ({ useAuth: () => ({ user: { id: 'rep-1', name: 'Gabe Rivera' } }) }));
 vi.mock('../lib/api', () => ({
   createMeeting: mocks.createMeeting,
   updateMeeting: mocks.updateMeeting,
   // Deliberately supplied so this test proves Home does not call history APIs.
   listMeetings: mocks.listMeetings,
+  listScheduledMeetings: mocks.listScheduledMeetings,
+  startScheduledMeeting: vi.fn(),
+  cancelScheduledMeeting: vi.fn(),
 }));
 vi.mock('../components/CustomerIntakeModal', () => ({
   default: ({ onCreated }: { onCreated: (customerId: string, title: string) => void }) => (
@@ -20,8 +23,8 @@ vi.mock('../components/CustomerIntakeModal', () => ({
   ),
 }));
 vi.mock('../components/PhoneCallModal', () => ({
-  default: ({ onMeetingReady }: { onMeetingReady: (meetingId: string) => void }) => (
-    <button onClick={() => onMeetingReady('phone-1')}>Phone ready</button>
+  default: ({ onMeetingReady, initialCustomerPhone }: { onMeetingReady: (meetingId: string) => void; initialCustomerPhone?: string }) => (
+    <button onClick={() => onMeetingReady('phone-1')}>Phone ready{initialCustomerPhone ? ` ${initialCustomerPhone}` : ''}</button>
   ),
 }));
 function Probe() { return <output aria-label="location">{useLocation().pathname}</output>; }
@@ -34,6 +37,7 @@ function renderHome() {
 }
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+beforeEach(() => { mocks.listScheduledMeetings.mockResolvedValue({ meetings: [] }); });
 describe('Home actions without meeting history', () => {
   it('renders the first Home card after the shared navigation in normal flow', () => {
     const { container } = renderHome();
@@ -47,7 +51,7 @@ describe('Home actions without meeting history', () => {
     expect(firstCard.className).not.toMatch(/\babsolute\b/);
   });
 
-  it('retains all start, schedule, and upload actions without fetching or rendering history', async () => {
+  it('retains exactly four meeting choices and loads only the upcoming schedule below them', async () => {
     renderHome();
     const recording = screen.getByRole('button', { name: '🎧 Analyze a Recording' });
     for (const action of [
@@ -57,7 +61,10 @@ describe('Home actions without meeting history', () => {
       recording,
     ]) expect(action.className).toContain('min-h-11');
 
+    expect(screen.getAllByRole('button').filter((button) => ['▶ Record a Visit', '📞 Call a Customer', '🗓️ Schedule Ahead', '🎧 Analyze a Recording'].includes(button.textContent || ''))).toHaveLength(4);
+    expect(screen.getByRole('heading', { name: 'Upcoming scheduled meetings' }).compareDocumentPosition(recording) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     expect(mocks.listMeetings).not.toHaveBeenCalled();
+    expect(mocks.listScheduledMeetings).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Today's Meetings")).toBeNull();
     expect(screen.queryByText('Previous Meetings')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();

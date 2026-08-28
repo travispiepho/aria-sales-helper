@@ -60,6 +60,7 @@ import { createReadinessTracker } from './readinessTracker.js';
 import { registerUploadedRecordingRoutes, UPLOADED_RECORDING_CHANNEL } from './uploadedRecording.js';
 import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
 import { AiGenerationError, createAnthropicPrimaryTextGenerator } from './aiProvider.js';
+import { registerScheduledMeetingRoutes } from './scheduledMeetings.js';
 import {
   loadEnrolledVoicePrint,
   voiceFingerprintIdentificationPolicy,
@@ -649,6 +650,24 @@ async function ensureSessionsTable() {
     ALTER TABLE meetings
       ADD CONSTRAINT meetings_channel_check
       CHECK (channel IN ('phone', 'in_person', 'uploaded_recording'))
+  `);
+  // Schedule-ahead metadata. Scheduled entries are normal meeting rows that
+  // transition in place when started, preventing duplicate records.
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_timezone TEXT`);
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_customer_name TEXT`);
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_customer_phone TEXT`);
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_customer_address TEXT`);
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_started_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_call_sid TEXT`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_meetings_upcoming_by_rep
+    ON meetings (rep_id, scheduled_for ASC)
+    WHERE scheduled_for IS NOT NULL AND status = 'active' AND scheduled_started_at IS NULL
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_scheduled_call_sid_unique
+    ON meetings (scheduled_call_sid) WHERE scheduled_call_sid IS NOT NULL
   `);
   // Word cadence / sequencing analytics (added 2026-08-02)
   await pool.query(`
@@ -1862,6 +1881,10 @@ fastify.delete('/api/profile/voice-print', { preHandler: [requireAuth] }, async 
 
 // ─── Meeting routes ───────────────────────────────────────────────────────────
 
+await registerScheduledMeetingRoutes(fastify, {
+  pool, requireAuth, hasAdminAccess, shapeMeetingForClient, normalizePhoneNumber,
+});
+
 fastify.post('/api/meetings', { preHandler: [requireAuth] }, async (request, reply) => {
   const { customer_id, origin_client, channel } = request.body || {};
   const repId = request.user.id;
@@ -1978,6 +2001,7 @@ fastify.get('/api/meetings', { preHandler: [requireAuth] }, async (request, repl
        FROM meetings m
        LEFT JOIN users u ON m.rep_id = u.id
        LEFT JOIN customers c ON m.customer_id = c.id
+       WHERE m.scheduled_for IS NULL OR m.scheduled_started_at IS NOT NULL
        ORDER BY m.started_at DESC
        LIMIT $1 OFFSET $2`,
       [limit + 1, offset]
@@ -1989,6 +2013,7 @@ fastify.get('/api/meetings', { preHandler: [requireAuth] }, async (request, repl
        LEFT JOIN users u ON m.rep_id = u.id
        LEFT JOIN customers c ON m.customer_id = c.id
        WHERE m.rep_id = $1
+         AND (m.scheduled_for IS NULL OR m.scheduled_started_at IS NOT NULL)
        ORDER BY m.started_at DESC
        LIMIT $2 OFFSET $3`,
       [id, limit + 1, offset]

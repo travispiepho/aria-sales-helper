@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import {
   getMeeting,
   updateMeeting,
@@ -22,6 +22,7 @@ import AppHeader from '../components/AppHeader';
 import BrowserCallControls from '../components/BrowserCallControls';
 import MeetingTitleEditor from '../components/MeetingTitleEditor';
 import { useBrowserCall } from '../lib/browserCall';
+import { inRecordingPath, postRecordingPath } from '../lib/meetingRoutes';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -122,8 +123,7 @@ function formatDuration(startIso: string, endIso?: string): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function MeetingPage() {
-  const { id: meetingId } = useParams<{ id: string }>();
+export default function MeetingPage({ meetingId, pageMode }: { meetingId: string; pageMode: 'active' | 'post' }) {
   const navigate = useNavigate();
   const browserCall = useBrowserCall();
 
@@ -280,6 +280,14 @@ export default function MeetingPage() {
       getLatestCoaching(meetingId),
     ])
       .then(([m, { segments: saved }, { coaching }]) => {
+        if (pageMode === 'active' && m.status !== 'active') {
+          navigate(postRecordingPath(m.id), { replace: true });
+          return;
+        }
+        if (pageMode === 'post' && m.status === 'active') {
+          navigate(inRecordingPath(m.id), { replace: true });
+          return;
+        }
         setMeeting(m);
         setTitle(m.title || m.customer_name || '');
         // 2026-08-17: seed the recording indicator from the DB snapshot so a
@@ -311,7 +319,7 @@ export default function MeetingPage() {
       })
       .catch(() => navigate('/'))
       .finally(() => setLoading(false));
-  }, [meetingId, navigate]);
+  }, [meetingId, navigate, pageMode]);
 
   // ─── Smart auto-scroll: only scroll if user hasn't scrolled up ─────────────
 
@@ -554,10 +562,14 @@ export default function MeetingPage() {
       // post-meeting branch with the final status/ended_at from the server,
       // same as if the owner's own handleEndMeeting() had run locally.
       if (meetingId) {
-        getMeeting(meetingId).then(setMeeting).catch(() => {});
+        getMeeting(meetingId).then(latest => {
+          if (latest.status !== 'active') {
+            navigate(postRecordingPath(latest.id), { replace: true });
+          }
+        }).catch(() => {});
       }
     }
-  }, [meetingId, pushLapseStartNotice, pushLapseEndNotice, pushLapseStoppedNotice]);
+  }, [meetingId, navigate, pushLapseStartNotice, pushLapseEndNotice, pushLapseStoppedNotice]);
 
   // ─── WebSocket connection (owner: audio streaming) ───────────────────────
 
@@ -1004,7 +1016,8 @@ export default function MeetingPage() {
         status: 'completed',
         ended_at: new Date().toISOString(),
       });
-      setMeeting(updated);
+      if (updated.status === 'active') throw new Error('The meeting is still active. Please try again.');
+      navigate(postRecordingPath(updated.id), { replace: true });
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to end meeting');
     }

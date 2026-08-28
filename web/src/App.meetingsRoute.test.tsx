@@ -4,7 +4,9 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 
+const api = vi.hoisted(() => ({ getMeeting: vi.fn() }));
 const auth = vi.hoisted(() => ({ user: null as null | { id: string; name: string }, loading: false }));
+vi.mock('./lib/api', () => api);
 vi.mock('./lib/auth', () => ({
   AuthProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useAuth: () => auth,
@@ -15,7 +17,8 @@ vi.mock('./lib/iosCheck', () => ({ isIOSTooOld: () => false }));
 vi.mock('./pages/LoginPage', () => ({ default: () => <h1>Login page</h1> }));
 vi.mock('./pages/HomePage', () => ({ default: () => <h1>Home page</h1> }));
 vi.mock('./pages/MeetingsPage', () => ({ default: () => <h1>Meetings index page</h1> }));
-vi.mock('./pages/MeetingPage', () => ({ default: () => <h1>Meeting detail page</h1> }));
+vi.mock('./pages/InRecordingPage', () => ({ default: () => <h1>Active meeting page</h1> }));
+vi.mock('./pages/PostRecordingPage', () => ({ default: () => <h1>Post meeting page</h1> }));
 vi.mock('./pages/ProfilePage', () => ({ default: () => null }));
 vi.mock('./pages/AdminUsersPage', () => ({ default: () => null }));
 vi.mock('./pages/SettingsPage', () => ({ default: () => null }));
@@ -24,11 +27,11 @@ vi.mock('./pages/ScheduleCallPage', () => ({ default: () => null }));
 vi.mock('./pages/ScheduleVisitPage', () => ({ default: () => null }));
 vi.mock('./pages/ObjectionsPage', () => ({ default: () => null }));
 vi.mock('./pages/SignupClaimPage', () => ({ default: () => null }));
-vi.mock('./pages/UploadedRecordingPage', () => ({ default: () => null }));
 
 beforeEach(() => {
   auth.user = null;
   auth.loading = false;
+  api.getMeeting.mockReset();
 });
 afterEach(cleanup);
 
@@ -50,8 +53,9 @@ describe('meeting routes', () => {
     expect(await screen.findByRole('heading', { name: 'Meetings index page' })).toBeTruthy();
     unmount();
 
+    api.getMeeting.mockResolvedValue({ id: 'meeting-1', status: 'completed' });
     go('/meetings/meeting-1');
-    expect(await screen.findByRole('heading', { name: 'Meeting detail page' })).toBeTruthy();
-    await waitFor(() => expect(window.location.pathname).toBe('/meetings/meeting-1'));
+    await waitFor(() => expect(window.location.pathname).toBe('/meetings/meeting-1/post'));
+    expect(await screen.findByRole('heading', { name: 'Post meeting page' })).toBeTruthy();
   });
 });

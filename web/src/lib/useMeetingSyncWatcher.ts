@@ -55,6 +55,7 @@ import { useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { getActiveSyncMeeting } from './api';
 import { getWsBase } from './wsBase';
+import { inRecordingPath } from './meetingRoutes';
 
 const ACTIVE_SYNC_POLL_MS = 20_000;
 
@@ -81,12 +82,12 @@ export function useMeetingSyncWatcher() {
     let stopped = false;
 
     function goToMeeting(meetingId: string) {
-      if (lastNavigatedIdRef.current === meetingId && pathRef.current === `/meetings/${meetingId}`) {
+      if (lastNavigatedIdRef.current === meetingId && pathRef.current === inRecordingPath(meetingId)) {
         return;
       }
       lastNavigatedIdRef.current = meetingId;
-      if (pathRef.current !== `/meetings/${meetingId}`) {
-        navigate(`/meetings/${meetingId}`);
+      if (pathRef.current !== inRecordingPath(meetingId)) {
+        navigate(inRecordingPath(meetingId));
       }
     }
 

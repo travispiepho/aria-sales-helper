@@ -47,7 +47,7 @@ function renderPage() {
     <MemoryRouter initialEntries={['/meetings']}>
       <Routes>
         <Route path="/meetings" element={<><MeetingsPage /><Probe /></>} />
-        <Route path="/meetings/:id" element={<Probe />} />
+        <Route path="/meetings/:id/post" element={<Probe />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -95,7 +95,7 @@ describe('MeetingsPage', () => {
     expect(mocks.listMeetings).toHaveBeenCalledWith(0, 20);
 
     await userEvent.click(screen.getByRole('button', { name: 'Open meeting Exterior Estimate' }));
-    expect(screen.getByLabelText('location').textContent).toBe('/meetings/today-1');
+    expect(screen.getByLabelText('location').textContent).toBe('/meetings/today-1/post');
   });
 
   it('paginates, de-duplicates, and exposes a retry when load more fails', async () => {

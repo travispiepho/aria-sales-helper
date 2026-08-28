@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { createMeeting, updateMeeting } from '../lib/api';
+import { inRecordingPath } from '../lib/meetingRoutes';
 import CustomerIntakeModal from '../components/CustomerIntakeModal';
 import PhoneCallModal from '../components/PhoneCallModal';
 import AppPageLayout from '../components/AppPageLayout';
@@ -18,7 +19,7 @@ export default function HomePage() {
     try {
       const meeting = await createMeeting(customerId);
       if (title) await updateMeeting(meeting.id, { title }).catch(() => {});
-      navigate(`/meetings/${meeting.id}`);
+      navigate(inRecordingPath(meeting.id));
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : 'Failed to start meeting');
     } finally {
@@ -82,7 +83,7 @@ export default function HomePage() {
           onClose={() => setShowPhoneCall(false)}
           onMeetingReady={(meetingId) => {
             setShowPhoneCall(false);
-            navigate(`/meetings/${meetingId}`);
+            navigate(inRecordingPath(meetingId));
           }}
         />
       )}

@@ -5,7 +5,6 @@ import { isIOSTooOld } from './lib/iosCheck';
 import LoginPage from './pages/LoginPage';
 import HomePage from './pages/HomePage';
 import MeetingsPage from './pages/MeetingsPage';
-import MeetingPage from './pages/MeetingPage';
 import ProfilePage from './pages/ProfilePage';
 import AdminUsersPage from './pages/AdminUsersPage';
 import SettingsPage from './pages/SettingsPage';
@@ -14,7 +13,9 @@ import ScheduleCallPage from './pages/ScheduleCallPage';
 import ScheduleVisitPage from './pages/ScheduleVisitPage';
 import ObjectionsPage from './pages/ObjectionsPage';
 import SignupClaimPage from './pages/SignupClaimPage';
-import UploadedRecordingPage from './pages/UploadedRecordingPage';
+import InRecordingPage from './pages/InRecordingPage';
+import PostRecordingPage from './pages/PostRecordingPage';
+import MeetingRouteResolver from './pages/MeetingRouteResolver';
 // 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
 // same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
 // live-testing it: "Instead of a popup, I would like an almost identical
@@ -134,21 +135,22 @@ export default function App() {
               </RequireAuth>
             }
           />
+          {/* Canonical meeting UX: one active composition and one post-recording
+              composition. The pathless parent intentionally stays mounted when
+              a local upload moves from its chooser URL to the active meeting URL,
+              preserving its local-only File/WebAudio transport. */}
+          <Route element={<RequireAuth><InRecordingPage /></RequireAuth>}>
+            <Route path="/recordings/analyze" element={null} />
+            <Route path="/meetings/:id/active" element={null} />
+          </Route>
+          <Route
+            path="/meetings/:id/post"
+            element={<RequireAuth><PostRecordingPage /></RequireAuth>}
+          />
+          {/* Legacy combined detail URL resolves by authoritative status. */}
           <Route
             path="/meetings/:id"
-            element={
-              <RequireAuth>
-                <MeetingPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/recordings/analyze"
-            element={
-              <RequireAuth>
-                <UploadedRecordingPage />
-              </RequireAuth>
-            }
+            element={<RequireAuth><MeetingRouteResolver /></RequireAuth>}
           />
           <Route
             path="/profile"

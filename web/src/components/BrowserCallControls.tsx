@@ -1,8 +1,28 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { browserCallStatusLabel, useBrowserCall } from '../lib/browserCall';
+import { postRecordingPath } from '../lib/meetingRoutes';
 
 export default function BrowserCallControls({ meetingId }: { meetingId: string }) {
   const call = useBrowserCall();
+  const navigate = useNavigate();
+  const [finalizing, setFinalizing] = useState(false);
+
+  useEffect(() => {
+    if (call.meetingId !== meetingId || call.state !== 'ended') return;
+    let cancelled = false;
+    setFinalizing(true);
+    call.waitForTerminal()
+      .then(id => {
+        if (!cancelled && id) navigate(postRecordingPath(id), { replace: true });
+      })
+      .catch(() => {
+        // A status read failure is not proof the meeting ended. Stay active.
+      })
+      .finally(() => { if (!cancelled) setFinalizing(false); });
+    return () => { cancelled = true; };
+  }, [call.meetingId, call.state, call.waitForTerminal, meetingId, navigate]);
+
   if (call.meetingId !== meetingId) return null;
 
   const active = ['initializing', 'dialing', 'ringing', 'connecting', 'connected'].includes(call.state);
@@ -15,7 +35,7 @@ export default function BrowserCallControls({ meetingId }: { meetingId: string }
       <div className="flex min-w-0 items-center gap-2">
         <span className={`h-2.5 w-2.5 flex-none rounded-full ${active ? 'bg-green-500 animate-pulse' : call.state === 'error' ? 'bg-red-500' : 'bg-gray-400'}`} />
         <p role="status" className="min-w-0 flex-1 truncate text-sm font-semibold text-gray-800">
-          Browser call · {browserCallStatusLabel(call.state, call.muted)}
+          Browser call · {finalizing ? 'Finalizing meeting…' : browserCallStatusLabel(call.state, call.muted)}
         </p>
         {call.state === 'connected' && (
           <button
@@ -35,7 +55,7 @@ export default function BrowserCallControls({ meetingId }: { meetingId: string }
             Hang Up
           </button>
         )}
-        {!active && (
+        {!active && !finalizing && (
           <button type="button" onClick={call.clear} className="flex-none px-2 py-2 text-xs font-semibold text-gray-500">
             Dismiss
           </button>

@@ -79,13 +79,13 @@ describe('Home actions without meeting history', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Submit intake' }));
     expect(mocks.createMeeting).toHaveBeenCalledWith('customer-1');
     expect(mocks.updateMeeting).toHaveBeenCalledWith('visit-1', { title: 'Kitchen Estimate' });
-    expect((await screen.findByLabelText('location')).textContent).toBe('/meetings/visit-1');
+    expect((await screen.findByLabelText('location')).textContent).toBe('/meetings/visit-1/active');
   });
 
   it('retains phone-call meeting-detail navigation', async () => {
     renderHome();
     await userEvent.click(screen.getByRole('button', { name: '📞 Call a Customer' }));
     await userEvent.click(screen.getByRole('button', { name: 'Phone ready' }));
-    expect(screen.getByLabelText('location').textContent).toBe('/meetings/phone-1');
+    expect(screen.getByLabelText('location').textContent).toBe('/meetings/phone-1/active');
   });
 });

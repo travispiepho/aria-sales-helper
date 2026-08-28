@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Call, Device } from '@twilio/voice-sdk';
-import { createBrowserCall, getBrowserCallStatus } from './api';
+import { createBrowserCall, getBrowserCallStatus, getMeeting } from './api';
 import { useAuth } from './auth';
 
 export type BrowserCallState =
@@ -21,6 +21,7 @@ interface BrowserCallContextValue {
   start: (customerPhone: string) => Promise<string>;
   toggleMute: () => void;
   hangUp: () => void;
+  waitForTerminal: () => Promise<string | null>;
   clear: () => void;
 }
 
@@ -165,8 +166,25 @@ export function BrowserCallProvider({ children }: { children: React.ReactNode })
     setState('ended');
   }, []);
 
+  const waitForTerminal = useCallback(async () => {
+    const id = meetingId;
+    if (!id) return null;
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      try {
+        const latest = await getMeeting(id);
+        if (latest.status !== 'active') return id;
+      } catch {
+        // A transient read failure cannot prove completion. Keep reconciling
+        // until a terminal server row is observed or the bounded wait ends.
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return null;
+  }, [meetingId]);
+
   return (
-    <BrowserCallContext.Provider value={{ state, meetingId, muted, error, start, toggleMute, hangUp, clear }}>
+    <BrowserCallContext.Provider value={{ state, meetingId, muted, error, start, toggleMute, hangUp, waitForTerminal, clear }}>
       {children}
     </BrowserCallContext.Provider>
   );

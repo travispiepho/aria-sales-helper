@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AppPageLayout from '../components/AppPageLayout';
+import { postRecordingPath } from '../lib/meetingRoutes';
 import {
   deleteMeeting,
   getMeeting,
@@ -171,7 +172,7 @@ export default function MeetingsPage() {
           return (
             <article key={meeting.id} className="relative group">
               <button
-                onClick={() => navigate(`/meetings/${meeting.id}`)}
+                onClick={() => navigate(postRecordingPath(meeting.id))}
                 className="w-full min-h-11 bg-white rounded-2xl shadow-sm border border-gray-100 p-4 text-left hover:border-brand-300 transition-colors"
                 aria-label={`Open meeting ${meeting.title || meeting.customer_name || 'No customer linked'}`}
               >

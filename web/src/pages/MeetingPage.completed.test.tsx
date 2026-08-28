@@ -15,7 +15,7 @@ vi.mock('../lib/auth', () => ({ useAuth: () => ({ user: { id: 'rep-1', name: 'Re
 vi.mock('../lib/browserCall', () => ({
   useBrowserCall: () => ({
     state: 'idle', meetingId: null, muted: false, error: '',
-    start: vi.fn(), toggleMute: vi.fn(), hangUp: vi.fn(), clear: vi.fn(),
+    start: vi.fn(), toggleMute: vi.fn(), hangUp: vi.fn(), waitForTerminal: vi.fn(), clear: vi.fn(),
   }),
 }));
 vi.mock('../lib/api', () => ({
@@ -32,6 +32,7 @@ vi.mock('../lib/api', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  renderMode = 'post';
   mocks.getMeeting.mockResolvedValue({
     id: 'meeting-upload-1',
     rep_id: 'rep-1',
@@ -55,11 +56,13 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+let renderMode: 'active' | 'post' = 'post';
+
 function renderMeeting() {
   render(
     <MemoryRouter initialEntries={['/meetings/meeting-upload-1']}>
       <Routes>
-        <Route path="/meetings/:id" element={<MeetingPage />} />
+        <Route path="/meetings/:id" element={<MeetingPage meetingId="meeting-upload-1" pageMode={renderMode} />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -105,6 +108,7 @@ describe('MeetingPage Google Docs export visibility', () => {
       speaker_labels: {},
     });
 
+    renderMode = status === 'active' ? 'active' : 'post';
     renderMeeting();
 
     expect(await screen.findByRole('heading', {

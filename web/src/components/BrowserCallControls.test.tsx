@@ -2,6 +2,7 @@
 import React from 'react';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import BrowserCallControls from './BrowserCallControls';
 
 const call = vi.hoisted(() => ({
@@ -28,11 +29,11 @@ afterEach(() => {
 describe('BrowserCallControls', () => {
   it('renders compact live controls alongside, not over, transcript/coaching content', () => {
     render(
-      <main>
+      <MemoryRouter><main>
         <BrowserCallControls meetingId="meeting-live" />
         <section aria-label="ARIA coaching">Coaching stays visible</section>
         <section aria-label="Live Transcript">Customer: Transcript stays visible</section>
-      </main>
+      </main></MemoryRouter>
     );
 
     expect(screen.getByLabelText('Browser call controls')).toBeTruthy();
@@ -45,7 +46,7 @@ describe('BrowserCallControls', () => {
   });
 
   it('does not attach controls to a different meeting', () => {
-    render(<BrowserCallControls meetingId="another-meeting" />);
+    render(<MemoryRouter><BrowserCallControls meetingId="another-meeting" /></MemoryRouter>);
     expect(screen.queryByLabelText('Browser call controls')).toBeNull();
   });
 });

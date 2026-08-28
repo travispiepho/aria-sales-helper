@@ -50,7 +50,7 @@ function LocationProbe() { return <output aria-label="location">{useLocation().p
 function renderPage() {
   return render(<MemoryRouter initialEntries={['/recordings/analyze']}><Routes>
     <Route path="/recordings/analyze" element={<><UploadedRecordingPage /><LocationProbe /></>} />
-    <Route path="/meetings/:id" element={<LocationProbe />} />
+    <Route path="/meetings/:id/post" element={<LocationProbe />} />
   </Routes></MemoryRouter>);
 }
 
@@ -203,7 +203,7 @@ describe('UploadedRecordingPage', () => {
     expect(mocks.transportResume).toHaveBeenCalled();
     expect(mocks.resume).toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: /Stop/ }));
-    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1'));
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1/post'));
     expect(mocks.end).toHaveBeenCalledTimes(1);
     expect(mocks.stop).toHaveBeenCalled();
   });
@@ -254,7 +254,7 @@ describe('UploadedRecordingPage', () => {
     expect(screen.queryByRole('button', { name: 'View completed meeting analysis' })).toBeNull();
 
     acknowledgeCompletion!();
-    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1'));
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1/post'));
   });
 
   it('stops local playback and shows a truthful error when transport disconnects midstream', async () => {
@@ -312,7 +312,7 @@ describe('UploadedRecordingPage', () => {
     applyLiveMessage!({ type: 'error', error: 'Completion failed' });
     playbackCallbacks!.onEnded();
 
-    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1'));
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1/post'));
     expect(screen.queryByText('Completion failed')).toBeNull();
     expect(mocks.end).toHaveBeenCalledTimes(1);
     expect(mocks.getMeeting).toHaveBeenCalledWith('meeting-upload-1');

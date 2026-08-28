@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { inRecordingPath, postRecordingPath } from '../lib/meetingRoutes';
 import AppHeader from '../components/AppHeader';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 import {
@@ -24,7 +25,7 @@ type PlaybackState = 'idle' | 'preparing' | 'playing' | 'paused' | 'stopping' | 
 
 interface LiveSegment extends TranscriptSegment { isFinal?: boolean }
 
-export default function UploadedRecordingPage() {
+export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingStarted?: (meetingId: string) => void } = {}) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
   const [objectUrl, setObjectUrl] = useState('');
@@ -169,7 +170,7 @@ export default function UploadedRecordingPage() {
         // do not let an optional pre-navigation fetch delay or contradict it.
         setError(null);
         setState('complete');
-        navigate(`/meetings/${id}`, { replace: true });
+        navigate(postRecordingPath(id), { replace: true });
         return;
       }
 
@@ -191,7 +192,7 @@ export default function UploadedRecordingPage() {
         if (saved.segments.length > 0) setSegments(saved.segments.map(segment => ({ ...segment, isFinal: true })));
         setError(null);
         setState('complete');
-        navigate(`/meetings/${id}`, { replace: true });
+        navigate(postRecordingPath(id), { replace: true });
         return;
       }
 
@@ -201,7 +202,7 @@ export default function UploadedRecordingPage() {
     })();
     finalizePromiseRef.current = task;
     return task;
-  }, [cleanupResources, navigate]);
+  }, [navigate]);
 
   async function handlePlaybackDisconnect(cause: Error) {
     // There is no safe resume point after transport loss: some PCM may have
@@ -247,6 +248,10 @@ export default function UploadedRecordingPage() {
       const meeting = await createUploadedRecordingMeeting(player.durationSeconds);
       setMeetingId(meeting.id);
       meetingIdRef.current = meeting.id;
+      if (onMeetingStarted) {
+        onMeetingStarted(meeting.id);
+        navigate(inRecordingPath(meeting.id), { replace: true });
+      }
       setSpeakerLabels(meeting.speaker_labels || {});
       const transport = new UploadedRecordingTransport(meeting.id, meeting.upload_ws_path);
       transportRef.current = transport;
@@ -462,7 +467,7 @@ export default function UploadedRecordingPage() {
 
           {state === 'complete' && meetingId && (
             <button
-              onClick={() => navigate(`/meetings/${meetingId}`)}
+              onClick={() => navigate(postRecordingPath(meetingId))}
               className="w-full min-h-11 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4"
             >
               View completed meeting analysis

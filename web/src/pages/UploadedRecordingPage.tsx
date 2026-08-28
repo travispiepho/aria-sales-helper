@@ -119,7 +119,7 @@ export default function UploadedRecordingPage() {
     }
   }
 
-  const finalize = useCallback(async (reason: 'eof' | 'stop') => {
+  const finalize = useCallback(async () => {
     if (finalizePromiseRef.current) return finalizePromiseRef.current;
     const id = meetingIdRef.current;
     const task = (async () => {
@@ -129,29 +129,62 @@ export default function UploadedRecordingPage() {
       playerRef.current = null;
       if (player) await Promise.resolve(player.stop()).catch(() => {});
       if (!transport || !transport.end()) throw new Error('ARIA playback connection is not available.');
-      await transport.waitForCompletion();
+      let completionError: unknown = null;
+      let completionAcknowledged = false;
+      try {
+        await transport.waitForCompletion();
+        completionAcknowledged = true;
+      } catch (cause) {
+        completionError = cause;
+      }
       transport.close();
       transportRef.current = null;
       if (!id) {
-        setState('complete');
+        if (completionAcknowledged) {
+          setError(null);
+          setState('complete');
+        } else {
+          setError(completionError instanceof Error ? completionError.message : 'ARIA could not complete this recording.');
+          setState('error');
+        }
         return;
       }
+
+      if (completionAcknowledged) {
+        // The server only emits `completed` after persisting finalization.
+        // MeetingPage can perform its own normal detail/transcript readback;
+        // do not let an optional pre-navigation fetch delay or contradict it.
+        setError(null);
+        setState('complete');
+        navigate(`/meetings/${id}`, { replace: true });
+        return;
+      }
+
+      let latest: Awaited<ReturnType<typeof getMeeting>> | null = null;
+      let readbackError: unknown = null;
       try {
-        // The server owns meeting finalization after the exactly-once end frame.
-        // Re-read the normal meeting and transcript after it has processed EOF.
-        let latest = await getMeeting(id);
-        for (let attempt = 0; attempt < 4 && latest.status === 'active'; attempt += 1) {
-          await new Promise(resolve => setTimeout(resolve, 250));
-          latest = await getMeeting(id);
-        }
+        latest = await getMeeting(id);
+      } catch (cause) {
+        readbackError = cause;
+      }
+
+      // Match MeetingPage's completion semantics: `active` is the only live
+      // state. A terminal meeting readback is authoritative even if the
+      // completion socket closed before its final acknowledgement arrived.
+      // Conversely, a received `completed` acknowledgement is authoritative
+      // even if this optional readback fails or is briefly stale.
+      if (latest && latest.status !== 'active') {
         const saved = await getMeetingSegments(id).catch(() => ({ segments: [] }));
         if (saved.segments.length > 0) setSegments(saved.segments.map(segment => ({ ...segment, isFinal: true })));
+        setError(null);
         setState('complete');
-        if (reason === 'stop' || latest.status !== 'active') navigate(`/meetings/${id}`, { replace: true });
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'Playback ended, but the completed meeting could not be loaded.');
-        setState('error');
+        navigate(`/meetings/${id}`, { replace: true });
+        return;
       }
+
+      const failure = completionError ?? readbackError;
+      setError(failure instanceof Error ? failure.message : 'ARIA could not complete this recording.');
+      setState('error');
     })();
     finalizePromiseRef.current = task;
     return task;
@@ -197,7 +230,7 @@ export default function UploadedRecordingPage() {
       await player.play({
         onPcm: pcm => transport.sendPcm(pcm),
         onProgress: seconds => setProgress(seconds),
-        onEnded: () => { void finalize('eof'); },
+        onEnded: () => { void finalize(); },
       });
       setState('playing');
     } catch (cause) {
@@ -316,7 +349,7 @@ export default function UploadedRecordingPage() {
               {state === 'paused' ? '▶ Resume' : '⏸ Pause'}
             </button>
             <button
-              onClick={() => { void finalize('stop'); }}
+              onClick={() => { void finalize(); }}
               disabled={state !== 'playing' && state !== 'paused'}
               className="min-h-11 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-700 font-semibold px-4"
             >

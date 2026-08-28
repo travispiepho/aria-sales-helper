@@ -173,8 +173,52 @@ describe('UploadedRecordingPage', () => {
     await waitFor(() => expect(playbackCallbacks).toBeTruthy());
     playbackCallbacks!.onEnded();
     playbackCallbacks!.onEnded();
-    await waitFor(() => expect(mocks.getMeeting).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mocks.waitForCompletion).toHaveBeenCalledTimes(1));
     expect(mocks.end).toHaveBeenCalledTimes(1);
+    expect(mocks.getMeeting).not.toHaveBeenCalled();
+  });
+
+  it('treats a terminal meeting as complete when a non-critical follow-up closes the socket with Completion failed', async () => {
+    let playbackCallbacks: { onEnded: () => void } | undefined;
+    let applyLiveMessage: ((message: unknown) => void) | undefined;
+    mocks.play.mockImplementation(async (callbacks: { onEnded: () => void }) => { playbackCallbacks = callbacks; });
+    mocks.connect.mockImplementation(async (handler: (message: unknown) => void) => { applyLiveMessage = handler; });
+    mocks.waitForCompletion.mockRejectedValueOnce(new Error('ARIA closed the connection before analysis completed. Retry.'));
+    mocks.getMeeting.mockResolvedValueOnce({ id: 'meeting-upload-1', status: 'completed' });
+
+    renderPage();
+    await selectAudio();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await waitFor(() => expect(playbackCallbacks).toBeTruthy());
+
+    // This reproduces the observed ordering: the old server surfaced a
+    // post-status summary/follow-up exception as a generic completion error,
+    // then closed the socket even though the meeting row was already terminal.
+    applyLiveMessage!({ type: 'error', error: 'Completion failed' });
+    playbackCallbacks!.onEnded();
+
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1'));
+    expect(screen.queryByText('Completion failed')).toBeNull();
+    expect(mocks.end).toHaveBeenCalledTimes(1);
+    expect(mocks.getMeeting).toHaveBeenCalledWith('meeting-upload-1');
+  });
+
+  it('keeps a completion error visible when the meeting is genuinely still active', async () => {
+    let playbackCallbacks: { onEnded: () => void } | undefined;
+    mocks.play.mockImplementation(async (callbacks: { onEnded: () => void }) => { playbackCallbacks = callbacks; });
+    mocks.waitForCompletion.mockRejectedValueOnce(new Error('Completion failed'));
+    mocks.getMeeting.mockResolvedValueOnce({ id: 'meeting-upload-1', status: 'active' });
+
+    renderPage();
+    await selectAudio();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await waitFor(() => expect(playbackCallbacks).toBeTruthy());
+    playbackCallbacks!.onEnded();
+
+    expect((await screen.findByRole('alert')).textContent).toContain('Completion failed');
+    expect(screen.getByLabelText('location').textContent).toBe('/recordings/analyze');
   });
 
   it('shows errors with retry before playback starts', async () => {

@@ -18,9 +18,6 @@ const navItemClass =
 export default function AppHeader({
   title,
   subtitle,
-  backTo,
-  onBack,
-  backLabel = 'Back to Home',
   toneClassName = 'bg-brand-700',
   status,
 }: AppHeaderProps) {
@@ -33,28 +30,16 @@ export default function AppHeader({
 
   const primary = (
     <div className="flex min-w-0 flex-1 items-center gap-2 max-[480px]:w-full max-[480px]:flex-none">
-      {(backTo || onBack) && (
-        backTo ? (
-          <Link
-            to={backTo}
-            aria-label={backLabel}
-            className="w-11 h-11 rounded-full flex flex-shrink-0 items-center justify-center text-white/80 hover:bg-white/10 hover:text-white text-2xl leading-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
-          >
-            <span aria-hidden="true">←</span>
-          </Link>
-        ) : (
-          <button
-            type="button"
-            onClick={onBack}
-            aria-label={backLabel}
-            className="w-11 h-11 rounded-full flex flex-shrink-0 items-center justify-center text-white/80 hover:bg-white/10 hover:text-white text-2xl leading-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
-          >
-            <span aria-hidden="true">←</span>
-          </button>
-        )
-      )}
+      <Link
+        to="/"
+        aria-label="Home"
+        aria-current={current('/') ? 'page' : undefined}
+        className="h-11 min-w-11 px-1 rounded-lg flex flex-shrink-0 items-center justify-center text-white hover:bg-white/10 text-lg font-bold leading-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+      >
+        ARIA
+      </Link>
       <div className="min-w-0 flex-1">
-        <h1 className="text-xl sm:text-2xl font-bold leading-tight truncate">{title}</h1>
+        <h1 className={title === 'ARIA' ? 'sr-only' : 'text-xl sm:text-2xl font-bold leading-tight truncate'}>{title}</h1>
         {subtitle && <div className="text-white/75 text-sm leading-snug truncate">{subtitle}</div>}
       </div>
       {status && <div className="flex-shrink-0">{status}</div>}
@@ -71,8 +56,16 @@ export default function AppHeader({
         {primary}
         <nav
           aria-label="Authenticated navigation"
-          className="ml-auto flex flex-shrink-0 items-center justify-center gap-2 max-[480px]:mx-auto max-[480px]:w-full"
+          className="ml-auto flex flex-shrink-0 flex-wrap items-center justify-center gap-2 max-[480px]:mx-auto max-[480px]:w-full"
         >
+          <Link
+            to="/"
+            aria-label="Record"
+            aria-current={current('/') ? 'page' : undefined}
+            className={`h-11 min-w-11 px-3 rounded-full bg-white/10 border-2 border-white/25 hover:bg-white/20 flex items-center justify-center text-white text-sm font-semibold transition-colors flex-shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-brand-700 ${current('/') ? 'ring-2 ring-white' : ''}`}
+          >
+            Record
+          </Link>
           <Link
             to="/meetings"
             aria-label="Meetings"

@@ -65,6 +65,7 @@ test('desktop shared compact header evidence', async ({ page }) => {
   const header = page.locator('[data-app-header="compact"]');
   await expect(header).toBeVisible();
   await expect(header).toHaveAttribute('data-compact-min-height', '104px');
+  await expect(page.getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/');
   await expect(page.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
   await page.screenshot({ path: 'test-results/shared-header-desktop-settings.png', fullPage: true });
 });
@@ -74,10 +75,12 @@ test('narrow header wraps without hiding navigation', async ({ page }) => {
   await page.goto('http://127.0.0.1:5173/schedule/call');
   const header = page.locator('[data-app-header="compact"]');
   await expect(header).toBeVisible();
-  for (const name of ['Back to Schedule', 'Meetings', 'Settings', 'Objections', 'Profile']) {
+  for (const name of ['Home', 'Record', 'Meetings', 'Objections', 'Settings', 'Profile']) {
     await expect(page.getByRole('link', { name })).toBeVisible();
   }
+  await expect(page.getByRole('link', { name: 'Back to Schedule' })).toHaveCount(0);
   const boxes = await Promise.all([
+    page.getByRole('link', { name: 'Record' }).boundingBox(),
     page.getByRole('link', { name: 'Meetings' }).boundingBox(),
     page.getByRole('link', { name: 'Settings' }).boundingBox(),
     page.getByRole('link', { name: 'Objections' }).boundingBox(),
@@ -89,6 +92,21 @@ test('narrow header wraps without hiding navigation', async ({ page }) => {
     expect((box?.x || 0) + (box?.width || 0)).toBeLessThanOrEqual(320);
   }
   await page.screenshot({ path: 'test-results/shared-header-mobile-schedule-call.png', fullPage: true });
+});
+
+
+test('Home and Record share homepage routing and current state', async ({ page }) => {
+  await page.goto('http://127.0.0.1:5173/meetings');
+  await page.getByRole('link', { name: 'Record' }).click();
+  await expect(page).toHaveURL('http://127.0.0.1:5173/');
+  await expect(page.getByRole('link', { name: 'Home' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: 'Record' })).toHaveAttribute('aria-current', 'page');
+
+  const labels = await page
+    .getByRole('navigation', { name: 'Authenticated navigation' })
+    .locator('a')
+    .evaluateAll(links => links.map(link => link.getAttribute('aria-label')));
+  expect(labels).toEqual(['Record', 'Meetings', 'Objections', 'Settings', 'Profile']);
 });
 
 

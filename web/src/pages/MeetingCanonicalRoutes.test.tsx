@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import MeetingRouteResolver from './MeetingRouteResolver';
 import MeetingPage from './MeetingPage';
 import BrowserCallControls from '../components/BrowserCallControls';
+import AppHeader, { AppNavigationVisibility } from '../components/AppHeader';
 
 const mocks = vi.hoisted(() => ({
   getMeeting: vi.fn(), getSegments: vi.fn(), getLatestCoaching: vi.fn(), updateMeeting: vi.fn(),
@@ -35,6 +36,10 @@ vi.mock('../lib/browserCall', async importOriginal => ({
 }));
 
 function Probe() { return <span aria-label="location">{useLocation().pathname}</span>; }
+function NavigationProbe() {
+  const location = useLocation();
+  return <><AppHeader title="Meeting" /><Probe key={location.pathname} /></>;
+}
 function fixture(status: 'active' | 'completed', channel: 'in_person' | 'phone' = 'in_person') {
   return { id: channel === 'phone' ? 'phone-1' : 'meeting-1', rep_id: 'rep-1', started_at: new Date().toISOString(), status, channel, call_sid: channel === 'phone' ? 'CA123' : null };
 }
@@ -56,6 +61,27 @@ describe('canonical meeting routes', () => {
       <Route path="*" element={<Probe />} />
     </Routes></MemoryRouter>);
     await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/schedule/scheduled-1/edit'));
+  });
+
+  it('restores shared navigation after the legacy resolver reaches post', async () => {
+    mocks.getMeeting.mockResolvedValue(fixture('completed'));
+    render(<MemoryRouter initialEntries={['/meetings/meeting-1']}><Routes>
+      <Route path="/meetings/:id" element={<MeetingRouteResolver />} />
+      <Route path="/meetings/:id/post" element={<NavigationProbe />} />
+    </Routes></MemoryRouter>);
+    expect(await screen.findByRole('navigation', { name: 'Authenticated navigation' })).toBeTruthy();
+  });
+
+  it('keeps active navigation hidden after a legacy deep-link correction', async () => {
+    mocks.getMeeting.mockResolvedValue(fixture('active'));
+    render(<MemoryRouter initialEntries={['/meetings/meeting-1']}><Routes>
+      <Route path="/meetings/:id" element={<MeetingRouteResolver />} />
+      <Route path="/meetings/:id/active" element={
+        <AppNavigationVisibility visible={false}><NavigationProbe /></AppNavigationVisibility>
+      } />
+    </Routes></MemoryRouter>);
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-1/active'));
+    expect(screen.queryByRole('navigation', { name: 'Authenticated navigation' })).toBeNull();
   });
 
   it.each([

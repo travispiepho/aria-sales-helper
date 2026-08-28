@@ -2,6 +2,22 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 
+const AppNavigationVisibilityContext = React.createContext(true);
+
+export function AppNavigationVisibility({
+  visible,
+  children,
+}: {
+  visible: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <AppNavigationVisibilityContext.Provider value={visible}>
+      {children}
+    </AppNavigationVisibilityContext.Provider>
+  );
+}
+
 interface AppHeaderProps {
   title: string;
   subtitle?: React.ReactNode;
@@ -23,6 +39,7 @@ export default function AppHeader({
 }: AppHeaderProps) {
   const { user } = useAuth();
   const { pathname } = useLocation();
+  const navigationVisible = React.useContext(AppNavigationVisibilityContext);
   const current = (path: string) =>
     path === '/objections' || path === '/meetings'
       ? pathname === path || pathname.startsWith(`${path}/`)
@@ -54,7 +71,7 @@ export default function AppHeader({
     >
       <div className="w-full flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
         {primary}
-        <nav
+        {navigationVisible && <nav
           aria-label="Authenticated navigation"
           className="ml-auto flex flex-shrink-0 flex-wrap items-center justify-center gap-2 max-[480px]:mx-auto max-[480px]:w-full"
         >
@@ -106,7 +123,7 @@ export default function AppHeader({
           >
             {user?.name?.charAt(0)?.toUpperCase() || '?'}
           </Link>
-        </nav>
+        </nav>}
       </div>
     </header>
   );

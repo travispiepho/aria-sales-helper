@@ -17,6 +17,7 @@ import SignupClaimPage from './pages/SignupClaimPage';
 import InRecordingPage from './pages/InRecordingPage';
 import PostRecordingPage from './pages/PostRecordingPage';
 import MeetingRouteResolver from './pages/MeetingRouteResolver';
+import { AppNavigationVisibility } from './components/AppHeader';
 // 2026-08-05 (live meeting sync, full-page rebuild — REPLACES the earlier
 // same-day MeetingSyncDialog.tsx popup, per Gabe's explicit direction after
 // live-testing it: "Instead of a popup, I would like an almost identical
@@ -140,7 +141,13 @@ export default function App() {
               composition. The pathless parent intentionally stays mounted when
               a local upload moves from its chooser URL to the active meeting URL,
               preserving its local-only File/WebAudio transport. */}
-          <Route element={<RequireAuth><InRecordingPage /></RequireAuth>}>
+          <Route element={
+            <RequireAuth>
+              <AppNavigationVisibility visible={false}>
+                <InRecordingPage />
+              </AppNavigationVisibility>
+            </RequireAuth>
+          }>
             <Route path="/recordings/analyze" element={null} />
             <Route path="/meetings/:id/active" element={null} />
           </Route>

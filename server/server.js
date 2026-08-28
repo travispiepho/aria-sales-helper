@@ -59,6 +59,7 @@ import { createReconnectTracker } from './dgReconnectPolicy.js';
 import { createReadinessTracker } from './readinessTracker.js';
 import { registerUploadedRecordingRoutes, UPLOADED_RECORDING_CHANNEL } from './uploadedRecording.js';
 import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
+import { AiGenerationError, createAnthropicPrimaryTextGenerator } from './aiProvider.js';
 import {
   loadEnrolledVoicePrint,
   voiceFingerprintIdentificationPolicy,
@@ -100,7 +101,7 @@ if (!pyannote.isConfigured()) {
 }
 
 if (!OPENROUTER_API_KEY) {
-  console.warn('WARN: OPENROUTER_API_KEY (or OPENROUTER_KEY) not set — coaching endpoint will be unavailable.');
+  console.warn('WARN: OPENROUTER_API_KEY (or OPENROUTER_KEY) not set — coaching and Anthropic fallback will be unavailable.');
 }
 
 if (!voiceFingerprintPolicy.automaticIdentification) {
@@ -433,16 +434,22 @@ async function finalizeMeetingIfAbandoned(meetingId) {
   }
 }
 
-// Anthropic client (optional — summary will stub if key missing)
-const anthropic = ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: ANTHROPIC_API_KEY })
-  : OPENROUTER_API_KEY
-    ? new Anthropic({
-        apiKey: OPENROUTER_API_KEY,
-        baseURL: 'https://openrouter.ai/api/v1',
-        defaultHeaders: { 'HTTP-Referer': 'https://aria.certaprograndhaven.com', 'X-Title': 'ARIA Sales Helper' }
-      })
-    : null;
+// Direct Anthropic remains primary for summary/title generation. OpenRouter
+// is a runtime fallback, not merely a startup-time choice based on key presence.
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
+const anthropicPrimaryText = createAnthropicPrimaryTextGenerator({
+  anthropicApiKey: ANTHROPIC_API_KEY,
+  openRouterApiKey: OPENROUTER_API_KEY,
+  anthropicClient: anthropic,
+});
+
+function formatAiFailure(error) {
+  if (!(error instanceof AiGenerationError)) return 'provider error';
+  if (!error.attempts.length) return 'no provider configured';
+  return error.attempts
+    .map(({ provider, status }) => `${provider}${status ? ` HTTP ${status}` : ''}`)
+    .join(', ');
+}
 
 // ─── Auto-title (origin-agnostic: mobile + web), 2026-08-05 ────────────────
 // Backlog item was "auto-generate a meeting title from the 2+ identified
@@ -551,41 +558,15 @@ async function generateAutoTitleForMeeting(meetingId) {
 
   let titleText = null;
   try {
-    if (OPENROUTER_API_KEY && !ANTHROPIC_API_KEY) {
-      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://aria.certaprograndhaven.com',
-          'X-Title': 'ARIA Sales Helper',
-        },
-        body: JSON.stringify({
-          model: 'anthropic/claude-haiku-4-5',
-          max_tokens: 40,
-          messages: [
-            { role: 'system', content: TITLE_SYSTEM },
-            { role: 'user', content: TITLE_USER },
-          ],
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        fastify.log.error(`auto-title: OpenRouter error for ${meetingId}: ${JSON.stringify(data)}`);
-        return null;
-      }
-      titleText = data.choices?.[0]?.message?.content || null;
-    } else {
-      const response = await anthropic.messages.create({
-        model: 'claude-haiku-4-5',
-        max_tokens: 40,
-        system: TITLE_SYSTEM,
-        messages: [{ role: 'user', content: TITLE_USER }],
-      });
-      titleText = response.content[0]?.type === 'text' ? response.content[0].text : null;
-    }
+    const generated = await anthropicPrimaryText.generate({
+      model: 'claude-haiku-4-5',
+      maxTokens: 40,
+      system: TITLE_SYSTEM,
+      messages: [{ role: 'user', content: TITLE_USER }],
+    });
+    titleText = generated.text;
   } catch (err) {
-    fastify.log.error(`auto-title: generation error for ${meetingId}: ${err.message}`);
+    fastify.log.error(`auto-title: generation failed for ${meetingId} (${formatAiFailure(err)})`);
     return null;
   }
 
@@ -1100,7 +1081,16 @@ fastify.get('/health', async (request, reply) => {
       },
       activeMeetings: activeMeetingSockets.size,
       deepgram: DEEPGRAM_API_KEY ? 'configured' : 'missing',
-      anthropic: ANTHROPIC_API_KEY ? 'configured' : 'missing (summary will stub)',
+      anthropic: anthropicPrimaryText.availability.anthropic,
+      openrouter: anthropicPrimaryText.availability.openrouter,
+      // Configuration availability only; this deliberately does not claim a
+      // provider is funded or reachable merely because an env var exists.
+      summaryGeneration: {
+        status: anthropicPrimaryText.availability.textGeneration,
+        runtimeVerified: false,
+        primary: ANTHROPIC_API_KEY ? 'anthropic' : OPENROUTER_API_KEY ? 'openrouter' : null,
+        fallback: ANTHROPIC_API_KEY && OPENROUTER_API_KEY ? 'openrouter' : null,
+      },
       pyannote: pyannote.isConfigured() ? 'configured' : 'missing (scaffolded, inactive)',
       twilio: (() => {
         const s = twilioConfigStatus();
@@ -3132,11 +3122,6 @@ fastify.post('/api/meetings/:id/summary', { preHandler: [requireAuth], config: {
 
   let summaryText;
 
-  const summaryApiKey = ANTHROPIC_API_KEY || OPENROUTER_API_KEY;
-  const summaryUrl = ANTHROPIC_API_KEY
-    ? 'https://api.anthropic.com/v1/messages'
-    : 'https://openrouter.ai/api/v1/chat/completions';
-
   // Also pull the latest coaching snapshot to know which checklist items were hit
   const coachingResult = await pool.query(
     `SELECT snapshot FROM coaching_snapshots WHERE meeting_id = $1 ORDER BY created_at DESC LIMIT 1`,
@@ -3165,49 +3150,21 @@ ${kbFirstGoAround}`;
 
   const SUMMARY_USER = `Meeting transcript:\n\n${transcriptText}${checklistContext}\n\nWrite a structured meeting summary with these sections (plain text, no markdown asterisks or symbols):\n\n1. MEETING OVERVIEW\nBrief 2-3 sentence summary of what was discussed.\n\n2. SALES STAGE\nWhich of the 11 sales stages was reached and how far the rep got through the process.\n\n3. CHECKLIST COVERAGE\nList each 1st Go Around checklist item and whether it was covered or missed. Be specific about what was said or skipped.\n\n4. WHAT WAS MISSED\nClearly call out any checklist items or required sales stages the rep did not complete, and why it matters.\n\n5. ACTION ITEMS\n3-5 concrete next steps for the rep to follow up on.`;
 
-  if (!summaryApiKey) {
+  if (anthropicPrimaryText.availability.textGeneration === 'missing') {
     summaryText = '⚠️ Summary generation requires ANTHROPIC_API_KEY or OPENROUTER_API_KEY. Please provision a key and try again.\n\n' +
       `Transcript preview (first 500 chars):\n${transcriptText.slice(0, 500)}`;
-  } else if (OPENROUTER_API_KEY && !ANTHROPIC_API_KEY) {
-    try {
-      const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://aria.certaprograndhaven.com',
-          'X-Title': 'ARIA Sales Helper'
-        },
-        body: JSON.stringify({
-          model: 'anthropic/claude-haiku-4-5',
-          max_tokens: 1500,
-          messages: [
-            { role: 'system', content: SUMMARY_SYSTEM },
-            { role: 'user', content: SUMMARY_USER }
-          ]
-        })
-      });
-      const orData = await orRes.json();
-      if (!orRes.ok) {
-        fastify.log.error('OpenRouter summary error:', JSON.stringify(orData));
-        return reply.code(502).send({ error: `Summary failed: ${orData.error?.message || orRes.status}` });
-      }
-      summaryText = orData.choices?.[0]?.message?.content || 'Summary unavailable';
-    } catch (err) {
-      summaryText = `Summary generation failed: ${err.message}`;
-    }
   } else {
     try {
-      const response = await anthropic.messages.create({
+      const generated = await anthropicPrimaryText.generate({
         model: 'claude-haiku-4-5',
-        max_tokens: 1500,
+        maxTokens: 1500,
         system: SUMMARY_SYSTEM,
         messages: [{ role: 'user', content: SUMMARY_USER }],
       });
-      summaryText = response.content[0].type === 'text' ? response.content[0].text : '(No summary generated)';
+      summaryText = generated.text;
     } catch (err) {
-      fastify.log.error('Anthropic summary error:', err);
-      return reply.code(502).send({ error: 'Summary generation failed: ' + err.message });
+      fastify.log.error(`summary generation failed for ${id} (${formatAiFailure(err)})`);
+      return reply.code(502).send({ error: 'Summary generation failed' });
     }
   }
 
@@ -3611,16 +3568,21 @@ async function finalizeUploadedRecording(meetingId) {
   const transcriptText = segments.rows.length
     ? segments.rows.map((segment) => `${segment.speaker}: ${segment.text}`).join('\n')
     : '(No transcript recorded)';
-  if (!anthropic) {
+  if (anthropicPrimaryText.availability.textGeneration === 'missing') {
     summaryText = '⚠️ Summary generation requires ANTHROPIC_API_KEY or OPENROUTER_API_KEY. Please provision a key and try again.\n\n' +
       `Transcript preview (first 500 chars):\n${transcriptText.slice(0, 500)}`;
   } else {
-    const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5', max_tokens: 1500,
-      system: `You are ARIA, a sales coach for CertaPro Painters field reps. Write a structured plain-text meeting summary with: MEETING OVERVIEW, SALES STAGE, CHECKLIST COVERAGE, WHAT WAS MISSED, and ACTION ITEMS.`,
-      messages: [{ role: 'user', content: `Meeting transcript:\n\n${transcriptText}` }],
-    });
-    summaryText = response.content?.[0]?.type === 'text' ? response.content[0].text : '(No summary generated)';
+    try {
+      const generated = await anthropicPrimaryText.generate({
+        model: 'claude-haiku-4-5', maxTokens: 1500,
+        system: `You are ARIA, a sales coach for CertaPro Painters field reps. Write a structured plain-text meeting summary with: MEETING OVERVIEW, SALES STAGE, CHECKLIST COVERAGE, WHAT WAS MISSED, and ACTION ITEMS.`,
+        messages: [{ role: 'user', content: `Meeting transcript:\n\n${transcriptText}` }],
+      });
+      summaryText = generated.text;
+    } catch (error) {
+      fastify.log.error(`uploaded recording summary generation failed for ${meetingId} (${formatAiFailure(error)})`);
+      throw error;
+    }
   }
   await pool.query('UPDATE meetings SET summary = $1 WHERE id = $2', [summaryText, meetingId]);
   notifyUserSyncMeetingEnded(updated.rows[0].rep_id, meetingId);

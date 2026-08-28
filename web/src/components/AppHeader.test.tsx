@@ -40,7 +40,7 @@ describe('AppHeader', () => {
     expect(screen.getByRole('link', { name: 'Meetings' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Settings' })).toBeTruthy();
     expect(Array.from(navigation.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
-      'Meetings', 'Settings', 'Objections', 'Profile',
+      'Meetings', 'Objections', 'Settings', 'Profile',
     ]);
     expect(screen.getByRole('link', { name: 'Objections' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Profile' }).textContent).toBe('G');
@@ -78,7 +78,7 @@ describe('AppHeader', () => {
     expect(nav.className).toContain('max-[480px]:w-full');
     expect(nav.className).not.toMatch(/\b(?:absolute|fixed|sticky)\b/);
     expect(Array.from(nav.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
-      'Meetings', 'Settings', 'Objections', 'Profile',
+      'Meetings', 'Objections', 'Settings', 'Profile',
     ]);
     expect(container.querySelector('.max-\\[480px\\]\\:flex-none')).toBeTruthy();
     for (const control of controls) {

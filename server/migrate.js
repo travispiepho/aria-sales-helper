@@ -88,7 +88,10 @@ CREATE TABLE IF NOT EXISTS transcript_segments (
   meeting_id UUID REFERENCES meetings(id) ON DELETE CASCADE,
   ts TIMESTAMPTZ DEFAULT NOW(),
   speaker TEXT,
-  text TEXT NOT NULL
+  text TEXT NOT NULL,
+  media_start_ms INTEGER,
+  media_end_ms INTEGER,
+  speaker_slot INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS checklist_templates (

@@ -4,6 +4,7 @@ import {
   isEligibleInPersonMeeting,
   persistIntroductionResolution,
 } from './inPersonIntroductionLabels.js';
+import { createFirst30SpeakerRepairCoordinator } from './first30SpeakerRepair.js';
 
 export const UPLOADED_RECORDING_CHANNEL = 'uploaded_recording';
 export const UPLOADED_RECORDING_PROTOCOL = Object.freeze({
@@ -305,6 +306,21 @@ export async function registerUploadedRecordingRoutes(fastify, {
       speakerLockSources[si] = meeting.speaker_label_evidence?.[si]?.method === 'introduction' ? 'introduction' : 'manual';
     }
 
+    const first30Repair = createFirst30SpeakerRepairCoordinator({
+      pool, meeting, meetingId, repName: user.name, customerName: meeting.customer_name || null,
+      broadcastToMeeting,
+      onSlotLabels: (slotLabels, result) => {
+        meeting.speaker_labels = result.speakerLabels || meeting.speaker_labels;
+        meeting.speaker_label_evidence = result.speakerLabelEvidence || meeting.speaker_label_evidence;
+        for (const [si, label] of Object.entries(slotLabels)) {
+          if (speakerLockSources[si] === 'manual') continue;
+          speakerLocks[si] = label.name;
+          speakerLockSources[si] = 'first30_contextual_repair';
+        }
+      },
+      logger: (message) => fastify.log.error(`uploaded first30 repair ${meetingId}: ${message}`),
+    });
+
     const introductionLabeler = createInPersonIntroductionLabeler({
       meetingType: isEligibleInPersonMeeting(meeting) ? meeting.channel : 'excluded',
       repDisplayName: user.name,
@@ -337,6 +353,7 @@ export async function registerUploadedRecordingRoutes(fastify, {
         }
         meeting.speaker_labels = resolution.speakerLabels;
         meeting.speaker_label_evidence = resolution.speakerLabelEvidence;
+        first30Repair.setKnownIdentity(role, name);
         speakerLocks[si] = name;
         speakerLockSources[si] = 'introduction';
         broadcastToMeeting(meetingId, {
@@ -367,7 +384,10 @@ export async function registerUploadedRecordingRoutes(fastify, {
       if (closed || !result?.text) return;
       const speakerIndex = Number.isInteger(result.speaker) && result.speaker >= 0 ? result.speaker : 0;
       const speakerId = transcriptLabel(result);
-      const speaker = speakerLocks[String(speakerIndex)] || speakerId;
+      const speaker = first30Repair.labelForSegment({
+        speakerIndex, text: result.text,
+        defaultLabel: speakerLocks[String(speakerIndex)] || speakerId,
+      });
       if (!result.isFinal) {
         broadcastToMeeting(meetingId, { type: 'interim', text: result.text, speaker });
         return;
@@ -376,10 +396,15 @@ export async function registerUploadedRecordingRoutes(fastify, {
         const words = Array.isArray(result.words) ? result.words : [];
         const durationMs = words.length && Number.isFinite(words[0]?.start) && Number.isFinite(words.at(-1)?.end)
           ? Math.max(0, Math.round((words.at(-1).end - words[0].start) * 1000)) : null;
+        const timedWords = words.filter(word => Number.isFinite(word?.start) && Number.isFinite(word?.end));
+        const mediaStartMs = timedWords.length > 0 ? first30Repair.mediaOffsetMs(timedWords[0].start) : null;
+        const mediaEndMs = timedWords.length > 0 ? first30Repair.mediaOffsetMs(timedWords.at(-1).end) : null;
         const inserted = await pool.query(
-          `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms)
-           VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id, ts`,
-          [meetingId, speaker, result.text, words.length || result.text.split(/\s+/).filter(Boolean).length, durationMs],
+          `INSERT INTO transcript_segments
+             (meeting_id, ts, speaker, text, word_count, duration_ms, media_start_ms, media_end_ms, speaker_slot)
+           VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7, $8) RETURNING id, ts`,
+          [meetingId, speaker, result.text, words.length || result.text.split(/\s+/).filter(Boolean).length,
+            durationMs, mediaStartMs, mediaEndMs, speakerIndex],
         );
         const insertedId = inserted.rows[0]?.id;
         const insertedTs = inserted.rows[0]?.ts;
@@ -398,8 +423,9 @@ export async function registerUploadedRecordingRoutes(fastify, {
         finalSegmentCount += 1;
         broadcastToMeeting(meetingId, {
           type: 'final', id: insertedId, ts: insertedTs,
-          text: result.text, speaker: speakerId,
+          text: result.text, speaker,
         });
+        if (insertedId) await first30Repair.afterSegmentPersisted();
         // Keep transcript persistence real-time. Coaching is intentionally
         // non-blocking and capped at one request at a time; otherwise a long
         // recording could queue one paid model call per utterance and delay
@@ -424,6 +450,7 @@ export async function registerUploadedRecordingRoutes(fastify, {
       transcription = createTranscriptionSession({
         apiKey,
         onTranscript: queueTranscript,
+        onAudioAccepted: (byteLength) => first30Repair.noteAcceptedMediaBytes(byteLength),
         onCircuitOpen: (reason) => safeSend(socket, { type: 'transcription_lapse', state: 'stopped', reason }),
         onLapseStart: () => safeSend(socket, { type: 'transcription_lapse', state: 'reconnecting' }),
         onLapseEnd: () => safeSend(socket, { type: 'transcription_lapse', state: 'recovered' }),
@@ -446,6 +473,7 @@ export async function registerUploadedRecordingRoutes(fastify, {
       });
       await persistQueue;
       if (coachingInFlight) await coachingInFlight;
+      await first30Repair.flush();
       let completion;
       try {
         completion = await finalizeMeeting(meetingId);

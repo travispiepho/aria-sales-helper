@@ -116,6 +116,20 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
           isFinal: true,
         }]);
       }
+    } else if (msg.type === 'speaker_repair') {
+      const corrections = Array.isArray(msg.corrections) ? msg.corrections : [];
+      const byId = new Map<string, string>(corrections
+        .filter((item: any) => typeof item?.id === 'string' && typeof item?.speaker === 'string')
+        .map((item: any): [string, string] => [String(item.id), String(item.speaker)]));
+      if (byId.size > 0) {
+        setSegments(previous => previous.map(segment => {
+          const repaired = segment.id ? byId.get(segment.id) : undefined;
+          return repaired ? { ...segment, speaker: repaired } : segment;
+        }));
+      }
+      if (msg.speakerLabels && typeof msg.speakerLabels === 'object') {
+        setSpeakerLabels(msg.speakerLabels as Record<string, string>);
+      }
     } else if (msg.type === 'speaker_lock') {
       const speakerId = typeof msg.speakerId === 'string' ? msg.speakerId : '';
       const name = typeof msg.name === 'string' ? msg.name.trim() : '';

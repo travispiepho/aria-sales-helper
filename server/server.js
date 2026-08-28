@@ -56,6 +56,7 @@ import {
   persistIntroductionResolution,
 } from './inPersonIntroductionLabels.js';
 import { createReconnectTracker } from './dgReconnectPolicy.js';
+import { createFirst30SpeakerRepairCoordinator } from './first30SpeakerRepair.js';
 import { createReadinessTracker } from './readinessTracker.js';
 import { registerUploadedRecordingRoutes, UPLOADED_RECORDING_CHANNEL } from './uploadedRecording.js';
 import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
@@ -676,6 +677,13 @@ async function ensureSessionsTable() {
   await pool.query(`
     ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS duration_ms INTEGER
   `);
+  // Media-relative timing and exactly-once first-window speaker-repair state.
+  // These are additive; transcript text and source audio semantics are unchanged.
+  await pool.query(`ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS media_start_ms INTEGER`);
+  await pool.query(`ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS media_end_ms INTEGER`);
+  await pool.query(`ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS speaker_slot INTEGER`);
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS media_time_ms INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS first30_speaker_repair JSONB NOT NULL DEFAULT '{}'`);
   // Voice fingerprints table (Phase 5)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS voice_prints (
@@ -3928,6 +3936,21 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   }
   let voiceMatchDone = false;
 
+  const first30Repair = createFirst30SpeakerRepairCoordinator({
+    pool, meeting, meetingId, repName, customerName: meeting.customer_name || null,
+    broadcastToMeeting,
+    onSlotLabels: (slotLabels, result) => {
+      meeting.speaker_labels = result.speakerLabels || meeting.speaker_labels;
+      meeting.speaker_label_evidence = result.speakerLabelEvidence || meeting.speaker_label_evidence;
+      for (const [si, label] of Object.entries(slotLabels)) {
+        if (speakerLockSources[si] === 'manual') continue;
+        speakerLocks[si] = label.name;
+        speakerLockSources[si] = 'first30_contextual_repair';
+      }
+    },
+    logger: (message) => fastify.log.error(`first30 repair ${meetingId}: ${message}`),
+  });
+
   const persistedIntroEvidence = meeting.speaker_label_evidence || {};
   // `channel=phone` covers both rep-phone and browser/Twilio meetings. The
   // CallSid exclusion is defense in depth against a malformed/legacy row.
@@ -3971,6 +3994,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
 
       meeting.speaker_labels = result.speakerLabels;
       meeting.speaker_label_evidence = result.speakerLabelEvidence;
+      first30Repair.setKnownIdentity(role, name);
       speakerLocks[si] = name;
       speakerLockSources[si] = 'introduction';
       broadcastToMeeting(meetingId, {
@@ -4375,7 +4399,10 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
       fastify.log.info(`Deepgram connected for meeting ${meetingId}`);
       const queued = audioQueue.splice(0);
       queued.forEach(buf => {
-        if (dgSocket.readyState === WebSocket.OPEN) dgSocket.send(buf);
+        if (dgSocket.readyState === WebSocket.OPEN) {
+          dgSocket.send(buf);
+          first30Repair.noteAcceptedMediaBytes(buf.byteLength);
+        }
       });
     });
 
@@ -4617,7 +4644,15 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
             maybeSuggestIntro(si, nowIntro);
           }
 
-          let groupLabel = speakerLocks[si] || `Speaker ${group.si + 1}`;
+          let groupLabel = first30Repair.labelForSegment({
+            speakerIndex: Number(group.si), text: groupText,
+            defaultLabel: speakerLocks[si] || `Speaker ${group.si + 1}`,
+          });
+          const timedWordsForMedia = group.words?.filter(w => Number.isFinite(w.start) && Number.isFinite(w.end)) || [];
+          const mediaStartMs = timedWordsForMedia.length > 0
+            ? first30Repair.mediaOffsetMs(timedWordsForMedia[0].start) : null;
+          const mediaEndMs = timedWordsForMedia.length > 0
+            ? first30Repair.mediaOffsetMs(timedWordsForMedia.at(-1).end) : null;
           // 2026-08-09: capture the newly-inserted row's UUID (RETURNING id)
           // so the 'final' broadcast below can carry the same stable id the
           // REST /segments route and WS sync_snapshot now expose, instead of
@@ -4628,8 +4663,10 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           let insertedSegmentTs;
           try {
             const insertResult = await pool.query(
-              `INSERT INTO transcript_segments (meeting_id, ts, speaker, text, word_count, duration_ms) VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id, ts`,
-              [meetingId, groupLabel, groupText, groupWordCount, groupDurationMs]
+              `INSERT INTO transcript_segments
+                 (meeting_id, ts, speaker, text, word_count, duration_ms, media_start_ms, media_end_ms, speaker_slot)
+               VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7, $8) RETURNING id, ts`,
+              [meetingId, groupLabel, groupText, groupWordCount, groupDurationMs, mediaStartMs, mediaEndMs, Number(group.si)]
             );
             insertedSegmentId = insertResult.rows[0]?.id;
             insertedSegmentTs = insertResult.rows[0]?.ts;
@@ -4671,6 +4708,11 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
           // change is the fix: owner behavior is 100% unchanged (still gets
           // this message, still to the same socket), observers now do too.
           broadcastToMeeting(meetingId, { type: 'final', id: insertedSegmentId, text: groupText, speaker: groupLabel });
+          if (insertedSegmentId) {
+            first30Repair.afterSegmentPersisted().catch((repairError) => {
+              fastify.log.error(`first30 speaker repair failed for ${meetingId}: ${repairError.message}`);
+            });
+          }
 
           // ── ARIA Priority 1 roadmap, item 5: Live rebuttal teleprompter ──────
           // Keep a short rolling context buffer of every finalized segment
@@ -4800,6 +4842,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   socket.on('message', (data) => {
     if (dgReady && dgSocket && dgSocket.readyState === WebSocket.OPEN) {
       dgSocket.send(data);
+      first30Repair.noteAcceptedMediaBytes(data.byteLength ?? data.length ?? 0);
     } else {
       const totalBuffered = audioQueue.reduce((s, b) => s + b.byteLength, 0);
       if (totalBuffered < 960_000) audioQueue.push(Buffer.from(data));
@@ -4818,6 +4861,7 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     unregisterMeetingSocket(meetingId, socket);
     unregisterSpeakerController(meetingId, speakerLockController);
     clearInterval(introSweepTimer);
+    first30Repair.flush();
     if (reconnectTimer) clearTimeout(reconnectTimer);
     dgTracker.dispose();
     if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {

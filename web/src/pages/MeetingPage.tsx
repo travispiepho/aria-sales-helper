@@ -439,6 +439,20 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
           },
         ]);
       }
+    } else if (msg.type === 'speaker_repair') {
+      const corrections = Array.isArray(msg.corrections) ? msg.corrections : [];
+      const byId = new Map<string, string>(corrections
+        .filter((item: any) => typeof item?.id === 'string' && typeof item?.speaker === 'string')
+        .map((item: any): [string, string] => [String(item.id), String(item.speaker)]));
+      if (byId.size > 0) {
+        setSegments(prev => prev.map(segment => {
+          const repaired = segment.id ? byId.get(segment.id) : undefined;
+          return repaired ? { ...segment, speaker: repaired } : segment;
+        }));
+      }
+      if (msg.speakerLabels && typeof msg.speakerLabels === 'object') {
+        setSpeakerLabels(msg.speakerLabels as Record<string, string>);
+      }
     } else if (msg.type === 'speaker_lock') {
       const { speakerId, name, source } = msg as { type: string; speakerId: string; name: string; source?: string };
       if (source === 'introduction') {

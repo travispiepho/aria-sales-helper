@@ -16,12 +16,12 @@ const OTHER_ID = 'rep-2';
 const SESSION_ID = 'session-owner';
 const MEETING_ID = 'meeting-upload-1';
 
-function waitFor(predicate, timeoutMs = 2_000) {
+function waitFor(predicate, timeoutMs = 2_000, label = '') {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     const tick = () => {
       if (predicate()) return resolve();
-      if (Date.now() > deadline) return reject(new Error('timed out'));
+      if (Date.now() > deadline) return reject(new Error(`timed out${label ? `: ${label}` : ''}`));
       setTimeout(tick, 5);
     };
     tick();
@@ -42,8 +42,9 @@ function makePool() {
   const meetings = [];
   const segments = [];
   const sqlLog = [];
-  return {
+  const pool = {
     meetings, segments, sqlLog,
+    connect: async () => ({ query: (...args) => pool.query(...args), release() {} }),
     async query(sql, params = []) {
       sqlLog.push(sql);
       if (sql.includes('INSERT INTO meetings')) {
@@ -51,14 +52,32 @@ function makePool() {
           id: MEETING_ID, customer_id: params[0], rep_id: params[1], status: 'active',
           owner_session_id: params[2], origin_client: 'web', channel: params[3], summary: null,
           started_at: new Date(), speaker_labels: {}, speaker_label_evidence: {}, customer_name: null,
+          media_time_ms: 0, first30_speaker_repair: {},
         };
         meetings.push(row);
         return { rows: [row], rowCount: 1 };
       }
-      if (sql.includes('FROM meetings m LEFT JOIN customers c') || sql === 'SELECT * FROM meetings WHERE id = $1') {
+      if (sql.includes('FROM meetings m LEFT JOIN customers c') || sql === 'SELECT * FROM meetings WHERE id = $1' || sql.includes('SELECT * FROM meetings WHERE id = $1 FOR UPDATE')) {
         return { rows: meetings.filter((m) => m.id === params[0]) };
       }
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [], rowCount: 0 };
+      if (sql.includes('FROM transcript_segments') && sql.includes('FOR UPDATE')) {
+        return { rows: segments.filter((row) => row.meeting_id === params[0] && row.media_start_ms < params[1]), rowCount: segments.length };
+      }
+      if (sql.includes('UPDATE meetings SET media_time_ms')) {
+        const meeting = meetings.find((row) => row.id === params[0]);
+        if (meeting) meeting.media_time_ms = Math.max(meeting.media_time_ms || 0, params[1]);
+        return { rows: [], rowCount: meeting ? 1 : 0 };
+      }
+      if (sql.includes('first30_speaker_repair =')) {
+        const meeting = meetings.find((row) => row.id === params[0]);
+        if (!meeting) return { rows: [], rowCount: 0 };
+        meeting.media_time_ms = Math.max(meeting.media_time_ms || 0, params[1]);
+        meeting.first30_speaker_repair = JSON.parse(params[2]);
+        meeting.speaker_labels = { ...(meeting.speaker_labels || {}), ...JSON.parse(params[3]) };
+        meeting.speaker_label_evidence = { ...(meeting.speaker_label_evidence || {}), ...JSON.parse(params[4]) };
+        return { rows: [{ speaker_labels: meeting.speaker_labels, speaker_label_evidence: meeting.speaker_label_evidence, first30_speaker_repair: meeting.first30_speaker_repair }], rowCount: 1 };
+      }
       if (sql.includes('UPDATE meetings') && sql.includes('speaker_label_evidence')) {
         const meeting = meetings.find((m) => m.id === params[2]);
         const speakerId = params[3];
@@ -73,7 +92,11 @@ function makePool() {
       if (sql.includes('UPDATE transcript_segments SET speaker = $1')) {
         let count = 0;
         for (const segment of segments) {
-          if (segment.meeting_id === params[1] && segment.speaker === params[2]) {
+          const contextualRepair = sql.includes('WHERE id = $2');
+          const matches = contextualRepair
+            ? segment.id === params[1] && segment.meeting_id === params[2] && segment.speaker === params[3]
+            : segment.meeting_id === params[1] && segment.speaker === params[2];
+          if (matches) {
             segment.speaker = params[0];
             count += 1;
           }
@@ -84,7 +107,11 @@ function makePool() {
         return { rows: meetings.filter((m) => m.id === params[0]).map(({ status }) => ({ status })) };
       }
       if (sql.includes('INSERT INTO transcript_segments')) {
-        const row = { id: `segment-${segments.length + 1}`, ts: new Date(), meeting_id: params[0], speaker: params[1], text: params[2] };
+        const row = {
+          id: `segment-${segments.length + 1}`, ts: new Date(), meeting_id: params[0],
+          speaker: params[1], text: params[2], word_count: params[3], duration_ms: params[4],
+          media_start_ms: params[5], media_end_ms: params[6], speaker_slot: params[7],
+        };
         segments.push(row);
         return { rows: [row], rowCount: 1 };
       }
@@ -96,13 +123,17 @@ function makePool() {
       throw new Error(`Unhandled SQL: ${sql}`);
     },
   };
+  return pool;
 }
 
 function makeTranscriptionFactory(state) {
-  return ({ onTranscript }) => {
+  return ({ onTranscript, onAudioAccepted }) => {
     const session = {
       sent: [], closed: false,
-      send(buffer) { this.sent.push(Buffer.from(buffer)); },
+      send(buffer) {
+        this.sent.push(Buffer.from(buffer));
+        onAudioAccepted?.(buffer.byteLength);
+      },
       close() { this.closed = true; },
       emit(result) { onTranscript(result); },
     };
@@ -413,6 +444,70 @@ test('synthetic valid PCM streams to transcription, persists/fans out transcript
   // Completion closed normally and did not run the interruption update.
   assert.ok(!pool.sqlLog.some((sql) => sql.includes("status = 'interrupted'")));
   assert.deepEqual(Object.keys(pool.meetings[0]).filter((key) => /audio|file|blob|path|url/i.test(key)), []);
+  await app.close();
+});
+
+test('uploaded recording first-30 repair advances only on transcription-accepted media and broadcasts corrected rows once', async () => {
+  const held = { options: null, sent: [] };
+  const createTranscriptionSession = (options) => {
+    held.options = options;
+    return {
+      send(buffer) { held.sent.push(Buffer.from(buffer)); },
+      close() {},
+      emit(result) { options.onTranscript(result); },
+    };
+  };
+  const { app, pool, state } = await buildApp({ createTranscriptionSession });
+  const created = await createMeeting(app, 31);
+  assert.equal(created.statusCode, 201);
+  pool.meetings[0].customer_name = 'John';
+  const ws = await app.injectWS(`/meetings/${MEETING_ID}/uploaded-recording`);
+  ws.send(start(31));
+  await waitFor(() => held.options !== null, 2_000, 'transcription options');
+
+  // Receiving PCM is not enough: until the provider/session explicitly
+  // accepts it, the persisted media cursor and repair state remain untouched.
+  ws.send(Buffer.alloc(UPLOADED_RECORDING_PROTOCOL.bytesPerSecond, 7));
+  await waitFor(() => held.sent.length === 1, 2_000, 'PCM delivered to transcription stub');
+  assert.equal(pool.meetings[0].media_time_ms, 0);
+  assert.deepEqual(pool.meetings[0].first30_speaker_repair, {});
+
+  held.options.onTranscript({
+    isFinal: true, text: "Hi John, I'm Ada with CertaPro.", speaker: 0,
+    words: [{ start: 0.5, end: 1.4, word: 'Hi' }],
+  });
+  held.options.onTranscript({
+    isFinal: true, text: 'We want our kitchen painted.', speaker: 0,
+    words: [{ start: 3, end: 4, word: 'We' }],
+  });
+  await waitFor(() => pool.segments.length === 2, 2_000, 'first two transcript rows');
+  assert.equal(state.broadcasts.some(({ payload }) => payload.type === 'speaker_repair'), false);
+
+  held.options.onAudioAccepted(30 * UPLOADED_RECORDING_PROTOCOL.bytesPerSecond);
+  // Crossing the threshold must repair the already-persisted 0-30s window;
+  // a post-threshold transcript is not required to kick the attempt.
+  await waitFor(() => state.broadcasts.some(({ payload }) => payload.type === 'speaker_repair'), 2_000, `repair broadcast; rows=${pool.segments.length} state=${JSON.stringify(pool.meetings[0].first30_speaker_repair)}`);
+  const repair = state.broadcasts.find(({ payload }) => payload.type === 'speaker_repair').payload;
+  assert.deepEqual(repair.corrections.map(({ id, speaker }) => [id, speaker]), [
+    ['segment-1', 'Ada'], ['segment-2', 'John'],
+  ]);
+  assert.deepEqual(pool.segments.map(({ speaker }) => speaker), ['Ada', 'John']);
+  assert.equal(pool.meetings[0].first30_speaker_repair.status, 'applied');
+  assert.equal(pool.meetings[0].media_time_ms, 30_000);
+
+  // Retried accepted-media notifications and later finals cannot reapply or
+  // emit a second correction event after the terminal state is committed.
+  held.options.onAudioAccepted(UPLOADED_RECORDING_PROTOCOL.bytesPerSecond);
+  held.options.onTranscript({
+    isFinal: true, text: 'We need the hallway painted.', speaker: 0,
+    words: [{ start: 31, end: 32, word: 'We' }],
+  });
+  await waitFor(() => pool.segments.length === 3, 2_000, 'later transcript row');
+  assert.equal(state.broadcasts.filter(({ payload }) => payload.type === 'speaker_repair').length, 1);
+  assert.equal(pool.segments[2].speaker, 'John');
+
+  ws.close();
+  await once(ws, 'close');
   await app.close();
 });
 

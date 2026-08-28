@@ -129,6 +129,9 @@ export function parseDeepgramResult(raw) {
  * @param {(result: {isFinal: boolean, text: string, speaker: number, words: any[]}) => void} opts.onTranscript
  *   Called for every non-empty transcript result (both interim and final —
  *   caller checks `isFinal`).
+ * @param {(byteLength: number) => void} [opts.onAudioAccepted] — called once
+ *   for each PCM buffer actually handed to an open provider socket (including
+ *   buffered audio replayed after reconnect), never merely on client receipt.
  * @param {(reason: string) => void} [opts.onCircuitOpen] — called once when
  *   the reconnect time budget (or attempt seatbelt) is exhausted
  *   (transcription permanently degraded for this session). Kept the same
@@ -148,7 +151,7 @@ export function parseDeepgramResult(raw) {
  *   session's own .close() is invoked.
  * @param {(msg: string) => void} [opts.log]
  */
-export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onLapseStart, onLapseEnd, onError, onClose, log }) {
+export function createDeepgramSession({ apiKey, onTranscript, onAudioAccepted, onCircuitOpen, onLapseStart, onLapseEnd, onError, onClose, log }) {
   const logFn = log || (() => {});
   const dgUrl = buildDeepgramUrl();
 
@@ -187,7 +190,10 @@ export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onL
       logFn('deepgramSession: connected');
       const queued = audioQueue.splice(0);
       queued.forEach((buf) => {
-        if (dgSocket.readyState === WebSocket.OPEN) dgSocket.send(buf);
+        if (dgSocket.readyState === WebSocket.OPEN) {
+          dgSocket.send(buf);
+          if (onAudioAccepted) onAudioAccepted(buf.byteLength);
+        }
       });
     });
 
@@ -230,6 +236,7 @@ export function createDeepgramSession({ apiKey, onTranscript, onCircuitOpen, onL
       if (closed) return;
       if (dgReady && dgSocket && dgSocket.readyState === WebSocket.OPEN) {
         dgSocket.send(buf);
+        if (onAudioAccepted) onAudioAccepted(buf.byteLength);
       } else {
         const totalBuffered = audioQueue.reduce((s, b) => s + b.byteLength, 0);
         if (totalBuffered < 960_000) audioQueue.push(Buffer.from(buf));

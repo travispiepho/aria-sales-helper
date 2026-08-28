@@ -132,6 +132,31 @@ describe('UploadedRecordingPage', () => {
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', false);
   });
 
+  it('renders one recording chooser inside the bottom playback and analysis controls', async () => {
+    renderPage();
+
+    const controls = screen.getByRole('region', { name: 'Playback and analysis controls' });
+    const chooser = screen.getByRole('group', { name: 'Choose a recording' });
+    const input = screen.getByLabelText('Local audio or MP4 file');
+
+    expect(screen.getAllByRole('heading', { name: 'Choose a recording' })).toHaveLength(1);
+    expect(screen.getAllByLabelText('Local audio or MP4 file')).toHaveLength(1);
+    expect(controls.contains(chooser)).toBe(true);
+    expect(chooser.contains(input)).toBe(true);
+
+    await selectAudio();
+
+    const transcript = screen.getByRole('region', { name: 'Transcript' });
+    const playback = screen.getByLabelText('Selected recording playback');
+    const consent = screen.getByRole('checkbox');
+    const start = screen.getByRole('button', { name: /Start Analysis/ });
+
+    expect(transcript.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(input.compareDocumentPosition(playback) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(playback.compareDocumentPosition(consent) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(consent.compareDocumentPosition(start) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('orders coaching above the transcript and groups playback details, progress, and controls below it', async () => {
     await startAnalysis();
 

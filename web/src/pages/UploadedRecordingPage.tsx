@@ -303,27 +303,6 @@ export default function UploadedRecordingPage() {
     <div className="min-h-screen bg-gray-200 flex flex-col">
       <AppHeader title="Analyze a Recording" subtitle="Local playback with live ARIA coaching" backTo="/" />
       <main className="flex-1 px-4 py-4 pb-24 space-y-4 max-w-3xl w-full mx-auto">
-        <section className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
-          <div>
-            <h1 className="font-semibold text-gray-900">Choose a recording</h1>
-            <p className="text-sm text-gray-600 mt-1">
-              Your source file stays on this device. ARIA never uploads or stores the source blob; only decoded mono 16-kHz audio is streamed during real-time playback.
-            </p>
-          </div>
-
-          <label className="block">
-            <span className="text-sm font-medium text-gray-700">Local audio or MP4 file</span>
-            <input
-              aria-label="Local audio or MP4 file"
-              type="file"
-              accept={UPLOADED_RECORDING_ACCEPT}
-              disabled={active}
-              onChange={event => resetSelectedFile(event.target.files?.[0] ?? null)}
-              className="mt-2 block w-full min-h-11 text-sm text-gray-700 file:min-h-11 file:mr-3 file:px-4 file:border-0 file:rounded-xl file:bg-blue-50 file:text-blue-700 file:font-semibold disabled:opacity-60"
-            />
-          </label>
-        </section>
-
         {showAnalysisWorkspace && (
           <>
             <section aria-label="ARIA Coaching">
@@ -373,6 +352,27 @@ export default function UploadedRecordingPage() {
         )}
 
         <section aria-label="Playback and analysis controls" className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
+          <div role="group" aria-labelledby="recording-selection-heading" className="space-y-4">
+            <div>
+              <h1 id="recording-selection-heading" className="font-semibold text-gray-900">Choose a recording</h1>
+              <p className="text-sm text-gray-600 mt-1">
+                Your source file stays on this device. ARIA never uploads or stores the source blob; only decoded mono 16-kHz audio is streamed during real-time playback.
+              </p>
+            </div>
+
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">Local audio or MP4 file</span>
+              <input
+                aria-label="Local audio or MP4 file"
+                type="file"
+                accept={UPLOADED_RECORDING_ACCEPT}
+                disabled={active}
+                onChange={event => resetSelectedFile(event.target.files?.[0] ?? null)}
+                className="mt-2 block w-full min-h-11 text-sm text-gray-700 file:min-h-11 file:mr-3 file:px-4 file:border-0 file:rounded-xl file:bg-blue-50 file:text-blue-700 file:font-semibold disabled:opacity-60"
+              />
+            </label>
+          </div>
+
           <h2 className="font-semibold text-gray-900">Playback &amp; analysis controls</h2>
 
           {objectUrl && file && (

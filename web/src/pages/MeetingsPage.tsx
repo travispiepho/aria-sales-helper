@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import AppHeader from '../components/AppHeader';
+import AppPageLayout from '../components/AppPageLayout';
 import {
   deleteMeeting,
   getMeeting,
@@ -224,10 +224,8 @@ export default function MeetingsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-200">
-      <AppHeader title="Meetings" subtitle="Your meeting history" />
-      <main className="px-4 -mt-2 pb-24">
-        {loading ? (
+    <AppPageLayout title="Meetings" subtitle="Your meeting history">
+      {loading ? (
           <div role="status" aria-label="Loading meetings" className="flex items-center justify-center py-12">
             <div className="animate-spin h-6 w-6 border-4 border-brand-600 border-t-transparent rounded-full" />
           </div>
@@ -287,7 +285,6 @@ export default function MeetingsPage() {
             )}
           </>
         )}
-      </main>
-    </div>
+    </AppPageLayout>
   );
 }

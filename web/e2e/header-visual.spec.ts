@@ -90,3 +90,38 @@ test('narrow header wraps without hiding navigation', async ({ page }) => {
   }
   await page.screenshot({ path: 'test-results/shared-header-mobile-schedule-call.png', fullPage: true });
 });
+
+
+test.describe('Home, Objections, and Meetings flow layout', () => {
+  for (const viewport of [
+    { name: 'phone', width: 320, height: 760 },
+    { name: 'desktop', width: 1280, height: 800 },
+  ]) {
+    test(`${viewport.name}: navigation finishes before each page's first content`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      for (const route of ['/', '/objections', '/meetings']) {
+        await page.goto(`http://127.0.0.1:5173${route}`);
+        const header = page.locator('[data-app-header="compact"]');
+        const navigation = page.getByRole('navigation', { name: 'Authenticated navigation' });
+        const content = page.locator('[data-page-content]');
+        await expect(content).toBeVisible();
+        const firstContent = content.locator(':scope > *').first();
+
+        await expect(header).toHaveCSS('position', 'static');
+        await expect(navigation).toHaveCSS('position', 'static');
+        await expect(content).toHaveCSS('position', 'static');
+        await expect(firstContent).toBeVisible();
+
+        const [headerBox, navigationBox, contentBox, firstBox] = await Promise.all([
+          header.boundingBox(),
+          navigation.boundingBox(),
+          content.boundingBox(),
+          firstContent.boundingBox(),
+        ]);
+        expect(headerBox && contentBox && headerBox.y + headerBox.height <= contentBox.y).toBeTruthy();
+        expect(navigationBox && contentBox && navigationBox.y + navigationBox.height <= contentBox.y).toBeTruthy();
+        expect(contentBox && firstBox && contentBox.y <= firstBox.y).toBeTruthy();
+      }
+    });
+  }
+});

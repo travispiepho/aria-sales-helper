@@ -13,7 +13,7 @@ import {
   updateRebuttal,
   deleteRebuttal,
 } from '../lib/api';
-import AppHeader from '../components/AppHeader';
+import AppPageLayout from '../components/AppPageLayout';
 
 // ObjectionsPage — new "Objections" tab (2026-08-18), Troy Hacker's request
 // (tracked as "Rebuttal list to objections" in HighPriorityTodos). A
@@ -99,20 +99,19 @@ function ObjectionsList({ onOpen, onBack }: { onOpen: (id: string) => void; onBa
   }
 
   return (
-    <div className="min-h-screen bg-gray-200">
-      <AppHeader
-        title="Objections"
-        subtitle="Browse common customer objections and the rebuttals that work."
-        onBack={onBack}
-      />
-
-      <div className="px-4 -mt-2 pb-24 max-w-lg mx-auto">
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 mb-4">
+    <AppPageLayout
+      title="Objections"
+      subtitle="Browse common customer objections and the rebuttals that work."
+      onBack={onBack}
+      contentClassName="max-w-lg mx-auto"
+    >
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 mb-4">
           <input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search objections…"
+            aria-label="Search objections"
             className="w-full rounded-xl border border-gray-300 px-4 py-3 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
           />
         </div>
@@ -202,8 +201,7 @@ function ObjectionsList({ onOpen, onBack }: { onOpen: (id: string) => void; onBa
             ))}
           </div>
         )}
-      </div>
-    </div>
+    </AppPageLayout>
   );
 }
 
@@ -328,11 +326,13 @@ function ObjectionDetail({ id, onBack }: { id: string; onBack: () => void }) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-200">
-      <AppHeader title="Objection" onBack={onBack} backLabel="Back to Objections" />
-
-      <div className="px-4 -mt-2 pb-24 max-w-lg mx-auto">
-        {loading ? (
+    <AppPageLayout
+      title="Objection"
+      onBack={onBack}
+      backLabel="Back to Objections"
+      contentClassName="max-w-lg mx-auto"
+    >
+      {loading ? (
           <div className="flex items-center justify-center py-12">
             <div className="animate-spin h-6 w-6 border-4 border-brand-600 border-t-transparent rounded-full" />
           </div>
@@ -492,7 +492,6 @@ function ObjectionDetail({ id, onBack }: { id: string; onBack: () => void }) {
             </form>
           </>
         )}
-      </div>
-    </div>
+    </AppPageLayout>
   );
 }

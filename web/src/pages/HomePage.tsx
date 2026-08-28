@@ -4,7 +4,7 @@ import { useAuth } from '../lib/auth';
 import { createMeeting, updateMeeting } from '../lib/api';
 import CustomerIntakeModal from '../components/CustomerIntakeModal';
 import PhoneCallModal from '../components/PhoneCallModal';
-import AppHeader from '../components/AppHeader';
+import AppPageLayout from '../components/AppPageLayout';
 
 export default function HomePage() {
   const { user } = useAuth();
@@ -27,11 +27,8 @@ export default function HomePage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-200">
-      <AppHeader title="ARIA" subtitle={<>Hey {user?.name?.split(' ')[0]} 👋</>} />
-
-      <div className="px-4 -mt-2 pb-24">
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 mb-6">
+    <AppPageLayout title="ARIA" subtitle={<>Hey {user?.name?.split(' ')[0]} 👋</>}>
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 mb-6">
           <h2 className="font-semibold text-gray-900 mb-1">Ready to meet?</h2>
           <p className="text-sm text-gray-500 mb-4">
             Start a meeting to capture the conversation and intake details.
@@ -69,7 +66,6 @@ export default function HomePage() {
             </button>
           </div>
         </div>
-      </div>
 
       {showIntake && (
         <CustomerIntakeModal
@@ -90,6 +86,6 @@ export default function HomePage() {
           }}
         />
       )}
-    </div>
+    </AppPageLayout>
   );
 }

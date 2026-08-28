@@ -67,6 +67,18 @@ beforeEach(() => {
 });
 
 describe('MeetingsPage', () => {
+  it('renders the first Meetings state after the shared navigation in normal flow', () => {
+    const { container } = renderPage();
+    const header = container.querySelector('[data-app-header="compact"]') as HTMLElement;
+    const content = container.querySelector('[data-page-content]') as HTMLElement;
+    const loading = screen.getByRole('status', { name: 'Loading meetings' });
+
+    expect(header.nextElementSibling).toBe(content);
+    expect(content.firstElementChild).toBe(loading);
+    expect(content.className).not.toMatch(/(?:^|\s)-mt-/);
+    expect(loading.className).not.toMatch(/\babsolute\b/);
+  });
+
   it('loads and renders today/previous history, metadata, actions, and detail navigation', async () => {
     renderPage();
     expect(screen.getByRole('status', { name: 'Loading meetings' })).toBeTruthy();

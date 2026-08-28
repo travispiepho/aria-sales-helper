@@ -35,6 +35,18 @@ function renderHome() {
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 describe('Home actions without meeting history', () => {
+  it('renders the first Home card after the shared navigation in normal flow', () => {
+    const { container } = renderHome();
+    const header = container.querySelector('[data-app-header="compact"]') as HTMLElement;
+    const content = container.querySelector('[data-page-content]') as HTMLElement;
+    const firstCard = screen.getByRole('heading', { name: 'Ready to meet?' }).parentElement as HTMLElement;
+
+    expect(header.nextElementSibling).toBe(content);
+    expect(content.firstElementChild).toBe(firstCard);
+    expect(content.className).not.toMatch(/(?:^|\s)-mt-/);
+    expect(firstCard.className).not.toMatch(/\babsolute\b/);
+  });
+
   it('retains all start, schedule, and upload actions without fetching or rendering history', async () => {
     renderHome();
     const recording = screen.getByRole('button', { name: '🎧 Analyze a Recording' });

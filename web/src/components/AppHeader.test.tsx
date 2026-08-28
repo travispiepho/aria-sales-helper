@@ -32,6 +32,7 @@ describe('AppHeader', () => {
 
     expect(header?.getAttribute('data-compact-min-height')).toBe('104px');
     expect(header?.className).toContain('min-h-[6.5rem]');
+    expect(header?.className).not.toMatch(/\b(?:absolute|fixed|sticky)\b/);
     expect(screen.getByRole('heading', { name: 'ARIA' })).toBeTruthy();
     expect(screen.getByText('Hey Gabe 👋')).toBeTruthy();
     const navigation = screen.getByRole('navigation', { name: 'Authenticated navigation' });
@@ -75,6 +76,7 @@ describe('AppHeader', () => {
     ];
 
     expect(nav.className).toContain('max-[480px]:w-full');
+    expect(nav.className).not.toMatch(/\b(?:absolute|fixed|sticky)\b/);
     expect(Array.from(nav.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
       'Meetings', 'Settings', 'Objections', 'Profile',
     ]);

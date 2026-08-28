@@ -1,0 +1,80 @@
+// @vitest-environment jsdom
+import React from 'react';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import MeetingPage from './MeetingPage';
+
+const mocks = vi.hoisted(() => ({
+  getMeeting: vi.fn(),
+  getSegments: vi.fn(),
+  getLatestCoaching: vi.fn(),
+}));
+
+vi.mock('../lib/auth', () => ({ useAuth: () => ({ user: { id: 'rep-1', name: 'Rep' } }) }));
+vi.mock('../lib/browserCall', () => ({
+  useBrowserCall: () => ({
+    state: 'idle', meetingId: null, muted: false, error: '',
+    start: vi.fn(), toggleMute: vi.fn(), hangUp: vi.fn(), clear: vi.fn(),
+  }),
+}));
+vi.mock('../lib/api', () => ({
+  getMeeting: mocks.getMeeting,
+  getMeetingSegments: mocks.getSegments,
+  getLatestCoaching: mocks.getLatestCoaching,
+  getMeetingAnalytics: vi.fn(async () => { throw new Error('No analytics fixture'); }),
+  getCoachingReport: vi.fn(async () => { throw new Error('No report fixture'); }),
+  updateMeeting: vi.fn(),
+  renameMeeting: vi.fn(),
+  apiFetch: vi.fn(),
+  dismissLibraryRebuttal: vi.fn(),
+}));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.getMeeting.mockResolvedValue({
+    id: 'meeting-upload-1',
+    rep_id: 'rep-1',
+    status: 'completed',
+    channel: 'uploaded_recording',
+    origin_client: 'web',
+    is_owner_session: true,
+    started_at: '2026-08-27T20:00:00.000Z',
+    ended_at: '2026-08-27T20:12:00.000Z',
+    summary: 'Completed uploaded recording summary.',
+    speaker_labels: {},
+  });
+  mocks.getSegments.mockResolvedValue({
+    segments: [{
+      id: 'segment-1', speaker: 'Speaker 1', text: 'Uploaded transcript row.',
+      ts: '2026-08-27T20:01:00.000Z',
+    }],
+  });
+  mocks.getLatestCoaching.mockResolvedValue({ coaching: null });
+});
+
+afterEach(cleanup);
+
+describe('MeetingPage completed uploaded recording', () => {
+  it('renders the same post-meeting analysis/details branch as End Meeting, with no recording-start controls', async () => {
+    render(
+      <MemoryRouter initialEntries={['/meetings/meeting-upload-1']}>
+        <Routes>
+          <Route path="/meetings/:id" element={<MeetingPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Completed uploaded recording summary.')).toBeTruthy();
+    expect(screen.getByText('Uploaded transcript row.')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Meeting Summary' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Details' })).toBeTruthy();
+    expect(screen.getByText(/^Completed ·/)).toBeTruthy();
+
+    expect(screen.queryByRole('button', { name: /^Record$/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Start Recording|Start Meeting/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /End Meeting/i })).toBeNull();
+    expect(screen.queryByText(/Start recording to see live transcript/i)).toBeNull();
+    expect(screen.getByRole('button', { name: '← Back to Home' })).toBeTruthy();
+  });
+});

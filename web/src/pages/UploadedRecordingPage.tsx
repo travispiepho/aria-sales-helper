@@ -460,12 +460,12 @@ export default function UploadedRecordingPage() {
             </button>
           </div>
 
-          {meetingId && (
+          {state === 'complete' && meetingId && (
             <button
               onClick={() => navigate(`/meetings/${meetingId}`)}
               className="w-full min-h-11 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4"
             >
-              View meeting analysis/details
+              View completed meeting analysis
             </button>
           )}
         </section>

@@ -233,12 +233,28 @@ describe('UploadedRecordingPage', () => {
     expect(mocks.updateMeeting).not.toHaveBeenCalled();
   });
 
-  it('links to the normal meeting analysis/details route without claiming a final summary is ready', async () => {
-    await startAnalysis();
-    const analysisButton = screen.getByRole('button', { name: 'View meeting analysis/details' });
-    expect(screen.queryByText(/summary is ready/i)).toBeNull();
-    await userEvent.click(analysisButton);
-    expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1');
+  it('only links to completed meeting analysis after server-confirmed finalization', async () => {
+    let playbackCallbacks: { onEnded: () => void } | undefined;
+    let acknowledgeCompletion: (() => void) | undefined;
+    mocks.play.mockImplementation(async (callbacks: { onEnded: () => void }) => { playbackCallbacks = callbacks; });
+    mocks.waitForCompletion.mockImplementation(() => new Promise(resolve => {
+      acknowledgeCompletion = () => resolve({ type: 'completed' });
+    }));
+
+    renderPage();
+    expect(screen.queryByRole('button', { name: 'View completed meeting analysis' })).toBeNull();
+    await selectAudio();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await waitFor(() => expect(playbackCallbacks).toBeTruthy());
+
+    expect(screen.queryByRole('button', { name: 'View completed meeting analysis' })).toBeNull();
+    playbackCallbacks!.onEnded();
+    await waitFor(() => expect(mocks.waitForCompletion).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('button', { name: 'View completed meeting analysis' })).toBeNull();
+
+    acknowledgeCompletion!();
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1'));
   });
 
   it('stops local playback and shows a truthful error when transport disconnects midstream', async () => {

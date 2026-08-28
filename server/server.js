@@ -3602,6 +3602,8 @@ await registerUploadedRecordingRoutes(fastify, {
   unregisterMeetingSocket,
   runCoachingAnalysis,
   finalizeMeeting: finalizeUploadedRecording,
+  registerSpeakerController,
+  unregisterSpeakerController,
 });
 
 // ── Live meeting sync (mobile → web), 2026-08-05 ── GET /api/sync (account-level) ─
@@ -3758,10 +3760,16 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
     return;
   }
 
-  // Verify meeting + ownership
+  // Verify meeting + ownership. Load the associated customer name as
+  // canonical supporting evidence for the introduction state machine.
   let meeting;
   try {
-    const res = await pool.query('SELECT * FROM meetings WHERE id = $1', [meetingId]);
+    const res = await pool.query(
+      `SELECT m.*, c.name AS customer_name
+       FROM meetings m LEFT JOIN customers c ON m.customer_id = c.id
+       WHERE m.id = $1`,
+      [meetingId]
+    );
     if (res.rows.length === 0) {
       socket.send(JSON.stringify({ type: 'error', error: 'Meeting not found' }));
       socket.close(4004, 'Meeting not found');
@@ -3901,8 +3909,9 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
   // Keep all introduction heuristics behind this one explicit guard.
   const isInPersonIntroductionMeeting = isEligibleInPersonMeeting(meeting);
   const introductionLabeler = createInPersonIntroductionLabeler({
-    meetingType: isInPersonIntroductionMeeting ? 'in_person' : 'excluded',
+    meetingType: isInPersonIntroductionMeeting ? meeting.channel : 'excluded',
     repDisplayName: repName,
+    customerDisplayName: meeting.customer_name || null,
     startedAtMs: new Date(meeting.started_at || Date.now()).getTime(),
     existingLocks: Object.fromEntries(
       Object.entries(speakerLocks).map(([si, name]) => [si, { name, source: speakerLockSources[si] }])

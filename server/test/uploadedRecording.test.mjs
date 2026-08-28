@@ -50,12 +50,35 @@ function makePool() {
         const row = {
           id: MEETING_ID, customer_id: params[0], rep_id: params[1], status: 'active',
           owner_session_id: params[2], origin_client: 'web', channel: params[3], summary: null,
+          started_at: new Date(), speaker_labels: {}, speaker_label_evidence: {}, customer_name: null,
         };
         meetings.push(row);
         return { rows: [row], rowCount: 1 };
       }
-      if (sql === 'SELECT * FROM meetings WHERE id = $1') {
+      if (sql.includes('FROM meetings m LEFT JOIN customers c') || sql === 'SELECT * FROM meetings WHERE id = $1') {
         return { rows: meetings.filter((m) => m.id === params[0]) };
+      }
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [], rowCount: 0 };
+      if (sql.includes('UPDATE meetings') && sql.includes('speaker_label_evidence')) {
+        const meeting = meetings.find((m) => m.id === params[2]);
+        const speakerId = params[3];
+        const evidenceKey = params[4];
+        if (!meeting || meeting.speaker_labels[speakerId] || Object.values(meeting.speaker_labels).some((name) => name.toLowerCase() === String(params[0]).toLowerCase())) {
+          return { rows: [], rowCount: 0 };
+        }
+        meeting.speaker_labels[speakerId] = params[0];
+        meeting.speaker_label_evidence[evidenceKey] = JSON.parse(params[1]);
+        return { rows: [{ speaker_labels: { ...meeting.speaker_labels }, speaker_label_evidence: { ...meeting.speaker_label_evidence } }], rowCount: 1 };
+      }
+      if (sql.includes('UPDATE transcript_segments SET speaker = $1')) {
+        let count = 0;
+        for (const segment of segments) {
+          if (segment.meeting_id === params[1] && segment.speaker === params[2]) {
+            segment.speaker = params[0];
+            count += 1;
+          }
+        }
+        return { rows: [], rowCount: count };
       }
       if (sql === 'SELECT status FROM meetings WHERE id = $1') {
         return { rows: meetings.filter((m) => m.id === params[0]).map(({ status }) => ({ status })) };
@@ -96,6 +119,7 @@ async function buildApp({
   wsAuthGate = null,
   createTranscriptionSession = null,
   finalizeMeeting = null,
+  now = () => Date.now(),
 } = {}) {
   const app = Fastify({ logger: false });
   await app.register(cookie);
@@ -136,6 +160,7 @@ async function buildApp({
         return { summary: meeting.summary };
       },
     transcriptDrainMs: 0,
+    now,
   });
   await app.ready();
   return { app, pool, state };
@@ -388,6 +413,48 @@ test('synthetic valid PCM streams to transcription, persists/fans out transcript
   // Completion closed normally and did not run the interruption update.
   assert.ok(!pool.sqlLog.some((sql) => sql.includes("status = 'interrupted'")));
   assert.deepEqual(Object.keys(pool.meetings[0]).filter((key) => /audio|file|blob|path|url/i.test(key)), []);
+  await app.close();
+});
+
+test('uploaded recording automatically labels, persists, relabels prior rows, and broadcasts both identities', async () => {
+  let clock = 1_000_000;
+  const { app, pool, state } = await buildApp({ now: () => clock });
+  const created = await createMeeting(app, 4);
+  assert.equal(created.statusCode, 201);
+  pool.meetings[0].started_at = new Date(clock);
+  const ws = await app.injectWS(`/meetings/${MEETING_ID}/uploaded-recording`);
+  ws.send(start(4));
+  await waitFor(() => state.sessions.length === 1);
+  ws.send(Buffer.alloc(32_000, 7));
+  await waitFor(() => state.sessions[0].sent.length === 1);
+
+  state.sessions[0].emit({
+    isFinal: true, text: 'Hi John, this is Ada.', speaker: 4,
+    words: [{ start: 0, end: 0.8, word: 'Hi' }],
+  });
+  await waitFor(() => pool.meetings[0].speaker_labels['Speaker 5'] === 'Ada');
+  assert.equal(pool.meetings[0].speaker_labels['Speaker 5'], 'Ada');
+  assert.equal(pool.meetings[0].speaker_labels['Speaker 10'], undefined);
+  assert.equal(pool.segments[0].speaker, 'Ada');
+
+  clock += 35_000;
+  state.sessions[0].emit({
+    isFinal: true, text: 'The kitchen needs paint.', speaker: 9,
+    words: [{ start: 35, end: 36, word: 'kitchen' }],
+  });
+  await waitFor(() => pool.meetings[0].speaker_labels['Speaker 10'] === 'John');
+  assert.equal(pool.segments[1].speaker, 'John');
+  assert.equal(pool.meetings[0].speaker_label_evidence['4'].customer_candidate, 'John');
+  assert.equal(pool.meetings[0].speaker_label_evidence['9'].distinct_speaker_segment_id, 'segment-2');
+  assert.deepEqual(state.broadcasts.filter(({ payload }) => payload.type === 'speaker_lock').map(({ payload }) => ({
+    speakerId: payload.speakerId, name: payload.name, role: payload.role, source: payload.source,
+  })), [
+    { speakerId: 'Speaker 5', name: 'Ada', role: 'rep', source: 'introduction' },
+    { speakerId: 'Speaker 10', name: 'John', role: 'customer', source: 'introduction' },
+  ]);
+
+  ws.close();
+  await once(ws, 'close');
   await app.close();
 });
 

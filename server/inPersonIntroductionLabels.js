@@ -1,18 +1,16 @@
-import { isLikelyName, toDisplayName } from './nameHeuristics.js';
+import { isLikelyName } from './nameHeuristics.js';
 
-export const INTRODUCTION_WINDOW_MS = 60_000;
-export const CUSTOMER_RESPONSE_WINDOW_MS = 30_000;
-export const CUSTOMER_RESPONSE_MAX_SEGMENTS = 6;
+export const INTRODUCTION_WINDOW_MS = 30_000;
 
 const NAME_TOKEN = String.raw`[\p{L}\p{M}][\p{L}\p{M}'’\-]{1,39}`;
 const NAME_CAPTURE = `(${NAME_TOKEN})`;
+const ELIGIBLE_CHANNELS = new Set(['in_person', 'uploaded_recording']);
 const ROLE_OR_COMPANY = new Set([
-  'certapro', 'painter', 'painters', 'painting', 'sales', 'salesperson',
-  'representative', 'rep', 'customer', 'client', 'homeowner', 'owner',
-  'manager', 'estimator', 'contractor', 'company', 'team', 'office',
+  'acme', 'aria', 'certapro', 'painter', 'painters', 'painting', 'sales', 'salesperson',
+  'representative', 'rep', 'customer', 'client', 'homeowner', 'owner', 'manager',
+  'estimator', 'contractor', 'company', 'team', 'office', 'meeting', 'thanks',
+  'sir', 'maam', 'madam', 'friend', 'there', 'everyone', 'folks', 'guys',
 ]);
-const EXPLICIT_SELF_CONFIRMATION_RE = /^(?:yes[,!]?\s+|yeah[,!]?\s+|yep[,!]?\s+)?(?:i(?:'|’)?m|i am|my name is)\s+/iu;
-const ADJACENT_IDENTITY_ACK_RE = /^(?:yes|yeah|yep|correct|right)[,!]?\s+(?:that(?:'|’)?s me|that is me)\b|^(?:that(?:'|’)?s me|that is me)\b/iu;
 
 function normalizeName(value) {
   return String(value || '')
@@ -33,85 +31,94 @@ function displayName(raw) {
 
 function validatedName(raw) {
   const normalized = normalizeName(raw);
-  if (!normalized || normalized.split(/\s+/u).length !== 1) return null;
-  if (ROLE_OR_COMPANY.has(normalized)) return null;
-  // The legacy dictionary helper is ASCII-only. Keep its valuable common-word
-  // rejection for ASCII names, but do not erase valid Unicode names merely
-  // because its normalizer predates Unicode-property escapes.
+  if (!normalized || normalized.split(/\s+/u).length !== 1 || ROLE_OR_COMPANY.has(normalized)) return null;
   if (/^[A-Za-z'’-]+$/u.test(String(raw)) && !isLikelyName(raw)) return null;
   return /^[\p{L}\p{M}][\p{L}\p{M}'’\-]{1,39}$/u.test(String(raw)) ? displayName(raw) : null;
 }
 
-export function isEligibleInPersonMeeting(meeting) {
-  return meeting?.channel === 'in_person' && !meeting?.call_sid;
+function nameMatchesCanonical(canonicalName, spokenName) {
+  if (!canonicalName || !spokenName) return false;
+  const spokenParts = normalizeName(spokenName).split(/\s+/u).filter(Boolean);
+  const canonicalParts = new Set(normalizeName(canonicalName).split(/\s+/u).filter(Boolean));
+  return spokenParts.length > 0 && spokenParts.every((part) => canonicalParts.has(part));
 }
 
-function accountMatchesSpokenName(accountName, spokenName) {
-  if (!accountName) return true;
-  const spoken = normalizeName(spokenName);
-  const accountParts = new Set(normalizeName(accountName).split(/\s+/u).filter(Boolean));
-  return accountParts.has(spoken);
+export function isEligibleInPersonMeeting(meeting) {
+  return ELIGIBLE_CHANNELS.has(meeting?.channel) && !meeting?.call_sid;
 }
 
 /**
- * Parse only explicit two-person introductions spoken in the first person.
- * The intentionally narrow grammar rejects free-form mentions, lists, titles,
- * and third-party introductions. One-token names avoid swallowing company or
- * role words while supporting Unicode letters, apostrophes and hyphens.
+ * Parse deliberately narrow, two-party opening language. A returned object
+ * describes evidence that the current slot is the authenticated rep; the
+ * customer's name is only a candidate until a different diarized slot exists.
  */
 export function parseTwoPersonIntroduction(text) {
   const input = String(text || '').normalize('NFKC').trim();
   if (!input || input.length > 300) return null;
 
-  const selfPrefix = String.raw`(?:^|[.!?]\s+|\bhi[,!]?\s+|\bhello[,!]?\s+)(?:i(?:'|’)?m|i am|my name is)\s+${NAME_CAPTURE}`;
-  // Context-only company clause: bounded to at most three list-free tokens.
-  // Neither these words nor a role can ever become the person's label.
-  const companyClause = String.raw`(?:\s+with\s+[\p{L}\p{M}&'’.-]{2,30})?`;
   const patterns = [
     {
-      id: 'this_is',
-      re: new RegExp(String.raw`${selfPrefix}${companyClause}\s*[,;]?\s*(?:and\s+)?this\s+is\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu'),
+      id: 'address_then_self',
+      re: new RegExp(String.raw`^(?:hi|hello|hey)\s+${NAME_CAPTURE}\s*[,!;]\s*(?:this\s+is|i(?:'|’)?m|i\s+am|my\s+name\s+is)\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu'),
+      customerGroup: 1, selfGroup: 2, confidence: 0.99,
     },
     {
-      id: 'you_are_right',
-      re: new RegExp(String.raw`${selfPrefix}${companyClause}\s*[,;]?\s*(?:and\s+)?you(?:'|’)?re\s+${NAME_CAPTURE}\s*,?\s*right\s*\??(?=$|\s)`, 'iu'),
+      id: 'customer_thanks',
+      re: new RegExp(String.raw`^${NAME_CAPTURE}\s*[,!;]\s*(?:thanks|thank\s+you)\s+for\s+(?:meeting|joining|your\s+time)\b(?=$|[\s,.!?;])`, 'iu'),
+      customerGroup: 1, selfGroup: null, confidence: 0.94,
     },
     {
-      id: 'here_with',
-      re: new RegExp(String.raw`${selfPrefix}\s*(?:,|;)?\s*(?:and\s+)?(?:i(?:'|’)?m|i am)\s+here\s+with\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu'),
+      id: 'self_then_customer',
+      re: new RegExp(String.raw`^(?:hi|hello|hey)?\s*[,!;]?\s*(?:i(?:'|’)?m|i\s+am|my\s+name\s+is)\s+${NAME_CAPTURE}(?:\s+with\s+[\p{L}\p{M}&'’.-]{2,30})?\s*[,;]?\s*(?:and\s+)?this\s+is\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu'),
+      selfGroup: 1, customerGroup: 2, confidence: 0.98,
+    },
+    {
+      id: 'self_here_with',
+      re: new RegExp(String.raw`^(?:hi|hello|hey)?\s*[,!;]?\s*(?:i(?:'|’)?m|i\s+am|my\s+name\s+is)\s+${NAME_CAPTURE}\s*[,;]?\s*(?:and\s+)?(?:i(?:'|’)?m|i\s+am)\s+here\s+with\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu'),
+      selfGroup: 1, customerGroup: 2, confidence: 0.98,
+    },
+    {
+      id: 'self_then_you_are',
+      re: new RegExp(String.raw`^(?:hi|hello|hey)?\s*[,!;]?\s*(?:i(?:'|’)?m|i\s+am|my\s+name\s+is)\s+${NAME_CAPTURE}(?:\s+with\s+[\p{L}\p{M}&'’.-]{2,30})?\s*[,;]?\s*(?:and\s+)?you(?:'|’)?re\s+${NAME_CAPTURE}\s*,?\s*right\s*\??$`, 'iu'),
+      selfGroup: 1, customerGroup: 2, confidence: 0.96,
+    },
+    {
+      id: 'self_only',
+      re: new RegExp(String.raw`^(?:hi|hello|hey)?\s*[,!;]?\s*(?:i(?:'|’)?m|i\s+am|my\s+name\s+is)\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu'),
+      selfGroup: 1, customerGroup: null, confidence: 0.97,
     },
   ];
 
-  for (const { id, re } of patterns) {
-    const match = re.exec(input);
+  for (const pattern of patterns) {
+    const match = pattern.re.exec(input);
     if (!match) continue;
-    const selfName = validatedName(match[1]);
-    const customerName = validatedName(match[2]);
-    if (!selfName || !customerName || normalizeName(selfName) === normalizeName(customerName)) return null;
-
-    // Any substantive tail means the utterance may discuss or introduce more
-    // than these two people. Trailing punctuation alone is harmless.
-    const tail = input.slice((match.index || 0) + match[0].length);
-    if (tail.replace(/[\s,.!?;:]+/gu, '')) return null;
-
+    const tail = input.slice(match[0].length);
+    if (tail.replace(/[\s,.!?;:]+/gu, '')) continue;
+    const selfName = pattern.selfGroup ? validatedName(match[pattern.selfGroup]) : null;
+    const customerName = pattern.customerGroup ? validatedName(match[pattern.customerGroup]) : null;
+    if ((pattern.selfGroup && !selfName) || (pattern.customerGroup && !customerName)) continue;
+    if (selfName && customerName && normalizeName(selfName) === normalizeName(customerName)) return null;
     return {
       selfName,
       customerName,
-      pattern: id,
-      confidence: id === 'you_are_right' ? 0.96 : 0.98,
+      pattern: pattern.id,
+      confidence: pattern.confidence,
       evidenceText: input,
+      repEvidence: selfName ? 'self_introduction' : 'host_address',
     };
   }
   return null;
 }
 
 /**
- * Stateful, dependency-injected in-person introduction resolver. It never
- * records audio; evidence references the transcript segment already stored.
+ * Deterministic two-person label state machine shared by live room audio and
+ * uploaded recordings. It never assumes slot zero/first is the rep and never
+ * assigns the pending customer to the rep's sole provisional slot.
  */
 export function createInPersonIntroductionLabeler({
   meetingType,
   repDisplayName,
+  customerDisplayName = null,
   existingLocks = {},
   existingEvidence = {},
   startedAtMs = Date.now(),
@@ -119,17 +126,40 @@ export function createInPersonIntroductionLabeler({
   onConflict = () => {},
   now = () => Date.now(),
 }) {
-  const enabled = meetingType === 'in_person';
+  const enabled = ELIGIBLE_CHANNELS.has(meetingType);
   const locks = new Map();
   const lockSources = new Map();
   const aliases = new Map();
-  let segmentOrdinal = 0;
+  const observedSlots = new Set();
   let pending = null;
+  let conflicted = false;
 
   for (const [index, lock] of Object.entries(existingLocks || {})) {
     if (!lock?.name) continue;
     locks.set(String(index), lock.name);
     lockSources.set(String(index), lock.source || 'manual');
+  }
+
+  const persistedCustomerNames = new Set(
+    Object.values(existingEvidence || {})
+      .filter((evidence) => evidence?.method === 'introduction' && evidence.role === 'customer')
+      .map((evidence) => normalizeName(evidence.customer_name || evidence.resolved_name))
+      .filter(Boolean),
+  );
+  for (const [index, evidence] of Object.entries(existingEvidence || {})) {
+    if (
+      evidence?.method === 'introduction' && evidence.role === 'rep' &&
+      evidence.customer_candidate && locks.has(String(index)) &&
+      !persistedCustomerNames.has(normalizeName(evidence.customer_candidate))
+    ) {
+      pending = {
+        repIndex: String(index),
+        customerName: evidence.customer_candidate,
+        intro: { pattern: evidence.pattern || 'persisted', confidence: evidence.confidence || 0.9 },
+        introSegment: { id: evidence.transcript_segment_id, ts: evidence.transcript_ts },
+        customerSource: evidence.customer_source || 'introduction',
+      };
+    }
   }
 
   function canonical(rawIndex) {
@@ -139,23 +169,24 @@ export function createInPersonIntroductionLabeler({
     return current;
   }
 
-  async function resolve(index, name, role, intro, segment, confidence, contextSegment = null) {
+  function conflict(value) {
+    conflicted = true;
+    pending = null;
+    onConflict(value);
+    return { conflict: value };
+  }
+
+  async function resolve(index, name, role, intro, segment, confidence, extraEvidence = {}) {
     const si = canonical(index);
     const current = locks.get(si);
-    if (current) return { resolved: false, reason: current === name ? 'idempotent' : 'locked' };
+    if (current) return { resolved: false, reason: normalizeName(current) === normalizeName(name) ? 'idempotent' : 'locked' };
     const evidence = {
-      method: 'introduction',
-      role,
-      confidence,
-      transcript_segment_id: segment.id || null,
-      transcript_ts: segment.ts || new Date(now()).toISOString(),
+      method: 'introduction', role, confidence,
+      transcript_segment_id: segment?.id || null,
+      transcript_ts: segment?.ts || new Date(now()).toISOString(),
       pattern: intro.pattern,
-      context_segment_id: contextSegment?.id || null,
-      context_ts: contextSegment?.ts || null,
+      ...extraEvidence,
     };
-    // Mark locally before awaiting persistence so concurrent Deepgram message
-    // handlers cannot resolve this slot twice. Roll back only if persistence
-    // reports that an authoritative label won the race.
     locks.set(si, name);
     lockSources.set(si, 'introduction_pending');
     const result = await resolveIdentity({ speakerIndex: Number(si), name, role, evidence });
@@ -168,113 +199,108 @@ export function createInPersonIntroductionLabeler({
     return { resolved: true, name, evidence };
   }
 
+  async function resolvePendingCustomer(triggerSegment) {
+    if (!pending || conflicted) return null;
+    const others = [...observedSlots].filter((slot) => slot !== pending.repIndex);
+    if (others.length === 0) return null;
+    if (others.length !== 1) return conflict({
+      reason: 'ambiguous_customer_slot', repIndex: Number(pending.repIndex), candidateIndices: others.map(Number),
+    });
+    const customerIndex = others[0];
+    const current = locks.get(customerIndex);
+    if (current && normalizeName(current) !== normalizeName(pending.customerName)) {
+      return conflict({ reason: 'customer_slot_already_locked', speakerIndex: Number(customerIndex) });
+    }
+    const state = pending;
+    pending = null;
+    const result = await resolve(
+      customerIndex, state.customerName, 'customer', state.intro,
+      state.introSegment, state.intro.confidence,
+      {
+        customer_source: state.customerSource,
+        customer_name: state.customerName,
+        resolved_name: state.customerName,
+        rep_speaker_index: Number(state.repIndex),
+        distinct_speaker_segment_id: triggerSegment?.id || null,
+        distinct_speaker_ts: triggerSegment?.ts || null,
+      },
+    );
+    return { customer: result };
+  }
+
   async function onSegment(segment) {
-    segmentOrdinal += 1;
     if (!enabled) return { enabled: false };
     const timestampMs = segment.timestampMs ?? (Date.parse(segment.ts || '') || now());
     const si = canonical(segment.speakerIndex);
+    observedSlots.add(si);
 
-    if (timestampMs - startedAtMs <= INTRODUCTION_WINDOW_MS) {
-      const intro = parseTwoPersonIntroduction(segment.text);
-      if (intro) {
-        if (!accountMatchesSpokenName(repDisplayName, intro.selfName)) {
-          const conflict = {
-            reason: 'authenticated_rep_name_conflict',
-            speakerIndex: Number(si),
-            accountName: repDisplayName,
-            spokenName: intro.selfName,
-            segmentId: segment.id || null,
-          };
-          onConflict(conflict);
-          return { conflict };
-        }
+    // A customer candidate remains pending beyond the extraction window: if
+    // Deepgram exposes one provisional slot for 30+ seconds, the first truly
+    // distinct slot still resolves it immediately when it finally appears.
+    const lateResolution = await resolvePendingCustomer(segment);
+    if (lateResolution) return lateResolution;
+    if (conflicted || timestampMs - startedAtMs > INTRODUCTION_WINDOW_MS) return { enabled: true };
 
-        const repName = repDisplayName || intro.selfName;
-        const repResult = await resolve(si, repName, 'rep', intro, segment, intro.confidence);
-        if (repResult.reason === 'locked' && locks.get(si) !== repName) {
-          return { conflict: { reason: 'existing_lock_conflict', speakerIndex: Number(si) } };
-        }
+    const intro = parseTwoPersonIntroduction(segment.text);
+    if (!intro) return pending ? { pendingCustomer: true } : { enabled: true };
+    if (intro.selfName && !nameMatchesCanonical(repDisplayName, intro.selfName)) {
+      return conflict({
+        reason: 'authenticated_rep_name_conflict', speakerIndex: Number(si),
+        accountName: repDisplayName, spokenName: intro.selfName, segmentId: segment.id || null,
+      });
+    }
+    if (!repDisplayName) {
+      return conflict({ reason: 'missing_authenticated_rep_name', speakerIndex: Number(si), segmentId: segment.id || null });
+    }
 
-        pending = {
-          intro,
-          repIndex: si,
-          introSegment: segment,
-          introOrdinal: segmentOrdinal,
-          expiresAt: timestampMs + CUSTOMER_RESPONSE_WINDOW_MS,
-          candidateIndex: null,
-          candidateTurns: 0,
-          candidateConfirmedIdentity: false,
-          distinctOtherIndices: new Set(),
-        };
-        return { rep: repResult, pendingCustomer: true };
+    let customerName = intro.customerName;
+    let customerSource = 'introduction';
+    if (customerDisplayName) {
+      if (customerName && !nameMatchesCanonical(customerDisplayName, customerName)) {
+        return conflict({
+          reason: 'associated_customer_name_conflict', speakerIndex: Number(si),
+          associatedName: customerDisplayName, spokenName: customerName, segmentId: segment.id || null,
+        });
       }
+      customerName = customerDisplayName;
+      customerSource = intro.customerName ? 'customer_association_confirmed_by_introduction' : 'customer_association';
+    }
+    if (!customerName) return { repEvidenceOnly: true };
+
+    if (pending && (
+      pending.repIndex !== si || normalizeName(pending.customerName) !== normalizeName(customerName)
+    )) {
+      return conflict({
+        reason: 'conflicting_introduction_evidence', speakerIndex: Number(si),
+        priorRepIndex: Number(pending.repIndex), priorCustomerName: pending.customerName, customerName,
+      });
     }
 
-    if (!pending) return { enabled: true };
-    if (
-      timestampMs > pending.expiresAt ||
-      segmentOrdinal - pending.introOrdinal > CUSTOMER_RESPONSE_MAX_SEGMENTS
-    ) {
-      pending = null;
-      return { expired: true };
+    const current = locks.get(si);
+    if (current && normalizeName(current) !== normalizeName(repDisplayName)) {
+      return conflict({ reason: 'existing_lock_conflict', speakerIndex: Number(si) });
     }
-    if (si === pending.repIndex) return { pendingCustomer: true };
-
-    pending.distinctOtherIndices.add(si);
-    if (pending.distinctOtherIndices.size > 1) {
-      pending = null;
-      return { ambiguous: true };
-    }
-
-    if (pending.candidateIndex !== si) {
-      pending.candidateIndex = si;
-      pending.candidateTurns = 0;
-      pending.candidateConfirmedIdentity = false;
-    }
-    pending.candidateTurns += 1;
-    const candidateText = String(segment.text || '').normalize('NFKC').trim();
-    const explicitSelf = EXPLICIT_SELF_CONFIRMATION_RE.test(candidateText);
-    const selfMatch = explicitSelf
-      ? new RegExp(String.raw`^(?:yes[,!]?\s+|yeah[,!]?\s+|yep[,!]?\s+)?(?:i(?:'|’)?m|i am|my name is)\s+${NAME_CAPTURE}(?=$|[,.!?;])`, 'iu').exec(candidateText)
-      : null;
-    const explicitName = selfMatch ? validatedName(selfMatch[1]) : null;
-    const explicitlyMatchesCustomer = Boolean(
-      explicitName && normalizeName(explicitName) === normalizeName(pending.intro.customerName)
+    const repResult = await resolve(
+      si, repDisplayName, 'rep', intro, segment, intro.confidence,
+      {
+        account_name: repDisplayName,
+        rep_evidence: intro.repEvidence,
+        spoken_rep_name: intro.selfName,
+        customer_candidate: customerName,
+        customer_source: customerSource,
+      },
     );
-    const adjacentIdentityAck = segmentOrdinal === pending.introOrdinal + 1 && ADJACENT_IDENTITY_ACK_RE.test(candidateText);
-    pending.candidateConfirmedIdentity ||= explicitlyMatchesCustomer || adjacentIdentityAck;
-    // Two turns from one canonical slot are necessary but not sufficient:
-    // Deepgram can split the rep into a fresh raw index. Require the candidate
-    // to affirm the introduced identity too, so two ordinary rep turns cannot
-    // accidentally become the customer.
-    if (pending.candidateTurns < 2 || !pending.candidateConfirmedIdentity) return { pendingCustomer: true };
+    if (repResult.reason === 'locked') return conflict({ reason: 'existing_lock_conflict', speakerIndex: Number(si) });
 
-    // If this slot already carries any authoritative/manual identity, do not
-    // replace it with a name inferred from another person's utterance.
-    if (locks.has(si)) {
-      pending = null;
-      return { conflict: { reason: 'customer_slot_already_locked', speakerIndex: Number(si) } };
-    }
-
-    const customerResult = await resolve(
-      si,
-      pending.intro.customerName,
-      'customer',
-      pending.intro,
-      pending.introSegment,
-      pending.intro.confidence,
-      segment,
-    );
-    pending = null;
-    return { customer: customerResult };
+    pending = { repIndex: si, customerName, intro, introSegment: segment, customerSource };
+    const immediate = await resolvePendingCustomer(segment);
+    return immediate || { rep: repResult, pendingCustomer: true };
   }
 
   function addAlias(rawIndex, canonicalIndex) {
     const raw = canonical(rawIndex);
     const target = canonical(canonicalIndex);
     if (raw === target) return { aliased: false, reason: 'same' };
-    // Introduction and manual locks are authoritative boundaries. A later
-    // spectral merge may not collapse either side and undo attribution.
     if (locks.has(raw) || locks.has(target)) return { aliased: false, reason: 'locked' };
     aliases.set(raw, target);
     return { aliased: true };
@@ -282,29 +308,23 @@ export function createInPersonIntroductionLabeler({
 
   function setManualLock(index, name) {
     const si = canonical(index);
-    const currentSource = lockSources.get(si);
-    if (currentSource === 'manual' && locks.get(si) === name) return;
     locks.set(si, name);
     lockSources.set(si, 'manual');
-    if (pending?.repIndex === si || pending?.candidateIndex === si) pending = null;
+    // A human decision is authoritative. Drop any automatic counterpart
+    // inference rather than carrying stale evidence past that intervention.
+    if (pending) pending = null;
   }
 
   return {
-    enabled,
-    onSegment,
-    addAlias,
-    setManualLock,
+    enabled, onSegment, addAlias, setManualLock,
     getLock: (index) => locks.get(canonical(index)),
     getLockSource: (index) => lockSources.get(canonical(index)),
     canMerge: (rawIndex, canonicalIndex) => !locks.has(canonical(rawIndex)) && !locks.has(canonical(canonicalIndex)),
-    _state: () => ({ pending, locks: new Map(locks), existingEvidence }),
+    _state: () => ({ pending, conflicted, observedSlots: new Set(observedSlots), locks: new Map(locks), existingEvidence }),
   };
 }
 
-/**
- * Atomically persist one proven identity and relabel its prior generic rows.
- * The JSONB key guard makes first-writer/manual-lock precedence idempotent.
- */
+/** Atomically persist one identity and relabel all prior generic rows. */
 export async function persistIntroductionResolution({ pool, meetingId, speakerIndex, name, evidence }) {
   const client = typeof pool.connect === 'function' ? await pool.connect() : pool;
   const speakerId = `Speaker ${Number(speakerIndex) + 1}`;
@@ -318,8 +338,7 @@ export async function persistIntroductionResolution({ pool, meetingId, speakerIn
        WHERE id = $3
          AND NOT (COALESCE(speaker_labels, '{}'::jsonb) ? $4)
          AND NOT EXISTS (
-           SELECT 1
-           FROM jsonb_each_text(COALESCE(speaker_labels, '{}'::jsonb)) AS existing(label, value)
+           SELECT 1 FROM jsonb_each_text(COALESCE(speaker_labels, '{}'::jsonb)) AS existing(label, value)
            WHERE lower(existing.value) = lower($1::text)
          )
        RETURNING speaker_labels, speaker_label_evidence`,
@@ -330,15 +349,12 @@ export async function persistIntroductionResolution({ pool, meetingId, speakerIn
       return { resolved: false, reason: 'persisted_lock_won', speakerId, relabeledCount: 0 };
     }
     const relabelResult = await client.query(
-      `UPDATE transcript_segments SET speaker = $1
-       WHERE meeting_id = $2 AND speaker = $3`,
+      `UPDATE transcript_segments SET speaker = $1 WHERE meeting_id = $2 AND speaker = $3`,
       [name, meetingId, speakerId],
     );
     await client.query('COMMIT');
     return {
-      resolved: true,
-      speakerId,
-      relabeledCount: relabelResult.rowCount || 0,
+      resolved: true, speakerId, relabeledCount: relabelResult.rowCount || 0,
       speakerLabels: meetingResult.rows[0].speaker_labels,
       speakerLabelEvidence: meetingResult.rows[0].speaker_label_evidence,
     };
@@ -350,9 +366,4 @@ export async function persistIntroductionResolution({ pool, meetingId, speakerIn
   }
 }
 
-export const _internals = {
-  normalizeName,
-  accountMatchesSpokenName,
-  EXPLICIT_SELF_CONFIRMATION_RE,
-  ADJACENT_IDENTITY_ACK_RE,
-};
+export const _internals = { normalizeName, nameMatchesCanonical, validatedName };

@@ -197,6 +197,17 @@ describe('UploadedRecordingPage', () => {
     }));
   });
 
+  it('applies automatic speaker locks to prior live rows without echoing a stale PATCH', async () => {
+    const applyLiveMessage = await startAnalysis();
+    applyLiveMessage({ type: 'final', id: 'segment-1', speaker: 'Speaker 1', text: 'Hi John, this is Ada.' });
+    await screen.findByText('Hi John, this is Ada.');
+
+    applyLiveMessage({ type: 'speaker_lock', speakerId: 'Speaker 1', name: 'Ada', source: 'introduction' });
+
+    expect(await screen.findByText('Ada:')).toBeTruthy();
+    expect(mocks.updateMeeting).not.toHaveBeenCalled();
+  });
+
   it('links to the normal meeting analysis/details route without claiming a final summary is ready', async () => {
     await startAnalysis();
     const analysisButton = screen.getByRole('button', { name: 'View meeting analysis/details' });

@@ -115,6 +115,16 @@ export default function UploadedRecordingPage() {
           isFinal: true,
         }]);
       }
+    } else if (msg.type === 'speaker_lock') {
+      const speakerId = typeof msg.speakerId === 'string' ? msg.speakerId : '';
+      const name = typeof msg.name === 'string' ? msg.name.trim() : '';
+      if (speakerId && name) setSpeakerLabels(previous => ({ ...previous, [speakerId]: name }));
+    } else if (msg.type === 'speaker_merge') {
+      const from = typeof msg.from === 'string' ? msg.from : '';
+      const to = typeof msg.to === 'string' ? msg.to : '';
+      if (from && to) setSegments(previous => previous.map(segment => (
+        segment.speaker === from ? { ...segment, speaker: to } : segment
+      )));
     } else if (msg.type === 'coaching' && msg.data) {
       setCoaching(msg.data as CoachingData);
     } else if (msg.type === 'error') {

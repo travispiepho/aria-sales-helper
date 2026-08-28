@@ -1,4 +1,9 @@
 import { createDeepgramSession } from './deepgramSession.js';
+import {
+  createInPersonIntroductionLabeler,
+  isEligibleInPersonMeeting,
+  persistIntroductionResolution,
+} from './inPersonIntroductionLabels.js';
 
 export const UPLOADED_RECORDING_CHANNEL = 'uploaded_recording';
 export const UPLOADED_RECORDING_PROTOCOL = Object.freeze({
@@ -160,6 +165,8 @@ export async function registerUploadedRecordingRoutes(fastify, {
   broadcastToMeeting = () => {},
   registerMeetingSocket = () => {},
   unregisterMeetingSocket = () => {},
+  registerSpeakerController = () => {},
+  unregisterSpeakerController = () => {},
   runCoachingAnalysis = async () => null,
   finalizeMeeting,
   now = () => Date.now(),
@@ -259,7 +266,12 @@ export async function registerUploadedRecordingRoutes(fastify, {
 
     let meeting;
     try {
-      const result = await pool.query('SELECT * FROM meetings WHERE id = $1', [meetingId]);
+      const result = await pool.query(
+        `SELECT m.*, c.name AS customer_name
+         FROM meetings m LEFT JOIN customers c ON m.customer_id = c.id
+         WHERE m.id = $1`,
+        [meetingId],
+      );
       meeting = result.rows[0];
     } catch (error) {
       fastify.log.error(`uploaded recording meeting lookup failed: ${error.message}`);
@@ -283,12 +295,79 @@ export async function registerUploadedRecordingRoutes(fastify, {
     let persistQueue = Promise.resolve();
     let finalSegmentCount = 0;
     let coachingInFlight = null;
+    const speakerLocks = {};
+    const speakerLockSources = {};
+    for (const [speakerId, name] of Object.entries(meeting.speaker_labels || {})) {
+      const parsed = /^Speaker\s+(\d+)$/i.exec(speakerId);
+      if (!parsed || !String(name || '').trim()) continue;
+      const si = String(Number(parsed[1]) - 1);
+      speakerLocks[si] = String(name).trim();
+      speakerLockSources[si] = meeting.speaker_label_evidence?.[si]?.method === 'introduction' ? 'introduction' : 'manual';
+    }
+
+    const introductionLabeler = createInPersonIntroductionLabeler({
+      meetingType: isEligibleInPersonMeeting(meeting) ? meeting.channel : 'excluded',
+      repDisplayName: user.name,
+      customerDisplayName: meeting.customer_name || null,
+      startedAtMs: new Date(meeting.started_at || now()).getTime(),
+      now,
+      existingLocks: Object.fromEntries(
+        Object.entries(speakerLocks).map(([si, name]) => [si, { name, source: speakerLockSources[si] }]),
+      ),
+      existingEvidence: meeting.speaker_label_evidence || {},
+      onConflict: (conflict) => fastify.log.warn(`uploaded recording introduction conflict for ${meetingId}: ${JSON.stringify(conflict)}`),
+      resolveIdentity: async ({ speakerIndex, name, role, evidence }) => {
+        const si = String(speakerIndex);
+        const current = speakerLocks[si];
+        if (current) return { resolved: false, reason: current === name ? 'idempotent' : 'locked' };
+        speakerLocks[si] = name;
+        speakerLockSources[si] = 'introduction_pending';
+        let resolution;
+        try {
+          resolution = await persistIntroductionResolution({ pool, meetingId, speakerIndex, name, evidence });
+        } catch (error) {
+          delete speakerLocks[si];
+          delete speakerLockSources[si];
+          throw error;
+        }
+        if (!resolution.resolved) {
+          delete speakerLocks[si];
+          delete speakerLockSources[si];
+          return resolution;
+        }
+        meeting.speaker_labels = resolution.speakerLabels;
+        meeting.speaker_label_evidence = resolution.speakerLabelEvidence;
+        speakerLocks[si] = name;
+        speakerLockSources[si] = 'introduction';
+        broadcastToMeeting(meetingId, {
+          type: 'speaker_lock', speakerId: `Speaker ${speakerIndex + 1}`,
+          name, role, source: 'introduction', confidence: evidence.confidence,
+        });
+        return { resolved: true };
+      },
+    });
+
+    const speakerController = {
+      manualLock(speakerId, name) {
+        const parsed = /^Speaker\s+(\d+)$/i.exec(String(speakerId || ''));
+        const display = String(name || '').trim();
+        if (!parsed || !display) return { ok: false };
+        const si = String(Number(parsed[1]) - 1);
+        speakerLocks[si] = display;
+        speakerLockSources[si] = 'manual';
+        introductionLabeler.setManualLock(si, display);
+        return { ok: true, locked: display };
+      },
+    };
 
     registerMeetingSocket(meetingId, socket);
+    registerSpeakerController(meetingId, speakerController);
 
     const queueTranscript = (result) => {
       if (closed || !result?.text) return;
-      const speaker = transcriptLabel(result);
+      const speakerIndex = Number.isInteger(result.speaker) && result.speaker >= 0 ? result.speaker : 0;
+      const speakerId = transcriptLabel(result);
+      const speaker = speakerLocks[String(speakerIndex)] || speakerId;
       if (!result.isFinal) {
         broadcastToMeeting(meetingId, { type: 'interim', text: result.text, speaker });
         return;
@@ -302,10 +381,24 @@ export async function registerUploadedRecordingRoutes(fastify, {
            VALUES ($1, NOW(), $2, $3, $4, $5) RETURNING id, ts`,
           [meetingId, speaker, result.text, words.length || result.text.split(/\s+/).filter(Boolean).length, durationMs],
         );
+        const insertedId = inserted.rows[0]?.id;
+        const insertedTs = inserted.rows[0]?.ts;
+        if (insertedId && introductionLabeler.enabled) {
+          try {
+            await introductionLabeler.onSegment({
+              id: insertedId, speakerIndex, text: result.text, ts: insertedTs,
+              // The upload protocol's injected clock tracks playback progress;
+              // DB insertion time can lag or be independently stubbed.
+              timestampMs: now(),
+            });
+          } catch (error) {
+            fastify.log.error(`uploaded recording introduction labeling failed: ${error.message}`);
+          }
+        }
         finalSegmentCount += 1;
         broadcastToMeeting(meetingId, {
-          type: 'final', id: inserted.rows[0]?.id, ts: inserted.rows[0]?.ts,
-          text: result.text, speaker,
+          type: 'final', id: insertedId, ts: insertedTs,
+          text: result.text, speaker: speakerId,
         });
         // Keep transcript persistence real-time. Coaching is intentionally
         // non-blocking and capped at one request at a time; otherwise a long
@@ -339,6 +432,7 @@ export async function registerUploadedRecordingRoutes(fastify, {
       });
     } catch (error) {
       unregisterMeetingSocket(meetingId, socket);
+      unregisterSpeakerController(meetingId, speakerController);
       return rejectDuringSetup(protocolError('Could not start transcription', 1011));
     }
 
@@ -419,6 +513,7 @@ export async function registerUploadedRecordingRoutes(fastify, {
       if (closed) return;
       closed = true;
       unregisterMeetingSocket(meetingId, socket);
+      unregisterSpeakerController(meetingId, speakerController);
       if (!ending) {
         transcription?.close();
         pool.query(

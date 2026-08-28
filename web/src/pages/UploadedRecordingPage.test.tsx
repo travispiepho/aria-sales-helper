@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   getSegments: vi.fn(),
   load: vi.fn(), play: vi.fn(), pause: vi.fn(), resume: vi.fn(), stop: vi.fn(),
   connect: vi.fn(), start: vi.fn(), sendPcm: vi.fn(), transportPause: vi.fn(), transportResume: vi.fn(), end: vi.fn(), waitForCompletion: vi.fn(), close: vi.fn(),
+  scrollIntoView: vi.fn(),
 }));
 
 vi.mock('../lib/auth', () => ({ useAuth: () => ({ user: { id: 'rep-1', name: 'Rep' } }) }));
@@ -60,9 +61,36 @@ async function selectAudio() {
   return file;
 }
 
+async function startAnalysis() {
+  let applyLiveMessage: ((message: unknown) => void) | undefined;
+  mocks.connect.mockImplementation(async (handler: (message: unknown) => void) => {
+    applyLiveMessage = handler;
+  });
+  renderPage();
+  await selectAudio();
+  await userEvent.click(screen.getByRole('checkbox'));
+  await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+  await waitFor(() => expect(applyLiveMessage).toBeTruthy());
+  await screen.findByRole('heading', { name: 'Live transcript' });
+  return applyLiveMessage!;
+}
+
+function getTranscriptContainer() {
+  return screen.getByLabelText('Live transcript');
+}
+
+function setTranscriptScrollMetrics(element: HTMLElement, values: { scrollHeight: number; clientHeight: number; scrollTop: number }) {
+  Object.defineProperties(element, {
+    scrollHeight: { configurable: true, value: values.scrollHeight },
+    clientHeight: { configurable: true, value: values.clientHeight },
+    scrollTop: { configurable: true, writable: true, value: values.scrollTop },
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn(() => 'blob:local-only'), revokeObjectURL: vi.fn() });
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: mocks.scrollIntoView });
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
   mocks.createMeeting.mockResolvedValue({ id: 'meeting-upload-1', upload_ws_path: '/meetings/meeting-upload-1/uploaded-recording' });
   mocks.connect.mockResolvedValue(undefined);
@@ -179,5 +207,54 @@ describe('UploadedRecordingPage', () => {
     await selectAudio();
     unmount();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:local-only');
+  });
+
+  it('does not move the document viewport when live transcript updates arrive', async () => {
+    const applyLiveMessage = await startAnalysis();
+    mocks.scrollIntoView.mockClear();
+
+    applyLiveMessage({ type: 'interim', text: 'Working through the details' });
+
+    await screen.findByText('Working through the details');
+    expect(mocks.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it('auto-scrolls only the transcript container while following live updates', async () => {
+    const applyLiveMessage = await startAnalysis();
+    const transcript = getTranscriptContainer();
+    setTranscriptScrollMetrics(transcript, { scrollHeight: 600, clientHeight: 200, scrollTop: 350 });
+
+    applyLiveMessage({ type: 'interim', text: 'A new live phrase' });
+
+    await screen.findByText('A new live phrase');
+    await waitFor(() => expect(transcript.scrollTop).toBe(600));
+  });
+
+  it('preserves transcript position when the user scrolls more than 80px from the bottom', async () => {
+    const applyLiveMessage = await startAnalysis();
+    const transcript = getTranscriptContainer();
+    setTranscriptScrollMetrics(transcript, { scrollHeight: 600, clientHeight: 200, scrollTop: 100 });
+    fireEvent.scroll(transcript);
+    mocks.scrollIntoView.mockClear();
+
+    applyLiveMessage({ type: 'interim', text: 'Do not chase this update' });
+
+    await screen.findByText('Do not chase this update');
+    expect(transcript.scrollTop).toBe(100);
+    expect(mocks.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it('resumes transcript-container auto-follow after the user returns within 80px of the bottom', async () => {
+    const applyLiveMessage = await startAnalysis();
+    const transcript = getTranscriptContainer();
+    setTranscriptScrollMetrics(transcript, { scrollHeight: 600, clientHeight: 200, scrollTop: 100 });
+    fireEvent.scroll(transcript);
+    transcript.scrollTop = 330;
+    fireEvent.scroll(transcript);
+
+    applyLiveMessage({ type: 'interim', text: 'Follow updates again' });
+
+    await screen.findByText('Follow updates again');
+    await waitFor(() => expect(transcript.scrollTop).toBe(600));
   });
 });

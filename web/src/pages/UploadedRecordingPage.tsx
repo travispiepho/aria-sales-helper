@@ -41,13 +41,23 @@ export default function UploadedRecordingPage() {
   const playerRef = useRef<LocalRecordingPlayer | null>(null);
   const transportRef = useRef<UploadedRecordingTransport | null>(null);
   const finalizePromiseRef = useRef<Promise<void> | null>(null);
-  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
+  const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
+  const userScrolledUpRef = useRef(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const active = state === 'preparing' || state === 'playing' || state === 'paused' || state === 'stopping';
 
+  function handleTranscriptScroll() {
+    const el = transcriptContainerRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    userScrolledUpRef.current = distFromBottom > 80;
+  }
+
   useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView?.({ block: 'nearest' });
+    if (userScrolledUpRef.current) return;
+    const el = transcriptContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [segments, interimText]);
 
   const cleanupResources = useCallback(async (sendEnd = true) => {
@@ -158,6 +168,7 @@ export default function UploadedRecordingPage() {
     setInterimText('');
     setCoaching(null);
     setProgress(0);
+    userScrolledUpRef.current = false;
     setState('preparing');
     finalizePromiseRef.current = null;
     if (previewAudioRef.current) {
@@ -329,7 +340,13 @@ export default function UploadedRecordingPage() {
             <CoachingPanel coaching={coaching} />
             <section className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <h2 className="font-semibold text-gray-900 mb-3">Live transcript</h2>
-              <div aria-live="polite" className="max-h-80 overflow-y-auto space-y-2">
+              <div
+                ref={transcriptContainerRef}
+                onScroll={handleTranscriptScroll}
+                aria-label="Live transcript"
+                aria-live="polite"
+                className="max-h-80 overflow-y-auto space-y-2"
+              >
                 {segments.length === 0 && !interimText && <p className="text-sm text-gray-500">Transcript will appear as the recording plays…</p>}
                 {segments.map((segment, index) => (
                   <div key={segment.id ?? `${segment.ts}-${index}`} className="text-sm">
@@ -338,7 +355,6 @@ export default function UploadedRecordingPage() {
                   </div>
                 ))}
                 {interimText && <p className="text-sm text-gray-500 italic">{interimText}</p>}
-                <div ref={transcriptEndRef} />
               </div>
             </section>
           </>

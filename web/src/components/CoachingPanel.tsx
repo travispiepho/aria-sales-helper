@@ -1,7 +1,11 @@
 /**
  * CoachingPanel.tsx — Phase 3: Real-Time Coaching Overlay
  * Displays DISC style, sales stage, checklist, nudges, and urgent alerts.
- * Mobile-first, collapsible, Tailwind-only.
+ * Mobile-first, always-visible (no collapse), Tailwind-only. The panel
+ * always fills the full height of whatever container it's given (see
+ * MeetingPage.tsx / UploadedRecordingPage.tsx feedback-column wiring) so it
+ * never visually shrinks just because a section is showing a "Waiting on
+ * data..." placeholder instead of real content.
  */
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -37,7 +41,6 @@ export interface CoachingData {
 
 interface CoachingPanelProps {
   coaching?: CoachingData | null;
-  defaultCollapsed?: boolean;
 }
 
 // ─── Stage progress order ─────────────────────────────────────────────────────
@@ -66,8 +69,7 @@ const CONFIDENCE_STYLES: Record<string, string> = {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function CoachingPanel({ coaching, defaultCollapsed = false }: CoachingPanelProps) {
-  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+export default function CoachingPanel({ coaching }: CoachingPanelProps) {
   const [nudgeIndex, setNudgeIndex] = useState(0);
   const [paused, setPaused] = useState(false);
   const [visible, setVisible] = useState(true);
@@ -142,34 +144,27 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
   const doneCount = checklist.filter(item => item.done).length;
 
   return (
-    <div role="region" aria-label="ARIA Coaching" className="bg-white border border-indigo-200 rounded-2xl shadow-sm overflow-hidden">
-      {/* Header / collapse toggle */}
-      <button
-        onClick={() => setCollapsed(c => !c)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-indigo-600 text-white text-sm font-semibold"
-      >
+    <div role="region" aria-label="ARIA Coaching" className="flex-1 min-h-0 flex flex-col bg-white border border-indigo-200 rounded-2xl shadow-sm overflow-hidden">
+      {/* Header (static — no collapse toggle) */}
+      <div className="w-full flex-none flex items-center justify-between px-4 py-3 bg-indigo-600 text-white text-sm font-semibold">
         <span className="flex items-center gap-2">
           <span>🧭</span>
           <span>ARIA Coaching</span>
-          {!collapsed && urgent && (
+          {urgent && (
             <span className="ml-1 bg-orange-500 text-white text-xs px-2 py-0.5 rounded-full animate-pulse">
               💡 Tip
             </span>
           )}
-          {!collapsed && !urgent && checklist.length > 0 && (
+          {!urgent && checklist.length > 0 && (
             <span className="ml-1 text-indigo-300 text-xs">
               {doneCount}/{checklist.length} done
             </span>
           )}
         </span>
-        <span className="text-indigo-200 text-lg leading-none">
-          {collapsed ? '▾' : '▴'}
-        </span>
-      </button>
+      </div>
 
-      {/* Body */}
-      {!collapsed && (
-        <div className="px-4 py-3 space-y-4">
+      {/* Body — always rendered, fills remaining panel height, scrolls internally if content overflows */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
 
 
           {/* ── DISC card ── */}
@@ -318,8 +313,7 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
               <p data-coaching-waiting="nudges" className="text-sm text-gray-400">Waiting on data...</p>
             )}
           </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }

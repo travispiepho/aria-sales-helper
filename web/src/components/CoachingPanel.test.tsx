@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { cleanup, render, screen, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it } from 'vitest';
 import CoachingPanel, { CoachingData } from './CoachingPanel';
 
@@ -38,15 +37,23 @@ describe('CoachingPanel empty and live states', () => {
     render(<CoachingPanel coaching={value} />);
     const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
 
-    expect(screen.getByRole('button', { name: /ARIA Coaching/ })).toBeTruthy();
+    // No collapse/minimize toggle exists anywhere in the panel.
+    expect(screen.queryByRole('button', { name: /ARIA Coaching/ })).toBeNull();
+    expect(within(panel).queryByText('▾')).toBeNull();
+    expect(within(panel).queryByText('▴')).toBeNull();
+    expect(within(panel).getByText('ARIA Coaching')).toBeTruthy();
     expectWaitingSections(panel);
     expect(within(panel).getAllByText('Waiting on data...')).toHaveLength(5);
+    // The panel always fills the full height of its container.
+    expect(panel.className).toContain('flex-1');
+    expect(panel.className).toContain('flex-col');
   });
 
-  it('replaces placeholders with real content live without remounting the panel', () => {
+  it('replaces placeholders with real content live without remounting the panel, and stays full height in both states', () => {
     const { rerender } = render(<CoachingPanel coaching={null} />);
     const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
     expectWaitingSections(panel);
+    const emptyStateClassName = panel.className;
 
     rerender(<CoachingPanel coaching={{ ...coaching, urgent: 'Pause and address the concern.' }} />);
 
@@ -57,6 +64,9 @@ describe('CoachingPanel empty and live states', () => {
     expect(within(panel).getByText(checklist[10].label)).toBeTruthy();
     expect(within(panel).getByText('Ask the next question.')).toBeTruthy();
     expect(within(panel).getByText('Pause and address the concern.')).toBeTruthy();
+    // Root className (and therefore the full-height layout contract) is
+    // identical whether the panel is showing placeholders or real data.
+    expect(panel.className).toBe(emptyStateClassName);
   });
 
   it('keeps placeholders only for sections missing from a partial coaching pass', () => {
@@ -88,13 +98,9 @@ describe('CoachingPanel checklist layout', () => {
     expect(screen.getByText(checklist[0].label).className).toContain('line-through');
   });
 
-  it('preserves collapse behavior without dropping checklist items', async () => {
+  it('always renders the checklist section — there is no collapse toggle to hide it', () => {
     const { container } = render(<CoachingPanel coaching={coaching} />);
-    const toggle = screen.getByRole('button', { name: /ARIA Coaching/ });
-
-    await userEvent.click(toggle);
-    expect(container.querySelector('[data-coaching-checklist]')).toBeNull();
-    await userEvent.click(toggle);
+    expect(screen.queryByRole('button', { name: /ARIA Coaching/ })).toBeNull();
     expect(container.querySelectorAll('[data-coaching-checklist-item]')).toHaveLength(11);
   });
 });

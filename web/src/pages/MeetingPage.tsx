@@ -1645,7 +1645,7 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
               aria-label="ARIA Feedback"
               className="active-meeting-feedback-column"
             >
-              <div data-aria-feedback-panel className="w-full">
+              <div data-aria-feedback-panel className="w-full h-full flex flex-col">
                 {suggestedRebuttal && (
                   <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 flex items-start gap-3 mb-4">
                     <span className="text-2xl">💬</span>
@@ -1676,7 +1676,6 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
                       done: item.done || lockedChecked.has(item.id),
                     })) ?? [],
                   } : null}
-                  defaultCollapsed={false}
                 />
               </div>
             </section>

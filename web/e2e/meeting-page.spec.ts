@@ -73,6 +73,25 @@ async function expectWaitingCoachingSections(page: Page) {
   }
 }
 
+// 2026-08-29 (coaching-panel full-height / no-collapse task) — the panel
+// must never have a collapse/minimize chevron button, and its rendered
+// height must not shrink just because every section is showing a
+// "Waiting on data..." placeholder instead of real content.
+async function expectCoachingPanelNeverCollapses(page: Page) {
+  await expect(page.getByRole('button', { name: /ARIA Coaching/ })).toHaveCount(0);
+  const panel = page.getByRole('region', { name: 'ARIA Coaching' });
+  await expect(panel).toBeVisible();
+  const feedbackColumn = page.locator('[data-meeting-column="feedback"]');
+  const panelBox = await panel.boundingBox();
+  const columnBox = await feedbackColumn.boundingBox();
+  expect(panelBox && columnBox).toBeTruthy();
+  // The panel must fill essentially the full height of its column slot
+  // (allow a couple of px of rounding slop), whether it's all placeholders
+  // or has real data — it must never shrink to header-only height.
+  expect(panelBox!.height).toBeGreaterThan(200);
+  expect(Math.abs(panelBox!.height - columnBox!.height)).toBeLessThanOrEqual(2);
+}
+
 async function expectNoDedicatedStatusBanner(page: Page) {
   await expect(page.getByText('🔴 RECORDING — keep screen on')).toHaveCount(0);
   await expect(page.getByText('📱 LIVE — synced from mobile device')).toHaveCount(0);
@@ -211,6 +230,7 @@ test.describe('desktop active meeting three-column viewport contract', () => {
         await page.goto(`${BASE}/meetings/in-person/active`);
         await expectViewportWorkspace(page, 'In-person meeting controls');
         await expectWaitingCoachingSections(page);
+        await expectCoachingPanelNeverCollapses(page);
         await expectNoDedicatedStatusBanner(page);
         await expect(page.locator('[data-meeting-column="type"] [data-meeting-end-control]')).toBeVisible();
       });
@@ -218,6 +238,7 @@ test.describe('desktop active meeting three-column viewport contract', () => {
         await page.goto(`${BASE}/meetings/phone-recording/active`);
         await expectViewportWorkspace(page, 'Phone meeting controls');
         await expectWaitingCoachingSections(page);
+        await expectCoachingPanelNeverCollapses(page);
         await expectNoDedicatedStatusBanner(page);
         await expect(page.getByText('Recording (Twilio)')).toBeVisible();
         await expect(page.getByText('Hang up your phone to end this meeting.')).toBeVisible();
@@ -226,6 +247,7 @@ test.describe('desktop active meeting three-column viewport contract', () => {
         await page.goto(`${BASE}/recordings/analyze`);
         await expectViewportWorkspace(page, 'Playback and analysis controls');
         await expectWaitingCoachingSections(page);
+        await expectCoachingPanelNeverCollapses(page);
         await expect(page.getByText('🔴 RECORDING — keep screen on')).toHaveCount(0);
         await expect(page.getByText('📱 LIVE — synced from mobile device')).toHaveCount(0);
         await expect(page.getByRole('heading', { name: 'Choose a recording' })).toBeVisible();

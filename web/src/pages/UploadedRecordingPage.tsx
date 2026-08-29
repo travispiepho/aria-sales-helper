@@ -342,8 +342,8 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
       <AppHeader title="Analyze a Recording" subtitle="Local playback with live ARIA coaching" backTo="/" />
       <main data-active-meeting-layout="three-column" className="uploaded-active-meeting-workspace">
         <section data-meeting-column="feedback" aria-label="ARIA Feedback" className="uploaded-feedback-column">
-          <div data-aria-feedback-panel className="w-full">
-            <CoachingPanel coaching={coaching} defaultCollapsed={false} />
+          <div data-aria-feedback-panel className="w-full h-full flex flex-col">
+            <CoachingPanel coaching={coaching} />
           </div>
         </section>
         <section data-meeting-column="transcript" aria-label="Speaker and transcript controls" className="uploaded-right-column">

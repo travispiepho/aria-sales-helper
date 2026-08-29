@@ -49,9 +49,12 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <AuthProvider>
-      <ThemedRoot />
-    </AuthProvider>
+    <>
+      <StatusBar style="dark" />
+      <AuthProvider>
+        <ThemedRoot />
+      </AuthProvider>
+    </>
   );
 }
 
@@ -87,7 +90,6 @@ function ThemedRoot() {
           <Stack.Screen name="login" />
         </Stack.Protected>
       </Stack>
-      <StatusBar style="auto" />
     </ThemeProvider>
   );
 }

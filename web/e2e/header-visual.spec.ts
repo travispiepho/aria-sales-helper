@@ -45,6 +45,18 @@ async function mockAuthenticatedApi(page: import('@playwright/test').Page) {
 
 test.beforeEach(async ({ page }) => mockAuthenticatedApi(page));
 
+async function waitForAuthenticatedHeader(page: import('@playwright/test').Page, title?: string) {
+  await expect.poll(async () => {
+    const header = page.locator('[data-app-header="compact"]');
+    return {
+      header: await header.count(),
+      navigation: await header.getByRole('navigation', { name: 'Authenticated navigation' }).count(),
+      title: title ? await header.getByRole('heading', { name: title, exact: true }).count() : 1,
+      objectionsIcon: await header.locator('svg[data-nav-icon="objections"]').count(),
+    };
+  }).toEqual({ header: 1, navigation: 1, title: 1, objectionsIcon: 1 });
+}
+
 const authenticatedRoutes = [
   '/',
   '/meetings',
@@ -69,14 +81,37 @@ test('authenticated route canvases use gray-200 with white content panels', asyn
   }
 });
 
+for (const [route, title] of [
+  ['/settings', 'Settings'],
+  ['/objections', 'Objections'],
+  ['/meetings', 'Meetings'],
+  ['/', 'ARIA'],
+] as const) {
+  test(`${route} retains the current-page title without a separate ARIA brand link`, async ({ page }) => {
+    await page.goto(`http://127.0.0.1:5173${route}`);
+    await waitForAuthenticatedHeader(page, title);
+    const header = page.locator('[data-app-header="compact"]');
+    await expect(header.getByRole('heading', { name: title, exact: true })).toBeVisible();
+    await expect(header.locator('h1')).toHaveCount(1);
+    await expect(header.getByRole('link', { name: 'Home' })).toHaveCount(0);
+    const objections = header.getByRole('link', { name: 'Objections' });
+    await expect(objections.locator('svg[data-nav-icon="objections"]')).toBeVisible();
+    await expect(objections).not.toContainText('💬');
+  });
+}
+
 test('desktop shared compact header evidence', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('http://127.0.0.1:5173/settings');
   const header = page.locator('[data-app-header="compact"]');
   await expect(header).toBeVisible();
   await expect(header).toHaveAttribute('data-compact-min-height', '104px');
-  await expect(page.getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/');
+  await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Home' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
+  const objections = page.getByRole('link', { name: 'Objections' });
+  await expect(objections.locator('svg[data-nav-icon="objections"]')).toBeVisible();
+  await expect(objections).not.toContainText('💬');
   await page.screenshot({ path: 'test-results/shared-header-desktop-settings.png', fullPage: true });
 });
 
@@ -85,9 +120,11 @@ test('narrow header wraps without hiding navigation', async ({ page }) => {
   await page.goto('http://127.0.0.1:5173/schedule/call');
   const header = page.locator('[data-app-header="compact"]');
   await expect(header).toBeVisible();
-  for (const name of ['Home', 'Meet', 'Recorded', 'Objections', 'Settings', 'Profile']) {
+  for (const name of ['Meet', 'Recorded', 'Objections', 'Settings', 'Profile']) {
     await expect(page.getByRole('link', { name })).toBeVisible();
   }
+  await expect(page.getByRole('heading', { name: 'Schedule a Call' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Home' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Back to Schedule' })).toHaveCount(0);
   const boxes = await Promise.all([
     page.getByRole('link', { name: 'Meet' }).boundingBox(),
@@ -111,7 +148,8 @@ test('Meet and Recorded preserve homepage and history routing and current state'
   await expect(page.getByRole('link', { name: 'Recorded' })).toHaveAttribute('aria-current', 'page');
   await page.getByRole('link', { name: 'Meet' }).click();
   await expect(page).toHaveURL('http://127.0.0.1:5173/');
-  await expect(page.getByRole('link', { name: 'Home' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('heading', { name: 'ARIA' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Home' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Meet' })).toHaveAttribute('href', '/');
   await expect(page.getByRole('link', { name: 'Meet' })).toHaveAttribute('aria-current', 'page');
 
@@ -128,14 +166,16 @@ test.describe('Home, Objections, and Meetings flow layout', () => {
     { name: 'phone', width: 320, height: 760 },
     { name: 'desktop', width: 1280, height: 800 },
   ]) {
-    test(`${viewport.name}: navigation finishes before each page's first content`, async ({ page }) => {
-      await page.setViewportSize({ width: viewport.width, height: viewport.height });
-      for (const route of ['/', '/objections', '/meetings']) {
+    for (const route of ['/', '/objections', '/meetings']) {
+      test(`${viewport.name} ${route}: navigation finishes before the page's first content`, async ({ page }) => {
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await page.goto(`http://127.0.0.1:5173${route}`);
+        await waitForAuthenticatedHeader(page);
         const header = page.locator('[data-app-header="compact"]');
         const navigation = page.getByRole('navigation', { name: 'Authenticated navigation' });
         const content = page.locator('[data-page-content]');
         await expect(content).toBeVisible();
+        await expect(navigation).toBeVisible();
         const firstContent = content.locator(':scope > *').first();
 
         await expect(header).toHaveCSS('position', 'static');
@@ -152,8 +192,8 @@ test.describe('Home, Objections, and Meetings flow layout', () => {
         expect(headerBox && contentBox && headerBox.y + headerBox.height <= contentBox.y).toBeTruthy();
         expect(navigationBox && contentBox && navigationBox.y + navigationBox.height <= contentBox.y).toBeTruthy();
         expect(contentBox && firstBox && contentBox.y <= firstBox.y).toBeTruthy();
-      }
-    });
+      });
+    }
   }
 });
 

@@ -26,7 +26,7 @@ function renderHeader(path = '/', props: Partial<React.ComponentProps<typeof App
 afterEach(() => cleanup());
 
 describe('AppHeader', () => {
-  it('renders the compact shared marker, greeting, and complete authenticated navigation', () => {
+  it('renders the current page title as the sole left label and complete authenticated navigation', () => {
     const { container } = renderHeader();
     const header = container.querySelector('[data-app-header="compact"]');
 
@@ -35,8 +35,9 @@ describe('AppHeader', () => {
     expect(header?.className).not.toMatch(/\b(?:absolute|fixed|sticky)\b/);
     expect(screen.getByRole('heading', { name: 'ARIA' })).toBeTruthy();
     expect(screen.getByText('Hey Gabe 👋')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Home' }).textContent).toBe('ARIA');
-    expect(screen.getByRole('link', { name: 'Home' }).getAttribute('href')).toBe('/');
+    expect(screen.queryByRole('link', { name: 'Home' })).toBeNull();
+    expect(header?.querySelectorAll('h1')).toHaveLength(1);
+    expect(header?.querySelector('h1')?.textContent).toBe('ARIA');
     const navigation = screen.getByRole('navigation', { name: 'Authenticated navigation' });
     expect(navigation).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Meet' }).getAttribute('href')).toBe('/');
@@ -45,13 +46,14 @@ describe('AppHeader', () => {
     expect(Array.from(navigation.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
       'Meet', 'Recorded', 'Objections', 'Settings', 'Profile',
     ]);
-    expect(screen.getByRole('link', { name: 'Objections' })).toBeTruthy();
+    const objections = screen.getByRole('link', { name: 'Objections' });
+    expect(objections.querySelector('svg[data-nav-icon="objections"]')).toBeTruthy();
+    expect(objections.textContent).not.toContain('💬');
     expect(screen.getByRole('link', { name: 'Profile' }).textContent).toBe('G');
   });
 
   it('routes all shared controls and marks the current route accessibly', async () => {
     const { unmount } = renderHeader('/meetings/detail-1');
-    expect(screen.getByRole('link', { name: 'Home' }).getAttribute('aria-current')).toBeNull();
     expect(screen.getByRole('link', { name: 'Meet' }).getAttribute('aria-current')).toBeNull();
     expect(screen.getByRole('link', { name: 'Recorded' }).getAttribute('aria-current')).toBe('page');
     await userEvent.click(screen.getByRole('link', { name: 'Settings' }));
@@ -65,11 +67,12 @@ describe('AppHeader', () => {
     expect(screen.getByRole('link', { name: 'Profile' }).getAttribute('aria-current')).toBe('page');
   });
 
-  it('treats Home and Meet as interchangeable current-page links on the homepage', async () => {
+  it('uses Meet as the homepage link and retains the current page title as the left heading', async () => {
     renderHeader('/meetings');
-    await userEvent.click(screen.getByRole('link', { name: 'Home' }));
+    expect(screen.getByRole('heading', { name: 'ARIA' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Home' })).toBeNull();
+    await userEvent.click(screen.getByRole('link', { name: 'Meet' }));
     expect(screen.getByLabelText('current path').textContent).toBe('/');
-    expect(screen.getByRole('link', { name: 'Home' }).getAttribute('aria-current')).toBe('page');
     expect(screen.getByRole('link', { name: 'Meet' }).getAttribute('aria-current')).toBe('page');
 
     await userEvent.click(screen.getByRole('link', { name: 'Recorded' }));
@@ -85,7 +88,6 @@ describe('AppHeader', () => {
     });
     const nav = screen.getByRole('navigation', { name: 'Authenticated navigation' });
     const controls = [
-      screen.getByRole('link', { name: 'Home' }),
       screen.getByRole('link', { name: 'Meet' }),
       screen.getByRole('link', { name: 'Recorded' }),
       screen.getByRole('link', { name: 'Settings' }),

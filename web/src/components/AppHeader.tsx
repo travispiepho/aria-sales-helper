@@ -47,16 +47,8 @@ export default function AppHeader({
 
   const primary = (
     <div className="flex min-w-0 flex-1 items-center gap-2 max-[480px]:w-full max-[480px]:flex-none">
-      <Link
-        to="/"
-        aria-label="Home"
-        aria-current={current('/') ? 'page' : undefined}
-        className="h-11 min-w-11 px-1 rounded-lg flex flex-shrink-0 items-center justify-center text-white hover:bg-white/10 text-lg font-bold leading-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
-      >
-        ARIA
-      </Link>
       <div className="min-w-0 flex-1">
-        <h1 className={title === 'ARIA' ? 'sr-only' : 'text-xl sm:text-2xl font-bold leading-tight truncate'}>{title}</h1>
+        <h1 className="text-xl sm:text-2xl font-bold leading-tight truncate">{title}</h1>
         {subtitle && <div className="text-white/75 text-sm leading-snug truncate">{subtitle}</div>}
       </div>
       {status && <div className="flex-shrink-0">{status}</div>}
@@ -102,7 +94,21 @@ export default function AppHeader({
             aria-current={current('/objections') ? 'page' : undefined}
             className={`${navItemClass} ${current('/objections') ? 'ring-2 ring-white' : ''}`}
           >
-            <span className="text-lg leading-none" aria-hidden="true">💬</span>
+            <svg
+              data-nav-icon="objections"
+              aria-hidden="true"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="w-5 h-5"
+            >
+              <path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.6V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4z" />
+              <path d="M8 8h8M8 12h5" />
+            </svg>
           </Link>
           <Link
             to="/settings"

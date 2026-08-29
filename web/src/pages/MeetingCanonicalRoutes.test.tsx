@@ -150,7 +150,7 @@ describe('canonical meeting routes', () => {
     ['owner in-person', { ...fixture('active', 'in_person'), is_owner_session: true }],
     ['owner phone', { ...fixture('active', 'phone'), is_owner_session: true, recording_status: 'in-progress' }],
     ['observer mobile sync', { ...fixture('active', 'in_person'), is_owner_session: false, origin_client: 'mobile' }],
-  ] as const)('keeps %s status in the compact header without a dedicated top banner', async (_name, meeting) => {
+  ] as const)('keeps %s status at the top of the left column, not a page-top app-header banner', async (_name, meeting) => {
     mocks.getMeeting.mockResolvedValue(meeting);
     call.meetingId = 'other-browser-call';
     render(<MemoryRouter initialEntries={[`/meetings/${meeting.id}/active`]}><Routes>
@@ -158,9 +158,14 @@ describe('canonical meeting routes', () => {
     </Routes></MemoryRouter>);
 
     await screen.findByRole('heading', { name: 'Live Transcript' });
-    const status = document.querySelector('[data-meeting-status-location="app-header"]');
+    // 2026-08-29 (aria_active_meeting_banner_info_left_panel): AppHeader is
+    // not mounted at all during an active meeting — the status now lives
+    // at the top of the left/"type" column instead.
+    expect(document.querySelector('[data-app-header="compact"]')).toBeNull();
+    const status = document.querySelector('[data-meeting-status-location="left-column"]');
     expect(status).toBeTruthy();
-    expect(status!.closest('[data-app-header="compact"]')).toBeTruthy();
+    const typeColumn = document.querySelector('[data-meeting-column="type"]');
+    expect(typeColumn!.contains(status)).toBe(true);
     expect(screen.queryByText('🔴 RECORDING — keep screen on')).toBeNull();
     expect(screen.queryByText('📱 LIVE — synced from mobile device')).toBeNull();
     if (meeting.is_owner_session === false) {

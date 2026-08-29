@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { inRecordingPath, postRecordingPath } from '../lib/meetingRoutes';
-import AppHeader from '../components/AppHeader';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 import { EndMeetingButton, EndMeetingConfirmModal } from '../components/EndMeetingButton';
 import {
@@ -339,7 +338,14 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
 
   return (
     <div className="active-meeting-page bg-gray-200 flex flex-col">
-      <AppHeader title="Analyze a Recording" subtitle="Local playback with live ARIA coaching" backTo="/" />
+      {/* 2026-08-29 (aria_active_meeting_banner_info_left_panel): this page
+          is ALWAYS the active/three-column layout (there is no non-active
+          render branch here — completion navigates away to the post-
+          recording route, which is MeetingPage's own AppHeader-bearing
+          view), so AppHeader is never mounted at all now; no top-of-page
+          banner strip is rendered here. The equivalent title now renders
+          at the very top of the left/"type" column below instead — see
+          data-meeting-status-location="left-column". */}
       <main data-active-meeting-layout="three-column" className="uploaded-active-meeting-workspace">
         <section data-meeting-column="feedback" aria-label="ARIA Feedback" className="uploaded-feedback-column">
           <div data-aria-feedback-panel className="w-full h-full flex flex-col">
@@ -392,6 +398,26 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
         </section>
 
         <section data-meeting-column="type" aria-label="Playback and analysis controls" className="uploaded-type-column bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
+          {/* 2026-08-29 (aria_active_meeting_banner_info_left_panel): the
+              title/status truth that used to live in the page-top AppHeader
+              banner (now not rendered at all on this page — see above) now
+              renders here instead, at the very top of this left/"type"
+              column, above the existing upload/playback content and above
+              the bottom-anchored End Meeting control. This page has no
+              recording/synced/completed branch of its own (that lives on
+              MeetingPage.tsx after this page navigates away on completion),
+              so the status line is always "Active" while mounted, with no
+              connection badge (there is no live audio-pipeline WebSocket
+              connection state comparable to MeetingPage.tsx's owner/observer
+              sockets for this local-file-playback flow). */}
+          <div
+            data-meeting-status-location="left-column"
+            className="flex-none rounded-2xl px-4 py-3 bg-green-700 text-white"
+          >
+            <p className="text-lg font-bold leading-tight truncate">Analyze a Recording</p>
+            <p className="text-white/80 text-sm leading-snug truncate">Active · local playback with live ARIA coaching</p>
+          </div>
+
           <div role="group" aria-labelledby="recording-selection-heading" className="space-y-4">
             <div>
               <h1 id="recording-selection-heading" className="font-semibold text-gray-900">Choose a recording</h1>

@@ -53,7 +53,11 @@ async function expectViewportWorkspace(page: Page, expectedTypeLabel: string) {
   expect(layout.bodyHeight).toBe(layout.bodyViewportHeight);
   expect(layout.feedbackWidth).toBe(736);
   expect(layout.feedbackX).toBe(layout.viewportCenter - 368);
-  expect(layout.feedbackY).toBe(120);
+  // 2026-08-29 (aria_active_meeting_banner_info_left_panel): was 120
+  // (104px AppHeader + 16px workspace padding) before AppHeader stopped
+  // rendering during active meetings; now it's just the workspace's own
+  // 16px padding, since nothing occupies the top-of-page strip anymore.
+  expect(layout.feedbackY).toBe(16);
   expect(layout.feedbackCenter).toBe(layout.viewportCenter);
   expect(layout.transcriptOverflowY).toBe('auto');
   if (layout.checklistCount > 0) {
@@ -95,7 +99,11 @@ async function expectCoachingPanelNeverCollapses(page: Page) {
 async function expectNoDedicatedStatusBanner(page: Page) {
   await expect(page.getByText('🔴 RECORDING — keep screen on')).toHaveCount(0);
   await expect(page.getByText('📱 LIVE — synced from mobile device')).toHaveCount(0);
-  await expect(page.locator('[data-meeting-status-location="app-header"]')).toBeVisible();
+  // 2026-08-29 (aria_active_meeting_banner_info_left_panel): no page-top
+  // AppHeader banner exists at all during an active meeting; the status
+  // now lives at the top of the left/"type" column instead.
+  await expect(page.locator('[data-app-header="compact"]')).toHaveCount(0);
+  await expect(page.locator('[data-meeting-status-location="left-column"]')).toBeVisible();
 }
 
 test('phone call, recording in progress: shows Recording (Twilio) indicator, Hang Up button, sane timer, and NOT the record-to-see-transcript empty state', async ({ page }) => {
@@ -264,7 +272,7 @@ test.describe('observer synced meeting status', () => {
     await page.goto(`${BASE}/meetings/mobile-sync/active`);
     await expectViewportWorkspace(page, 'In-person meeting controls');
     await expectNoDedicatedStatusBanner(page);
-    await expect(page.locator('[data-meeting-status-location="app-header"]')).toContainText('Synced from mobile');
+    await expect(page.locator('[data-meeting-status-location="left-column"]')).toContainText('Synced from mobile');
     await expect(page.getByText('Live from phone')).toBeVisible();
     await expect(page.getByText('Synced from mobile', { exact: true })).toBeVisible();
   });
@@ -301,10 +309,14 @@ test.describe('owner microphone recording status', () => {
     await page.getByRole('button', { name: /Record/ }).click();
     await page.getByRole('button', { name: /Confirm/ }).click();
 
-    await expect(page.locator('[data-meeting-status-location="app-header"]')).toContainText(/^Recording · /);
+    await expect(page.locator('[data-meeting-status-location="left-column"]')).toContainText(/^Recording · /);
     await expect(page.getByText('Microphone recording live')).toBeVisible();
     await expect(page.getByText('🔴 RECORDING — keep screen on')).toHaveCount(0);
+    // 2026-08-29 (aria_active_meeting_banner_info_left_panel): AppHeader is
+    // no longer mounted during an active meeting, so the three-column
+    // workspace now starts at the very top of the page (y=0), not below a
+    // 104px header strip.
     const workspaceY = await page.locator('[data-active-meeting-layout="three-column"]').evaluate(element => element.getBoundingClientRect().y);
-    expect(workspaceY).toBe(104);
+    expect(workspaceY).toBe(0);
   });
 });

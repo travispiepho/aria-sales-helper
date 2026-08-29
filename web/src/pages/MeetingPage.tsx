@@ -1487,28 +1487,31 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
         />
       )}
 
-      <AppHeader
-        title={meeting.title || meeting.customer_name || 'Meeting'}
-        subtitle={(
-          // Recording/mobile-sync truth remains in the existing compact
-          // header subtitle (and in the type column below), rather than
-          // consuming a dedicated banner row above the active workspace.
-          <span data-meeting-status-location="app-header">
-            {isRecording
-              ? `Recording · ${formatElapsed(elapsedSec)}`
-              : isSyncedFromMobile
-                ? `Synced from mobile · ${formatDuration(meeting.started_at)}`
-                : isActive
-                  ? `Active · ${formatDuration(meeting.started_at)}`
-                  : `Completed · ${formatDuration(meeting.started_at, meeting.ended_at ?? undefined)}`}
-          </span>
-        )}
-        backTo="/"
-        toneClassName={isRecording ? 'bg-red-700' : isSyncedFromMobile ? 'bg-indigo-700' : isActive ? 'bg-green-700' : 'bg-blue-700'}
-        status={isActive ? (
-          <ConnectionBadge status={connectionStatus} isRecording={isRecording || isSyncedFromMobile} />
-        ) : undefined}
-      />
+      {/* 2026-08-29 (aria_active_meeting_banner_info_left_panel): during an
+          active/three-column meeting, this same title/status/tone/badge
+          truth now renders inline at the top of the left column instead
+          (see the `data-meeting-status-location="left-column"` block
+          below) — AppHeader is not mounted at all while isActive, so
+          nothing occupies the navbar's usual top-of-page strip. AppHeader
+          keeps its full pre-existing render (title/subtitle/tone/badge,
+          byte-for-byte unchanged) for the post-meeting/completed view and
+          every non-meeting page, which are explicitly out of scope for
+          this relocation. */}
+      {!isActive && (
+        <AppHeader
+          title={meeting.title || meeting.customer_name || 'Meeting'}
+          subtitle={(
+            // Reached only for a completed/historical meeting — isRecording
+            // and isSyncedFromMobile can never be true once meeting.status
+            // has left 'active', so this is always the Completed line.
+            <span data-meeting-status-location="app-header">
+              {`Completed · ${formatDuration(meeting.started_at, meeting.ended_at ?? undefined)}`}
+            </span>
+          )}
+          backTo="/"
+          toneClassName="bg-blue-700"
+        />
+      )}
 
       {/* Active meetings use a viewport-bounded three-column workspace on
           laptop/desktop. The 46rem center track preserves the pre-existing
@@ -1527,6 +1530,40 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
               aria-label={isTwilioPhoneCall ? 'Phone meeting controls' : 'In-person meeting controls'}
               className="active-meeting-column active-meeting-type-column"
             >
+              {/* 2026-08-29 (aria_active_meeting_banner_info_left_panel):
+                  the meeting title/status/tone/connection-badge truth that
+                  used to live in the page-top AppHeader banner (now not
+                  rendered at all while isActive — see above) now renders
+                  here instead, at the very top of the left column, above
+                  this meeting type's own content and the bottom-anchored
+                  End Meeting control. Same underlying state signals, same
+                  formatElapsed/formatDuration truth, same tone colors
+                  (red=recording, indigo=synced-from-mobile,
+                  green=active-not-yet-recording) and the same
+                  ConnectionBadge component — just restyled to fit a
+                  compact column-top block instead of a full-width banner. */}
+              <div
+                className={`flex-none rounded-2xl px-4 py-3 text-white flex items-center gap-3 ${
+                  isRecording ? 'bg-red-700' : isSyncedFromMobile ? 'bg-indigo-700' : 'bg-green-700'
+                }`}
+              >
+                <div className="min-w-0 flex-1">
+                  <h1 className="text-lg font-bold leading-tight truncate">
+                    {meeting.title || meeting.customer_name || 'Meeting'}
+                  </h1>
+                  <p data-meeting-status-location="left-column" className="text-white/80 text-sm leading-snug truncate">
+                    {isRecording
+                      ? `Recording · ${formatElapsed(elapsedSec)}`
+                      : isSyncedFromMobile
+                        ? `Synced from mobile · ${formatDuration(meeting.started_at)}`
+                        : `Active · ${formatDuration(meeting.started_at)}`}
+                  </p>
+                </div>
+                <div className="flex-shrink-0">
+                  <ConnectionBadge status={connectionStatus} isRecording={isRecording || isSyncedFromMobile} />
+                </div>
+              </div>
+
               <div className="active-meeting-column-scroll">
                 {meetingId && <BrowserCallControls meetingId={meetingId} />}
 

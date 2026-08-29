@@ -44,11 +44,28 @@ function fixture(status: 'active' | 'completed', channel: 'in_person' | 'phone' 
   return { id: channel === 'phone' ? 'phone-1' : 'meeting-1', rep_id: 'rep-1', started_at: new Date().toISOString(), status, channel, call_sid: channel === 'phone' ? 'CA123' : null };
 }
 
+function expectThreeColumnActiveMeeting(typeLabel: string) {
+  const workspace = document.querySelector('[data-active-meeting-layout="three-column"]');
+  expect(workspace).toBeTruthy();
+  const columns = Array.from(workspace!.querySelectorAll(':scope > [data-meeting-column]'));
+  expect(columns.map(column => column.getAttribute('data-meeting-column'))).toEqual([
+    'type',
+    'feedback',
+    'transcript',
+  ]);
+  expect(screen.getByRole('region', { name: typeLabel })).toBeTruthy();
+  const right = screen.getByRole('region', { name: 'Speaker and transcript controls' });
+  const rename = right.querySelector('[data-speaker-controls]')!;
+  const transcript = right.querySelector('[data-live-transcript]')!;
+  expect(rename.compareDocumentPosition(transcript) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.getSegments.mockResolvedValue({ segments: [] });
   mocks.getLatestCoaching.mockResolvedValue({ coaching: null });
   call.state = 'ended';
+  call.meetingId = 'phone-1';
   call.waitForTerminal.mockResolvedValue('phone-1');
 });
 afterEach(cleanup);
@@ -94,6 +111,29 @@ describe('canonical meeting routes', () => {
       <Route path="*" element={<Probe />} />
     </Routes></MemoryRouter>);
     await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe(destination));
+  });
+
+  it.each([
+    ['in-person', 'In-person meeting controls', 'meeting-1', 'in_person'],
+    ['phone', 'Phone meeting controls', 'phone-1', 'phone'],
+  ] as const)('renders the %s active meeting in the exact three-column structure', async (_name, label, id, channel) => {
+    mocks.getMeeting.mockResolvedValue(fixture('active', channel));
+    call.meetingId = 'other-browser-call';
+    render(<MemoryRouter initialEntries={[`/meetings/${id}/active`]}><Routes>
+      <Route path="/meetings/:id/active" element={<MeetingPage meetingId={id} pageMode="active" />} />
+    </Routes></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Live Transcript' });
+    expectThreeColumnActiveMeeting(label);
+    const typeColumn = screen.getByRole('region', { name: label });
+    if (channel === 'phone') {
+      const browserControls = typeColumn.querySelector('[data-browser-call-controls]');
+      browserControls?.remove();
+      expect(typeColumn.textContent).toMatch(/Hang up your phone to end this meeting/i);
+      expect(typeColumn.querySelector('button[data-meeting-end-control]')).toBeNull();
+    } else {
+      expect(typeColumn.querySelector('[data-meeting-end-control] button')).toBeTruthy();
+      expect(typeColumn.textContent).toMatch(/Ready to record/i);
+    }
   });
 
   it('moves End Meeting to post only after the terminal PATCH response', async () => {

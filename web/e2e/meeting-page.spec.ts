@@ -6,11 +6,41 @@
 // Run: MOCK_PORT=4100 node e2e/mock-server.mjs &
 //      VITE_API_URL=http://localhost:4100 npm run build && npx serve -l 4200 dist &
 //      npx playwright test e2e/meeting-page.spec.ts
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 test.use({ viewport: { width: 390, height: 844 } });
 
 const BASE = process.env.WEB_BASE_URL || 'http://localhost:4200';
+
+async function expectViewportWorkspace(page: Page, expectedTypeLabel: string) {
+  const workspace = page.locator('[data-active-meeting-layout="three-column"]');
+  await expect(workspace).toBeVisible();
+  await expect(workspace.locator(':scope > [data-meeting-column]')).toHaveCount(3);
+  await expect(page.getByRole('region', { name: expectedTypeLabel })).toBeVisible();
+  const renameBox = await workspace.locator('[data-speaker-controls]').boundingBox();
+  const transcriptBox = await workspace.locator('[data-live-transcript]').boundingBox();
+  expect(renameBox && transcriptBox && renameBox.y + renameBox.height <= transcriptBox.y).toBeTruthy();
+  const layout = await page.evaluate(() => {
+    const feedback = document.querySelector('[data-aria-feedback-panel]')!.getBoundingClientRect();
+    const transcript = document.querySelector('[aria-label="Live Transcript content"], [aria-label="Live transcript"]')!;
+    return {
+      documentHeight: document.documentElement.scrollHeight,
+      viewportHeight: document.documentElement.clientHeight,
+      bodyHeight: document.body.scrollHeight,
+      bodyViewportHeight: document.body.clientHeight,
+      feedbackWidth: feedback.width,
+      feedbackCenter: feedback.x + feedback.width / 2,
+      viewportCenter: window.innerWidth / 2,
+      transcriptOverflowY: getComputedStyle(transcript).overflowY,
+    };
+  });
+  expect(layout.documentHeight).toBe(layout.viewportHeight);
+  expect(layout.bodyHeight).toBe(layout.bodyViewportHeight);
+  expect(layout.feedbackWidth).toBe(736);
+  expect(layout.feedbackCenter).toBe(layout.viewportCenter);
+  expect(layout.transcriptOverflowY).toBe('auto');
+  await expect(page.getByRole('navigation', { name: 'Authenticated navigation' })).toHaveCount(0);
+}
 
 test('phone call, recording in progress: shows Recording (Twilio) indicator, Hang Up button, sane timer, and NOT the record-to-see-transcript empty state', async ({ page }) => {
   await page.goto(`${BASE}/meetings/phone-recording`);
@@ -128,4 +158,34 @@ test('phone call: >2s lapse notice, recovery notice, and terminal stopped notice
   });
   expect((await stopRes.json()).sent).toBeGreaterThan(0);
   await expect(page.getByText(/Live transcription has stopped for this meeting\. The recording is still being captured/)).toBeVisible();
+});
+
+
+test.describe('desktop active meeting three-column viewport contract', () => {
+  for (const viewport of [
+    { width: 1280, height: 720 },
+    { width: 1366, height: 768 },
+    { width: 1440, height: 900 },
+    { width: 1920, height: 1080 },
+  ]) {
+    test.describe(`${viewport.width}x${viewport.height}`, () => {
+      test.use({ viewport });
+      test('in-person fits without document overflow', async ({ page }) => {
+        await page.goto(`${BASE}/meetings/in-person/active`);
+        await expectViewportWorkspace(page, 'In-person meeting controls');
+        await expect(page.locator('[data-meeting-column="type"] [data-meeting-end-control]')).toBeVisible();
+      });
+      test('phone fits without document overflow and keeps hang-up guidance', async ({ page }) => {
+        await page.goto(`${BASE}/meetings/phone-recording/active`);
+        await expectViewportWorkspace(page, 'Phone meeting controls');
+        await expect(page.getByText('Hang up your phone to end this meeting.')).toBeVisible();
+      });
+      test('uploaded recording fits without document overflow', async ({ page }) => {
+        await page.goto(`${BASE}/recordings/analyze`);
+        await expectViewportWorkspace(page, 'Playback and analysis controls');
+        await expect(page.getByRole('heading', { name: 'Choose a recording' })).toBeVisible();
+        await expect(page.getByRole('heading', { name: 'Playback & analysis controls' })).toBeVisible();
+      });
+    });
+  }
 });

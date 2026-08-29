@@ -1464,7 +1464,7 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
   const isThisBrowserCall = !!meetingId && browserCall.meetingId === meetingId;
 
   return (
-    <div className="min-h-screen bg-gray-200 flex flex-col">
+    <div className={isActive ? 'active-meeting-page bg-gray-200 flex flex-col' : 'min-h-screen bg-gray-200 flex flex-col'}>
       {/* Recording banner — owner-only; an observer session never captures
           audio on this device, so "keep screen on" would be misleading
           (this page's wake lock is only ever acquired by startRecording(),
@@ -1523,223 +1523,255 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
         ) : undefined}
       />
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 pb-32">
-        {meetingId && <BrowserCallControls meetingId={meetingId} />}
-
-        {/* ── Active meeting: Record controls ── */}
+      {/* Active meetings use a viewport-bounded three-column workspace on
+          laptop/desktop. The 46rem center track preserves the pre-existing
+          uploaded-recording ARIA panel's 736px rendered width and exact
+          viewport-centered x position (max-w-3xl minus its 16px gutters).
+          Component styling is intentionally untouched, so its intrinsic
+          height and internal dimensions remain unchanged too. */}
+      <main
+        data-active-meeting-layout={isActive ? 'three-column' : undefined}
+        className={isActive ? 'active-meeting-workspace' : 'flex-1 overflow-y-auto px-4 py-4 space-y-4 pb-32'}
+      >
         {isActive && (
           <>
-            {/* Big Record button.
-                2026-08-05: while recording this used to be a live "Stop"
-                button that called stopRecording() directly — stopping only
-                the audio capture without finalizing the meeting record.
-                That was the separate "End Recording" action Gabe flagged as
-                confusing (memory/2026-08-04.md 23:47 CDT note): a rep could
-                stop the mic here and the meeting would just sit "active"
-                forever with no obvious next step. Consolidated: the ONLY way
-                to stop recording now is the bottom "End Meeting" button,
-                which stops the mic AND finalizes the meeting in one action
-                (see handleEndMeeting()). While recording, this circle is now
-                a non-interactive live-status indicator only (no onClick) —
-                same pulsing visual, but it can no longer diverge from the
-                meeting's actual lifecycle. */}
-            <div className="flex flex-col items-center py-6">
-              {isTwilioPhoneCall ? (
-                // 2026-08-17 (ARIA meeting UI by type, Part 1) — phone-call
-                // meeting: this is now a LIVE INDICATOR of real server-side
-                // Twilio recording state (phoneRecordingStatus, seeded from
-                // meeting.recording_status and kept live by the
-                // 'recording_state' WS push — see applyLiveMessage()), NOT a
-                // client-controlled record button. It is NON-INTERACTIVE (no
-                // onClick) per Gabe's explicit answer that tapping should not
-                // stop recording — the only recorder for a phone call is
-                // Twilio's dual-channel <Dial record>
-                // (record-from-answer-dual, commit cbfce4b), and there is no
-                // client-initiated stop-recording path for phone calls by
-                // design. It turns red/pulsing automatically the instant
-                // Twilio's recordingStatusCallback reports 'in-progress'
-                // (i.e. the customer answered) — no rep tap required, no
-                // optimistic timer.
-                <div
-                  aria-live="polite"
-                  className={`w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg flex items-center justify-center ${
-                    phoneRecordingStatus === 'in-progress'
-                      ? 'bg-red-600 ring-4 ring-red-300 animate-pulse'
-                      : 'bg-gray-400 ring-4 ring-gray-200'
-                  }`}
-                >
-                  <span className="flex flex-col items-center gap-1">
-                    <span className="text-3xl">{phoneRecordingStatus === 'in-progress' ? '🔴' : '📞'}</span>
-                    <span className="text-sm">
-                      {phoneRecordingStatus === 'in-progress' ? 'Recording (Twilio)' : 'Waiting to record…'}
-                    </span>
-                  </span>
-                </div>
-              ) : isSyncedFromMobile ? (
-                // 2026-08-05 (live meeting sync full-page rebuild): observer
-                // session — there is nothing to tap here. No Record button
-                // (this device has no mic role in this meeting at all), and
-                // deliberately NOT the same red "Recording" indicator the
-                // owner sees while recording — a phone icon instead, so a
-                // rep glancing at this screen can't mistake it for "my own
-                // mic is live on this browser" (see this task's report,
-                // open question 7, for why this distinguishing element is
-                // kept despite the "almost identical" requirement).
-                <div
-                  aria-live="polite"
-                  className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg bg-indigo-600 ring-4 ring-indigo-300 flex items-center justify-center animate-pulse"
-                >
-                  <span className="flex flex-col items-center gap-1">
-                    <span className="text-3xl">📱</span>
-                    <span className="text-sm">Live from phone</span>
-                  </span>
-                </div>
-              ) : isRecording ? (
-                <div
-                  aria-live="polite"
-                  className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg bg-red-600 ring-4 ring-red-300 flex items-center justify-center animate-pulse"
-                >
-                  <span className="flex flex-col items-center gap-1">
-                    <span className="text-3xl">🎙️</span>
-                    <span className="text-sm">Recording</span>
-                  </span>
-                </div>
-              ) : (
-                <button
-                  onClick={handleStartButton}
-                  className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg transition-all bg-green-600 hover:bg-green-700 active:scale-95"
-                >
-                  <span className="flex flex-col items-center gap-1">
-                    <span className="text-3xl">🎙️</span>
-                    <span className="text-sm">Record</span>
-                  </span>
-                </button>
-              )}
-              {isRecording && (
-                <p className="mt-3 text-2xl font-mono font-bold text-red-700">
-                  {formatElapsed(elapsedSec)}
-                </p>
-              )}
-            </div>
+            <section
+              data-meeting-column="type"
+              aria-label={isTwilioPhoneCall ? 'Phone meeting controls' : 'In-person meeting controls'}
+              className="active-meeting-column active-meeting-type-column"
+            >
+              <div className="active-meeting-column-scroll">
+                {meetingId && <BrowserCallControls meetingId={meetingId} />}
 
-            {/* ARIA Priority 1 roadmap, item 5: Live rebuttal teleprompter
-                (first-pass scaffolding — objection detection is a STUB
-                keyword matcher, rebuttal text is REAL Claude output. See
-                objectionDetection.js / coachingAnalysis.js for details.) */}
-            {suggestedRebuttal && (
-              <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 flex items-start gap-3">
-                <span className="text-2xl">💬</span>
-                <div className="flex-1">
-                  <p className="text-xs font-semibold text-indigo-500 uppercase tracking-wide mb-1">
-                    Suggested rebuttal · {suggestedRebuttal.objectionCategory}
-                  </p>
-                  <p className="text-sm text-indigo-900 font-medium">{suggestedRebuttal.rebuttal}</p>
+                <div className="flex flex-col items-center py-2">
+                  {isTwilioPhoneCall ? (
+                    <div
+                      aria-live="polite"
+                      className={`w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg flex items-center justify-center ${
+                        phoneRecordingStatus === 'in-progress'
+                          ? 'bg-red-600 ring-4 ring-red-300 animate-pulse'
+                          : 'bg-gray-400 ring-4 ring-gray-200'
+                      }`}
+                    >
+                      <span className="flex flex-col items-center gap-1 text-center">
+                        <span className="text-3xl">{phoneRecordingStatus === 'in-progress' ? '🔴' : '📞'}</span>
+                        <span className="text-sm">
+                          {phoneRecordingStatus === 'in-progress' ? 'Recording (Twilio)' : 'Waiting to record…'}
+                        </span>
+                      </span>
+                    </div>
+                  ) : isSyncedFromMobile ? (
+                    <div
+                      aria-live="polite"
+                      className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg bg-indigo-600 ring-4 ring-indigo-300 flex items-center justify-center animate-pulse"
+                    >
+                      <span className="flex flex-col items-center gap-1 text-center">
+                        <span className="text-3xl">📱</span>
+                        <span className="text-sm">Live from phone</span>
+                      </span>
+                    </div>
+                  ) : isRecording ? (
+                    <div
+                      aria-live="polite"
+                      className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg bg-red-600 ring-4 ring-red-300 flex items-center justify-center animate-pulse"
+                    >
+                      <span className="flex flex-col items-center gap-1">
+                        <span className="text-3xl">🎙️</span>
+                        <span className="text-sm">Recording</span>
+                      </span>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={handleStartButton}
+                      className="w-32 h-32 rounded-full shadow-lg text-white font-bold text-lg transition-all bg-green-600 hover:bg-green-700 active:scale-95"
+                    >
+                      <span className="flex flex-col items-center gap-1">
+                        <span className="text-3xl">🎙️</span>
+                        <span className="text-sm">Record</span>
+                      </span>
+                    </button>
+                  )}
+                  {isRecording && (
+                    <p className="mt-3 text-2xl font-mono font-bold text-red-700">
+                      {formatElapsed(elapsedSec)}
+                    </p>
+                  )}
                 </div>
-                <button
-                  onClick={() => setSuggestedRebuttal(null)}
-                  className="text-indigo-400 hover:text-indigo-600 text-sm"
-                >
-                  ✕
-                </button>
+
+                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+                  <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">
+                    {isTwilioPhoneCall ? 'Phone meeting' : 'Live recording'}
+                  </h2>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between gap-2">
+                      <span className="text-gray-500">Status</span>
+                      <span className={`font-medium text-right ${isTwilioPhoneCall && phoneRecordingStatus !== 'in-progress' ? 'text-gray-600' : 'text-green-700'}`}>
+                        {isTwilioPhoneCall
+                          ? (phoneRecordingStatus === 'in-progress' ? 'Call recording live' : 'Waiting for answer')
+                          : isSyncedFromMobile ? 'Synced from mobile' : isRecording ? 'Microphone recording live' : 'Ready to record'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-gray-500">Started</span>
+                      <span className="text-gray-700 text-right">
+                        {new Date(meeting.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                    {meeting.customer_name && (
+                      <div className="flex justify-between gap-2">
+                        <span className="text-gray-500">Customer</span>
+                        <span className="text-gray-700 text-right">{meeting.customer_name}</span>
+                      </div>
+                    )}
+                    {meeting.origin_client === 'mobile' && (
+                      <div className="flex justify-between gap-2">
+                        <span className="text-gray-500">Source</span>
+                        <span className="text-gray-700 text-right">📱 Mobile</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
-            )}
 
-            {/* Live rebuttal teleprompter, in-meeting surfacing pass
-                (2026-08-18, 2nd pass) — library-backed matches (rep-curated
-                text from the Objections tab, commit 053c81e), rendered
-                separately from the STUB `suggestedRebuttal` banner above.
-                Placed in the normal scrollable content column (not
-                position: fixed) so it never overlaps the live transcript or
-                the fixed bottom End Meeting / Hang Up bar at 390x844. */}
-            <RebuttalTeleprompter
-              prompts={Array.from(libraryRebuttalPrompts.values())}
-              onDismiss={dismissLibraryRebuttalPrompt}
-            />
+              {!isThisBrowserCall && isOwnerSession && (
+                <div data-meeting-end-control className="active-meeting-end-control">
+                  {isTwilioPhoneCall ? (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="w-full bg-gray-100 border border-gray-200 text-gray-500 font-semibold py-3 rounded-2xl text-base text-center select-none"
+                    >
+                      <span className="block">📞 Hang Up</span>
+                      <span className="block text-xs font-normal text-gray-400 mt-1">
+                        Hang up your phone to end this meeting.
+                      </span>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={handleEndMeetingButtonClick}
+                      className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-4 rounded-2xl text-lg transition-colors"
+                    >
+                      ⏹ End Meeting
+                    </button>
+                  )}
+                </div>
+              )}
+            </section>
 
-            {/* Phase 3: Coaching Panel */}
-            <CoachingPanel
-              coaching={coachingData ? {
-                ...coachingData,
-                checklist: coachingData.checklist?.map(item => ({
-                  ...item,
-                  done: item.done || lockedChecked.has(item.id),
-                })) ?? [],
-              } : null}
-              defaultCollapsed={false}
-            />
+            <section
+              data-meeting-column="feedback"
+              aria-label="ARIA Feedback"
+              className="active-meeting-feedback-column"
+            >
+              <div data-aria-feedback-panel className="w-full">
+                {suggestedRebuttal && (
+                  <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 flex items-start gap-3 mb-4">
+                    <span className="text-2xl">💬</span>
+                    <div className="flex-1">
+                      <p className="text-xs font-semibold text-indigo-500 uppercase tracking-wide mb-1">
+                        Suggested rebuttal · {suggestedRebuttal.objectionCategory}
+                      </p>
+                      <p className="text-sm text-indigo-900 font-medium">{suggestedRebuttal.rebuttal}</p>
+                    </div>
+                    <button
+                      onClick={() => setSuggestedRebuttal(null)}
+                      aria-label="Dismiss suggested rebuttal"
+                      className="text-indigo-400 hover:text-indigo-600 text-sm"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+                <RebuttalTeleprompter
+                  prompts={Array.from(libraryRebuttalPrompts.values())}
+                  onDismiss={dismissLibraryRebuttalPrompt}
+                />
+                <CoachingPanel
+                  coaching={coachingData ? {
+                    ...coachingData,
+                    checklist: coachingData.checklist?.map(item => ({
+                      ...item,
+                      done: item.done || lockedChecked.has(item.id),
+                    })) ?? [],
+                  } : null}
+                  defaultCollapsed={false}
+                />
+              </div>
+            </section>
 
-            {/* Live transcript */}
-            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">
-                Live Transcript
-              </h3>
+            <section
+              data-meeting-column="transcript"
+              aria-label="Speaker and transcript controls"
+              className="active-meeting-column active-meeting-transcript-column"
+            >
+              <div data-speaker-controls className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex-none">
+                <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">
+                  Rename Speakers
+                </h2>
+                {uniqueSpeakers.length > 0 ? (
+                  <div className="space-y-2">
+                    {uniqueSpeakers.map(sp => (
+                      <div key={sp} className="flex items-center gap-2">
+                        <span className="text-sm text-gray-500 w-20 flex-shrink-0 truncate">{sp}</span>
+                        <input
+                          aria-label={`Rename ${sp}`}
+                          type="text"
+                          placeholder={`Rename ${sp}`}
+                          value={speakerLabels[sp] || ''}
+                          onChange={e => handleSpeakerLabelChange(sp, e.target.value)}
+                          className="min-w-0 flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400">Speaker names appear here as the transcript grows.</p>
+                )}
+              </div>
 
-              {segments.length === 0 && !interimText ? (
-                <p className="text-sm text-gray-400 text-center py-4">
-                  {isSyncedFromMobile
-                    ? 'Waiting for live transcript from phone…'
-                    : isTwilioPhoneCall
-                      /* 2026-08-17 (outbound-call diagnosis fix): a Twilio
-                         phone-call meeting has no client-side "start
-                         recording" action at all (isTwilioPhoneCall's
-                         Record-button branch above is a non-interactive
-                         status indicator, not a button) — the old generic
-                         'Start recording to see live transcript' copy told
-                         Gabe to do something that literally has no control
-                         on this screen, which is exactly the confusing
-                         empty state he hit while live audio WAS flowing
-                         server-side. Now this only shows while genuinely
-                         waiting for the customer to answer; once
-                         phoneRecordingStatus flips to 'in-progress' this
-                         branch is moot anyway because segments/interimText
-                         populate from the observer-socket fix above. */
-                      ? (phoneRecordingStatus === 'in-progress' ? 'Listening…' : 'Waiting for the customer to answer…')
-                      : isRecording
-                        ? 'Listening…'
-                        : 'Start recording to see live transcript'}
-                </p>
-              ) : (
+              <div data-live-transcript className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex min-h-0 flex-1 flex-col">
+                <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3 flex-none">
+                  Live Transcript
+                </h2>
                 <div
                   ref={transcriptContainerRef}
                   onScroll={handleTranscriptScroll}
-                  className="space-y-2 max-h-64 overflow-y-auto"
+                  aria-label="Live Transcript content"
+                  aria-live="polite"
+                  className="active-transcript-scroll space-y-2"
                 >
-                  {segments.map((seg, i) => (
-                    // 2026-08-09: prefer the real DB row id (now sent by REST
-                    // /segments, WS sync_snapshot, and WS 'final' broadcasts)
-                    // for a truly stable, collision-proof key. Fall back to
-                    // the ts+speaker+text composite from a8d21ed only for the
-                    // genuine remaining edge case: a live 'final' segment
-                    // whose server-side INSERT failed (msg.id undefined).
-                    //
-                    // 2026-08-18: a lapse/recovery/terminal notice (seg.kind
-                    // set) renders as an inline system banner instead of a
-                    // speaker line — see TranscriptLapseNotice above.
-                    seg.kind ? (
-                      <TranscriptLapseNotice key={`${seg.ts ?? i}-${seg.kind}`} seg={seg} />
-                    ) : (
-                    <div key={seg.id ?? `${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
-                      <span className="font-semibold text-blue-700">
-                        {getDisplayLabel(seg.speaker)}:
-                      </span>{' '}
-                      <span className="text-gray-800">{seg.text}</span>
-                    </div>
-                    )
-                  ))}
-                  {/* Interim result */}
-                  {interimText && (
-                    <div className="text-sm">
-                      <span className="font-semibold text-gray-400">
-                        {getDisplayLabel(interimSpeaker || 'Speaker')}:
-                      </span>{' '}
-                      <span className="text-gray-400 italic">{interimText}</span>
-                    </div>
+                  {segments.length === 0 && !interimText ? (
+                    <p className="text-sm text-gray-400 text-center py-4">
+                      {isSyncedFromMobile
+                        ? 'Waiting for live transcript from phone…'
+                        : isTwilioPhoneCall
+                          ? (phoneRecordingStatus === 'in-progress' ? 'Listening…' : 'Waiting for the customer to answer…')
+                          : isRecording ? 'Listening…' : 'Start recording to see live transcript'}
+                    </p>
+                  ) : (
+                    <>
+                      {segments.map((seg, i) => (
+                        seg.kind ? (
+                          <TranscriptLapseNotice key={`${seg.ts ?? i}-${seg.kind}`} seg={seg} />
+                        ) : (
+                          <div key={seg.id ?? `${seg.ts ?? i}-${seg.speaker}-${seg.text}`} className="text-sm">
+                            <span className="font-semibold text-blue-700">{getDisplayLabel(seg.speaker)}:</span>{' '}
+                            <span className="text-gray-800">{seg.text}</span>
+                          </div>
+                        )
+                      ))}
+                      {interimText && (
+                        <div className="text-sm">
+                          <span className="font-semibold text-gray-400">{getDisplayLabel(interimSpeaker || 'Speaker')}:</span>{' '}
+                          <span className="text-gray-400 italic">{interimText}</span>
+                        </div>
+                      )}
+                      <div ref={transcriptEndRef} />
+                    </>
                   )}
-                  <div ref={transcriptEndRef} />
                 </div>
-              )}
-            </div>
+              </div>
+            </section>
           </>
         )}
 
@@ -1891,7 +1923,7 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
         )}
 
         {/* Meeting details */}
-        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+        {!isActive && <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">
             Details
           </h3>
@@ -1933,8 +1965,8 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
               </div>
             )}
           </div>
-        </div>
-      </div>
+        </div>}
+      </main>
 
       {/* Bottom action */}
       {/* 2026-08-05 (live meeting sync full-page rebuild) — HARD REQUIREMENT
@@ -1952,7 +1984,7 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
           bypassing this UI entirely. Observer sessions get a plain
           "← Back to Home" instead, same as the post-meeting view every
           session sees once the mobile device ends the meeting. */}
-      {!isThisBrowserCall && <div
+      {!isActive && !isThisBrowserCall && <div
           className="fixed bottom-0 left-0 right-0 px-4 pb-4 bg-white border-t border-gray-100 shadow-lg"
           style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
         >

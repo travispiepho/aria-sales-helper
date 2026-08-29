@@ -304,7 +304,6 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
   }
 
   const canStart = !!file && duration > 0 && consent && !metadataLoading && !active;
-  const showAnalysisWorkspace = !!file || active || segments.length > 0 || !!coaching;
   const uniqueSpeakers = Array.from(new Set(segments.map(segment => segment.speaker).filter(Boolean)));
 
   function getDisplayLabel(rawSpeaker: string): string {
@@ -319,15 +318,39 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
   }
 
   return (
-    <div className="min-h-screen bg-gray-200 flex flex-col">
+    <div className="active-meeting-page bg-gray-200 flex flex-col">
       <AppHeader title="Analyze a Recording" subtitle="Local playback with live ARIA coaching" backTo="/" />
-      <main className="flex-1 px-4 py-4 pb-24 space-y-4 max-w-3xl w-full mx-auto">
-        {showAnalysisWorkspace && (
-          <>
-            <section aria-label="ARIA Coaching">
-              <CoachingPanel coaching={coaching} defaultCollapsed={false} />
-            </section>
-            <section aria-label="Transcript" className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+      <main data-active-meeting-layout="three-column" className="uploaded-active-meeting-workspace">
+        <section data-meeting-column="feedback" aria-label="ARIA Feedback" className="uploaded-feedback-column">
+          <section aria-label="ARIA Coaching" data-aria-feedback-panel className="w-full">
+            <CoachingPanel coaching={coaching} defaultCollapsed={false} />
+          </section>
+        </section>
+        <section data-meeting-column="transcript" aria-label="Speaker and transcript controls" className="uploaded-right-column">
+          <section data-speaker-controls aria-label="Rename Speakers" className="uploaded-speaker-column bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+          <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Rename Speakers</h2>
+          {uniqueSpeakers.length > 0 ? (
+            <div className="space-y-2">
+              {uniqueSpeakers.map(speaker => (
+                <div key={speaker} className="flex items-center gap-2">
+                  <span className="text-sm text-gray-500 w-24 flex-shrink-0">{speaker}</span>
+                  <input
+                    aria-label={`Rename ${speaker}`}
+                    type="text"
+                    placeholder={`Rename ${speaker}`}
+                    value={speakerLabels[speaker] || ''}
+                    onChange={event => handleSpeakerLabelChange(speaker, event.target.value)}
+                    className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-400">Speaker names appear here as the transcript grows.</p>
+          )}
+          </section>
+
+          <section data-live-transcript aria-label="Transcript" className="uploaded-transcript-column bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
               <h2 className="font-semibold text-gray-900 mb-3">Live transcript</h2>
               <div
                 ref={transcriptContainerRef}
@@ -345,32 +368,10 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
                 ))}
                 {interimText && <p className="text-sm text-gray-500 italic">{interimText}</p>}
               </div>
-            </section>
-          </>
-        )}
-
-        {uniqueSpeakers.length > 0 && (
-          <section aria-label="Rename Speakers" className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
-            <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Rename Speakers</h2>
-            <div className="space-y-2">
-              {uniqueSpeakers.map(speaker => (
-                <div key={speaker} className="flex items-center gap-2">
-                  <span className="text-sm text-gray-500 w-24 flex-shrink-0">{speaker}</span>
-                  <input
-                    aria-label={`Rename ${speaker}`}
-                    type="text"
-                    placeholder={`Rename ${speaker}`}
-                    value={speakerLabels[speaker] || ''}
-                    onChange={event => handleSpeakerLabelChange(speaker, event.target.value)}
-                    className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-              ))}
-            </div>
           </section>
-        )}
+        </section>
 
-        <section aria-label="Playback and analysis controls" className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
+        <section data-meeting-column="type" aria-label="Playback and analysis controls" className="uploaded-type-column bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
           <div role="group" aria-labelledby="recording-selection-heading" className="space-y-4">
             <div>
               <h1 id="recording-selection-heading" className="font-semibold text-gray-900">Choose a recording</h1>
@@ -471,11 +472,12 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
               {state === 'paused' ? '▶ Resume' : '⏸ Pause'}
             </button>
             <button
+              data-meeting-end-control
               onClick={() => { void finalize(); }}
               disabled={state !== 'playing' && state !== 'paused'}
-              className="min-h-11 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-700 font-semibold px-4"
+              className="uploaded-end-control min-h-11 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-700 font-semibold px-4"
             >
-              ■ Stop
+              ■ Stop Analysis
             </button>
           </div>
 

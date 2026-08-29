@@ -81,6 +81,22 @@ function getTranscriptContainer() {
   return screen.getByLabelText('Live transcript');
 }
 
+function expectThreeColumnWorkspace() {
+  const workspace = document.querySelector('[data-active-meeting-layout="three-column"]');
+  expect(workspace).toBeTruthy();
+  const columns = Array.from(workspace!.querySelectorAll(':scope > [data-meeting-column]'));
+  expect(columns.map(column => column.getAttribute('data-meeting-column'))).toEqual([
+    'feedback',
+    'transcript',
+    'type',
+  ]);
+  const right = workspace!.querySelector('[data-meeting-column="transcript"]')!;
+  const rename = right.querySelector('[data-speaker-controls]')!;
+  const transcript = right.querySelector('[data-live-transcript]')!;
+  expect(rename.compareDocumentPosition(transcript) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(workspace!.querySelector('[data-meeting-column="type"] [data-meeting-end-control]')).toBeTruthy();
+}
+
 function setTranscriptScrollMetrics(element: HTMLElement, values: { scrollHeight: number; clientHeight: number; scrollTop: number }) {
   Object.defineProperties(element, {
     scrollHeight: { configurable: true, value: values.scrollHeight },
@@ -111,6 +127,17 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('UploadedRecordingPage', () => {
+  it('renders the complete uploaded workflow in the shared three-column active structure', () => {
+    renderPage();
+    expectThreeColumnWorkspace();
+    const typeColumn = document.querySelector('[data-meeting-column="type"]')!;
+    expect(typeColumn.contains(screen.getByRole('group', { name: 'Choose a recording' }))).toBe(true);
+    expect(typeColumn.contains(screen.getByRole('heading', { name: 'Playback & analysis controls' }))).toBe(true);
+    expect(typeColumn.contains(screen.getByRole('checkbox'))).toBe(true);
+    expect(typeColumn.contains(screen.getByRole('button', { name: /Start Analysis/ }))).toBe(true);
+    expect(typeColumn.contains(screen.getByRole('button', { name: /Stop Analysis/ }))).toBe(true);
+  });
+
   it('makes MP4 recordings selectable alongside existing audio formats', () => {
     renderPage();
     const input = screen.getByLabelText('Local audio or MP4 file');

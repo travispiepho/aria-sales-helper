@@ -14,6 +14,202 @@
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
   }
+
+  html:has(.active-meeting-page),
+  body:has(.active-meeting-page),
+  #root:has(.active-meeting-page) {
+    height: 100%;
+    overflow: hidden;
+  }
+}
+
+@layer components {
+  /* The active meeting is a single viewport workspace. At laptop/desktop
+     widths, the middle 46rem track is pinned to the exact viewport center;
+     46rem is the deployed ARIA panel width (max-w-3xl less 2rem gutters).
+     Side tracks consume the remaining space without moving or resizing it. */
+  .active-meeting-page {
+    height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .active-meeting-workspace {
+    display: grid;
+    grid-template-columns: minmax(14rem, 1fr) 46rem minmax(14rem, 1fr);
+    gap: 1rem;
+    min-height: 0;
+    flex: 1 1 0%;
+    overflow: hidden;
+    padding: 1rem;
+  }
+
+  .active-meeting-column,
+  .active-meeting-feedback-column {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .active-meeting-column {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    overflow: hidden;
+  }
+
+  .active-meeting-column-scroll {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .active-meeting-column-scroll > * + * {
+    margin-top: 1rem;
+  }
+
+  .active-meeting-end-control {
+    margin-top: auto;
+    flex: none;
+  }
+
+  .active-meeting-feedback-column {
+    display: flex;
+    align-items: flex-start;
+    width: 46rem;
+    justify-self: center;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .active-meeting-transcript-column {
+    align-self: stretch;
+  }
+
+  .uploaded-active-meeting-workspace {
+    display: grid;
+    grid-template-columns: minmax(14rem, 1fr) 46rem minmax(14rem, 1fr);
+    grid-template-areas: 'type feedback transcript';
+    gap: 1rem;
+    min-height: 0;
+    flex: 1 1 0%;
+    overflow: hidden;
+    padding: 1rem;
+  }
+
+  .uploaded-type-column {
+    grid-area: type;
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .uploaded-type-column > div:has(> [data-meeting-end-control]) {
+    margin-top: auto;
+    padding-top: 1rem;
+  }
+
+  .uploaded-feedback-column {
+    grid-area: feedback;
+    width: 46rem;
+    min-width: 0;
+    min-height: 0;
+    justify-self: center;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .uploaded-right-column {
+    grid-area: transcript;
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .uploaded-speaker-column {
+    min-width: 0;
+    flex: none;
+  }
+
+  .uploaded-transcript-column {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex: 1 1 0%;
+    flex-direction: column;
+  }
+
+  .uploaded-transcript-column > [aria-label='Live transcript'] {
+    min-height: 0;
+    flex: 1 1 0%;
+    max-height: none;
+  }
+
+  .active-transcript-scroll {
+    min-height: 0;
+    flex: 1 1 0%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  @media (max-width: 79.999rem) {
+    html:has(.active-meeting-page),
+    body:has(.active-meeting-page),
+    #root:has(.active-meeting-page) {
+      height: auto;
+      overflow: auto;
+    }
+
+    .active-meeting-page {
+      height: auto;
+      min-height: 100dvh;
+      overflow: visible;
+    }
+
+    .active-meeting-workspace,
+    .uploaded-active-meeting-workspace {
+      display: flex;
+      flex-direction: column;
+      overflow: visible;
+    }
+
+    .active-meeting-feedback-column,
+    .uploaded-feedback-column {
+      order: 2;
+      width: 100%;
+      max-width: 46rem;
+      align-self: center;
+      overflow: visible;
+    }
+
+    .active-meeting-type-column,
+    .uploaded-type-column {
+      order: 1;
+    }
+
+    .active-meeting-transcript-column,
+    .uploaded-right-column {
+      order: 3;
+    }
+
+    .active-meeting-column,
+    .active-meeting-column-scroll,
+    .uploaded-type-column,
+    .uploaded-feedback-column {
+      overflow: visible;
+    }
+
+    .active-transcript-scroll {
+      max-height: 24rem;
+    }
+  }
 }
 
 @layer utilities {

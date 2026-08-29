@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -145,7 +145,8 @@ describe('UploadedRecordingPage', () => {
     expect(typeColumn.contains(screen.getByRole('heading', { name: 'Playback & analysis controls' }))).toBe(true);
     expect(typeColumn.contains(screen.getByRole('checkbox'))).toBe(true);
     expect(typeColumn.contains(screen.getByRole('button', { name: /Start Analysis/ }))).toBe(true);
-    expect(typeColumn.contains(screen.getByRole('button', { name: /Stop Analysis/ }))).toBe(true);
+    expect(typeColumn.contains(screen.getByRole('button', { name: /End Meeting/ }))).toBe(true);
+    expect(screen.queryByText(/Stop Analysis/)).toBeNull();
   });
 
   it('makes MP4 recordings selectable alongside existing audio formats', () => {
@@ -208,7 +209,7 @@ describe('UploadedRecordingPage', () => {
     expect(controls.contains(screen.getByLabelText('Playback progress'))).toBe(true);
     expect(controls.contains(screen.getByRole('button', { name: /Start Analysis/ }))).toBe(true);
     expect(controls.contains(screen.getByRole('button', { name: /Pause/ }))).toBe(true);
-    expect(controls.contains(screen.getByRole('button', { name: /Stop/ }))).toBe(true);
+    expect(controls.contains(screen.getByRole('button', { name: /End Meeting/ }))).toBe(true);
   });
 
   it('renders all 11 uploaded-recording coaching checklist items in the shared wrapped grid', async () => {
@@ -259,7 +260,7 @@ describe('UploadedRecordingPage', () => {
     await waitFor(() => expect(mocks.play).toHaveBeenCalledTimes(1));
   });
 
-  it('creates the uploaded_recording meeting, locks seek/rate, and exposes pause/stop controls', async () => {
+  it('creates the uploaded_recording meeting, locks seek/rate, and exposes pause/End Meeting controls', async () => {
     renderPage();
     await selectAudio();
     await userEvent.click(screen.getByRole('checkbox'));
@@ -274,7 +275,13 @@ describe('UploadedRecordingPage', () => {
     await userEvent.click(screen.getByRole('button', { name: /Resume/ }));
     expect(mocks.transportResume).toHaveBeenCalled();
     expect(mocks.resume).toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: /Stop/ }));
+    // Clicking End Meeting shows a confirmation dialog (parity with
+    // MeetingPage.tsx's in-person End Meeting flow) before finalize() runs.
+    await userEvent.click(screen.getByRole('button', { name: /End Meeting/ }));
+    expect(mocks.end).not.toHaveBeenCalled();
+    const confirmDialog = await screen.findByText('End this meeting?');
+    const confirmButton = within(confirmDialog.closest('div.bg-white') as HTMLElement).getByRole('button', { name: /End Meeting/ });
+    await userEvent.click(confirmButton);
     await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-upload-1/post'));
     expect(mocks.end).toHaveBeenCalledTimes(1);
     expect(mocks.stop).toHaveBeenCalled();

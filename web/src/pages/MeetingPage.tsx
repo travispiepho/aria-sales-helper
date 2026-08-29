@@ -20,6 +20,7 @@ import { getWsBase } from '../lib/wsBase';
 import { createReconnectTracker, ReconnectTracker } from '../lib/reconnectPolicy';
 import AppHeader from '../components/AppHeader';
 import BrowserCallControls from '../components/BrowserCallControls';
+import { EndMeetingButton, EndMeetingConfirmModal } from '../components/EndMeetingButton';
 import MeetingTitleEditor from '../components/MeetingTitleEditor';
 import { useBrowserCall } from '../lib/browserCall';
 import { inRecordingPath, postRecordingPath } from '../lib/meetingRoutes';
@@ -1633,12 +1634,7 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
                       </span>
                     </div>
                   ) : (
-                    <button
-                      onClick={handleEndMeetingButtonClick}
-                      className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-4 rounded-2xl text-lg transition-colors"
-                    >
-                      ⏹ End Meeting
-                    </button>
+                    <EndMeetingButton onClick={handleEndMeetingButtonClick} />
                   )}
                 </div>
               )}
@@ -2001,12 +1997,7 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
             </span>
           </div>
         ) : isActive && isOwnerSession ? (
-          <button
-            onClick={handleEndMeetingButtonClick}
-            className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-4 rounded-2xl text-lg transition-colors"
-          >
-            ⏹ End Meeting
-          </button>
+          <EndMeetingButton onClick={handleEndMeetingButtonClick} />
         ) : (
           <button
             onClick={() => navigate('/')}
@@ -2097,44 +2088,6 @@ function SpeakerSuggestionModal({
             className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm transition-colors disabled:opacity-60"
           >
             {busy ? 'Saving…' : 'Yes, that’s right'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── EndMeetingConfirmModal ─────────────────────────────────────────────────
-
-function EndMeetingConfirmModal({
-  onConfirm,
-  onCancel,
-}: {
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6">
-        <div className="text-center mb-4">
-          <div className="text-4xl mb-2">⏹</div>
-          <h2 className="text-lg font-bold text-gray-900">End this meeting?</h2>
-        </div>
-        <p className="text-sm text-gray-600 text-center mb-5">
-          This will stop recording and finalize the meeting.
-        </p>
-        <div className="flex gap-3">
-          <button
-            onClick={onCancel}
-            className="flex-1 border border-gray-200 text-gray-600 font-semibold py-3 rounded-xl text-sm hover:bg-gray-50 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onConfirm}
-            className="flex-1 bg-red-600 hover:bg-red-700 text-white font-semibold py-3 rounded-xl text-sm transition-colors"
-          >
-            ⏹ End Meeting
           </button>
         </div>
       </div>

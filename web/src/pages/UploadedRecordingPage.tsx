@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { inRecordingPath, postRecordingPath } from '../lib/meetingRoutes';
 import AppHeader from '../components/AppHeader';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
+import { EndMeetingButton, EndMeetingConfirmModal } from '../components/EndMeetingButton';
 import {
   createUploadedRecordingMeeting,
   getMeeting,
@@ -40,6 +41,9 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
   const [coaching, setCoaching] = useState<CoachingData | null>(null);
   const [speakerLabels, setSpeakerLabels] = useState<Record<string, string>>({});
   const [meetingId, setMeetingId] = useState<string | null>(null);
+  // End Meeting confirmation state (parity with MeetingPage.tsx's in-person
+  // End Meeting flow — see handleEndMeetingButtonClick() below).
+  const [showEndMeetingConfirm, setShowEndMeetingConfirm] = useState(false);
   const meetingIdRef = useRef<string | null>(null);
   const playerRef = useRef<LocalRecordingPlayer | null>(null);
   const transportRef = useRef<UploadedRecordingTransport | null>(null);
@@ -217,6 +221,22 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
     finalizePromiseRef.current = task;
     return task;
   }, [navigate]);
+
+  // Entry point for the bottom "End Meeting" button (the renamed/restyled
+  // former "Stop Analysis" control) — parity with MeetingPage.tsx's
+  // handleEndMeetingButtonClick(). The button is only ever rendered enabled
+  // while state is 'playing' or 'paused', i.e. there is already live
+  // playback/analysis in flight and audio has already been streamed for
+  // transcription — the uploaded-recording equivalent of MeetingPage's
+  // "isRecording" gate (there is no reachable enabled state here that is
+  // "active but nothing captured yet", unlike MeetingPage's pre-Record
+  // window). So, unlike MeetingPage, this always shows the confirm dialog
+  // rather than conditionally skipping it. Confirm calls the exact same
+  // finalize() the old Stop Analysis button called; Cancel just dismisses
+  // with no side effects and analysis continues.
+  function handleEndMeetingButtonClick() {
+    setShowEndMeetingConfirm(true);
+  }
 
   async function handlePlaybackDisconnect(cause: Error) {
     // There is no safe resume point after transport loss: some PCM may have
@@ -456,7 +476,7 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <button
               onClick={handleStart}
               disabled={!canStart}
@@ -471,14 +491,6 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             >
               {state === 'paused' ? '▶ Resume' : '⏸ Pause'}
             </button>
-            <button
-              data-meeting-end-control
-              onClick={() => { void finalize(); }}
-              disabled={state !== 'playing' && state !== 'paused'}
-              className="uploaded-end-control min-h-11 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-700 font-semibold px-4"
-            >
-              ■ Stop Analysis
-            </button>
           </div>
 
           {state === 'complete' && meetingId && (
@@ -489,8 +501,34 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
               View completed meeting analysis
             </button>
           )}
+
+          {/* "End Meeting" replaces the former "■ Stop Analysis" control. Same
+              label/icon, placement (bottom of this left/type column, pinned
+              via .active-meeting-end-control's margin-top: auto — the exact
+              mechanism MeetingPage.tsx's in-person End Meeting button uses),
+              styling, and confirm-before-ending UX as the in-person page (see
+              EndMeetingButton/EndMeetingConfirmModal in
+              ../components/EndMeetingButton, extracted from MeetingPage.tsx
+              for guaranteed parity). Functionally unchanged: Confirm still
+              calls the same finalize() the old Stop Analysis button called. */}
+          <div data-meeting-end-control className="active-meeting-end-control">
+            <EndMeetingButton
+              onClick={handleEndMeetingButtonClick}
+              disabled={state !== 'playing' && state !== 'paused'}
+            />
+          </div>
         </section>
       </main>
+
+      {showEndMeetingConfirm && (
+        <EndMeetingConfirmModal
+          onConfirm={() => {
+            setShowEndMeetingConfirm(false);
+            void finalize();
+          }}
+          onCancel={() => setShowEndMeetingConfirm(false)}
+        />
+      )}
     </div>
   );
 }

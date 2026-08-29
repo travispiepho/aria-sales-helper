@@ -201,6 +201,34 @@ describe('UploadedRecordingPage', () => {
     expect(controls.contains(screen.getByRole('button', { name: /Stop/ }))).toBe(true);
   });
 
+  it('renders all 11 uploaded-recording coaching checklist items in the shared wrapped grid', async () => {
+    const applyLiveMessage = await startAnalysis();
+    const checklist = Array.from({ length: 11 }, (_, index) => ({
+      id: `upload-item-${index + 1}`,
+      label: `Uploaded checklist item ${index + 1}`,
+      done: index < 4,
+    }));
+
+    applyLiveMessage({
+      type: 'coaching',
+      data: {
+        disc: { detected: 'S', confidence: 'medium', emoji: '🤝', label: 'Steady', tip: 'Keep building trust.' },
+        stage: { current: 'first_go_around', label: 'First Go Around' },
+        checklist,
+        nudges: ['Continue the walkthrough.'],
+        urgent: null,
+      },
+    });
+
+    await screen.findByText('Uploaded checklist item 11');
+    const coaching = screen.getByRole('region', { name: 'ARIA Coaching' });
+    const grid = coaching.querySelector('[data-coaching-checklist]');
+    expect(grid).toBeTruthy();
+    expect(grid!.className).toContain('sm:grid-cols-2');
+    expect(coaching.querySelectorAll('[data-coaching-checklist-item]')).toHaveLength(11);
+    expect(screen.getByText('4/11')).toBeTruthy();
+  });
+
   it('waits for the server start acknowledgement before local playback begins', async () => {
     let acknowledgeStart: (() => void) | undefined;
     mocks.start.mockImplementation(() => new Promise<void>(resolve => { acknowledgeStart = resolve; }));

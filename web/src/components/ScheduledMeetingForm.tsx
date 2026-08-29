@@ -35,7 +35,7 @@ export default function ScheduledMeetingForm({ type, initial, onSubmit, submitLa
   }
 
   return (
-    <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
+    <form aria-label="Scheduled meeting details" onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
       {error && <div role="alert" className="bg-red-50 text-red-700 rounded-xl px-4 py-3 text-sm">{error}</div>}
       <div>
         <label htmlFor="scheduled-time" className="block text-sm font-medium text-gray-700 mb-1">Date and time</label>

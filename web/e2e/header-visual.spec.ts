@@ -17,6 +17,16 @@ async function mockAuthenticatedApi(page: import('@playwright/test').Page) {
     if (url.pathname === '/api/meetings') {
       return route.fulfill({ json: { meetings: [], hasMore: false, limit: 20, offset: 0 } });
     }
+    if (url.pathname === '/api/scheduled-meetings') {
+      return route.fulfill({ json: { meetings: [] } });
+    }
+    if (url.pathname === '/api/meetings/scheduled-layout-test') {
+      return route.fulfill({ json: {
+        id: 'scheduled-layout-test', rep_id: mockUser.id, status: 'active', channel: 'in_person',
+        started_at: '2026-08-29T14:30:00.000Z', scheduled_for: '2026-08-29T14:30:00.000Z',
+        scheduled_customer_name: 'Jane Smith', scheduled_customer_address: '123 Main St', title: 'Estimate',
+      } });
+    }
     if (url.pathname === '/api/profile/voice-print') {
       return route.fulfill({ json: { enrolled: false } });
     }
@@ -143,6 +153,64 @@ test.describe('Home, Objections, and Meetings flow layout', () => {
         expect(navigationBox && contentBox && navigationBox.y + navigationBox.height <= contentBox.y).toBeTruthy();
         expect(contentBox && firstBox && contentBox.y <= firstBox.y).toBeTruthy();
       }
+    });
+  }
+});
+
+
+test.describe('Schedule Ahead route and substate flow layout', () => {
+  const scheduleStates = [
+    { name: 'entry', route: '/schedule', first: 'What are you scheduling?' },
+    { name: 'call-details', route: '/schedule/call', first: 'Scheduled meeting details' },
+    { name: 'visit-details', route: '/schedule/visit', first: 'Scheduled meeting details' },
+    { name: 'edit-details', route: '/schedule/scheduled-layout-test/edit', first: 'Scheduled meeting details' },
+  ];
+
+  for (const viewport of [
+    { name: 'phone', width: 320, height: 760 },
+    { name: 'desktop', width: 1280, height: 800 },
+  ]) {
+    for (const state of scheduleStates) {
+      test(`${viewport.name} ${state.name}: content is in flow below the complete navigation`, async ({ page }) => {
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
+        await page.goto(`http://127.0.0.1:5173${state.route}`);
+
+        const header = page.locator('[data-app-header="compact"]');
+        const navigation = page.getByRole('navigation', { name: 'Authenticated navigation' });
+        const content = page.locator('[data-page-content]');
+        const firstContent = content.locator(':scope > *').first();
+        if (state.first === 'Scheduled meeting details') {
+          await expect(page.getByRole('form', { name: state.first })).toBeVisible();
+        } else {
+          await expect(page.getByRole('heading', { name: state.first })).toBeVisible();
+        }
+
+        for (const element of [header, navigation, content, firstContent]) {
+          await expect(element).toHaveCSS('position', 'static');
+        }
+        const [headerBox, navigationBox, contentBox, firstBox] = await Promise.all([
+          header.boundingBox(), navigation.boundingBox(), content.boundingBox(), firstContent.boundingBox(),
+        ]);
+        expect(headerBox && contentBox && headerBox.y + headerBox.height <= contentBox.y).toBeTruthy();
+        expect(navigationBox && contentBox && navigationBox.y + navigationBox.height <= contentBox.y).toBeTruthy();
+        expect(contentBox && firstBox && contentBox.y <= firstBox.y).toBeTruthy();
+      });
+    }
+
+    test(`${viewport.name} visit validation: error remains in the in-flow details form`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.route('**/api/scheduled-meetings', route => route.request().method() === 'POST'
+        ? route.fulfill({ status: 400, json: { error: 'Scheduled meetings must be in the future.' } })
+        : route.fallback());
+      await page.goto('http://127.0.0.1:5173/schedule/visit');
+      await page.getByLabel('Meeting title').fill('Estimate');
+      await page.getByLabel('Customer or contact name').fill('Jane');
+      await page.getByRole('button', { name: 'Schedule Meeting' }).click();
+      const form = page.getByRole('form', { name: 'Scheduled meeting details' });
+      const alert = page.getByRole('alert');
+      await expect(alert).toContainText('future');
+      await expect(form).toHaveCSS('position', 'static');
+      expect(await form.evaluate((node, child) => node.contains(child), await alert.elementHandle())).toBe(true);
     });
   }
 });

@@ -220,18 +220,22 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
               <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">1st Go Around</span>
               <span className="text-xs text-gray-500">{doneCount}/{checklist.length}</span>
             </div>
-            <div className="space-y-1.5">
+            <div
+              data-coaching-checklist
+              className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+            >
               {checklist.map(item => (
                 <div
                   key={item.id}
-                  className={`flex items-center gap-2 text-sm rounded-lg px-2 py-1 ${
+                  data-coaching-checklist-item={item.id}
+                  className={`min-w-0 flex items-start gap-2 text-sm rounded-lg px-3 py-2 ${
                     item.done ? 'text-green-700' : 'text-gray-500'
                   }`}
                 >
-                  <span className="flex-shrink-0 text-base leading-none">
+                  <span className="flex-shrink-0 text-base leading-none mt-0.5">
                     {item.done ? '✅' : '🔲'}
                   </span>
-                  <span className={item.done ? 'line-through opacity-70' : ''}>
+                  <span className={`min-w-0 break-words leading-snug ${item.done ? 'line-through opacity-70' : ''}`}>
                     {item.label}
                   </span>
                 </div>

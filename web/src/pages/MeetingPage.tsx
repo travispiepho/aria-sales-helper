@@ -1465,27 +1465,6 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
 
   return (
     <div className={isActive ? 'active-meeting-page bg-gray-200 flex flex-col' : 'min-h-screen bg-gray-200 flex flex-col'}>
-      {/* Recording banner — owner-only; an observer session never captures
-          audio on this device, so "keep screen on" would be misleading
-          (this page's wake lock is only ever acquired by startRecording(),
-          which an observer session never calls). See the synced-status
-          banner just below for the observer's equivalent. */}
-      {isRecording && (
-        <div className="bg-red-600 text-white text-center py-2 px-4 text-sm font-semibold animate-pulse sticky top-0 z-50">
-          🔴 RECORDING — keep screen on
-        </div>
-      )}
-
-      {/* Synced-from-mobile banner — observer-only equivalent of the
-          recording banner above. Distinguishing element per this task's
-          open question 7: makes it unmistakable that the live transcript
-          below is arriving from the phone, not this browser's mic. */}
-      {isSyncedFromMobile && (
-        <div className="bg-indigo-600 text-white text-center py-2 px-4 text-sm font-semibold sticky top-0 z-50">
-          📱 LIVE — synced from mobile device
-        </div>
-      )}
-
       {/* Voice identification toast */}
       {voiceToast && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white text-sm font-medium px-4 py-2.5 rounded-full shadow-lg">
@@ -1507,15 +1486,20 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
 
       <AppHeader
         title={meeting.title || meeting.customer_name || 'Meeting'}
-        subtitle={
-          isRecording
-            ? `Recording · ${formatElapsed(elapsedSec)}`
-            : isSyncedFromMobile
-              ? `Synced from mobile · ${formatDuration(meeting.started_at)}`
-              : isActive
-                ? `Active · ${formatDuration(meeting.started_at)}`
-                : `Completed · ${formatDuration(meeting.started_at, meeting.ended_at ?? undefined)}`
-        }
+        subtitle={(
+          // Recording/mobile-sync truth remains in the existing compact
+          // header subtitle (and in the type column below), rather than
+          // consuming a dedicated banner row above the active workspace.
+          <span data-meeting-status-location="app-header">
+            {isRecording
+              ? `Recording · ${formatElapsed(elapsedSec)}`
+              : isSyncedFromMobile
+                ? `Synced from mobile · ${formatDuration(meeting.started_at)}`
+                : isActive
+                  ? `Active · ${formatDuration(meeting.started_at)}`
+                  : `Completed · ${formatDuration(meeting.started_at, meeting.ended_at ?? undefined)}`}
+          </span>
+        )}
         backTo="/"
         toneClassName={isRecording ? 'bg-red-700' : isSyncedFromMobile ? 'bg-indigo-700' : isActive ? 'bg-green-700' : 'bg-blue-700'}
         status={isActive ? (

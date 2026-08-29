@@ -136,6 +136,36 @@ describe('canonical meeting routes', () => {
     }
   });
 
+  it.each([
+    ['owner in-person', { ...fixture('active', 'in_person'), is_owner_session: true }],
+    ['owner phone', { ...fixture('active', 'phone'), is_owner_session: true, recording_status: 'in-progress' }],
+    ['observer mobile sync', { ...fixture('active', 'in_person'), is_owner_session: false, origin_client: 'mobile' }],
+  ] as const)('keeps %s status in the compact header without a dedicated top banner', async (_name, meeting) => {
+    mocks.getMeeting.mockResolvedValue(meeting);
+    call.meetingId = 'other-browser-call';
+    render(<MemoryRouter initialEntries={[`/meetings/${meeting.id}/active`]}><Routes>
+      <Route path="/meetings/:id/active" element={<MeetingPage meetingId={meeting.id} pageMode="active" />} />
+    </Routes></MemoryRouter>);
+
+    await screen.findByRole('heading', { name: 'Live Transcript' });
+    const status = document.querySelector('[data-meeting-status-location="app-header"]');
+    expect(status).toBeTruthy();
+    expect(status!.closest('[data-app-header="compact"]')).toBeTruthy();
+    expect(screen.queryByText('🔴 RECORDING — keep screen on')).toBeNull();
+    expect(screen.queryByText('📱 LIVE — synced from mobile device')).toBeNull();
+    if (meeting.is_owner_session === false) {
+      expect(status!.textContent).toMatch(/^Synced from mobile · /);
+      expect(screen.getByText('Live from phone')).toBeTruthy();
+      expect(screen.getByText('Synced from mobile', { selector: '[data-meeting-column="type"] span' })).toBeTruthy();
+    } else if (meeting.channel === 'phone') {
+      expect(screen.getByText('Recording (Twilio)')).toBeTruthy();
+      expect(screen.getByText('Call recording live')).toBeTruthy();
+    } else {
+      expect(status!.textContent).toMatch(/^Active · /);
+      expect(screen.getByText('Ready to record')).toBeTruthy();
+    }
+  });
+
   it('moves End Meeting to post only after the terminal PATCH response', async () => {
     mocks.getMeeting.mockResolvedValue(fixture('active'));
     mocks.updateMeeting.mockResolvedValue(fixture('completed'));

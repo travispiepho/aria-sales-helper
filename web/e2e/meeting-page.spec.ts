@@ -23,23 +23,51 @@ async function expectViewportWorkspace(page: Page, expectedTypeLabel: string) {
   const layout = await page.evaluate(() => {
     const feedback = document.querySelector('[data-aria-feedback-panel]')!.getBoundingClientRect();
     const transcript = document.querySelector('[aria-label="Live Transcript content"], [aria-label="Live transcript"]')!;
+    const checklist = document.querySelector('[data-coaching-checklist]');
+    const checklistItems = Array.from(document.querySelectorAll('[data-coaching-checklist-item]'));
+    const checklistRows = new Set(checklistItems.map(item => Math.round(item.getBoundingClientRect().y)));
+    const hasOverflow = checklistItems.some(item => {
+      const box = item.getBoundingClientRect();
+      return box.left < feedback.left || box.right > feedback.right;
+    });
     return {
       documentHeight: document.documentElement.scrollHeight,
       viewportHeight: document.documentElement.clientHeight,
       bodyHeight: document.body.scrollHeight,
       bodyViewportHeight: document.body.clientHeight,
+      feedbackX: feedback.x,
+      feedbackY: feedback.y,
       feedbackWidth: feedback.width,
       feedbackCenter: feedback.x + feedback.width / 2,
       viewportCenter: window.innerWidth / 2,
       transcriptOverflowY: getComputedStyle(transcript).overflowY,
+      checklistDisplay: checklist ? getComputedStyle(checklist).display : null,
+      checklistCount: checklistItems.length,
+      checklistRows: checklistRows.size,
+      checklistOverflow: hasOverflow,
     };
   });
   expect(layout.documentHeight).toBe(layout.viewportHeight);
   expect(layout.bodyHeight).toBe(layout.bodyViewportHeight);
   expect(layout.feedbackWidth).toBe(736);
+  expect(layout.feedbackX).toBe(layout.viewportCenter - 368);
+  expect(layout.feedbackY).toBe(120);
   expect(layout.feedbackCenter).toBe(layout.viewportCenter);
   expect(layout.transcriptOverflowY).toBe('auto');
+  if (layout.checklistCount > 0) {
+    expect(layout.checklistDisplay).toBe('grid');
+    expect(layout.checklistCount).toBe(11);
+    expect(layout.checklistRows).toBeGreaterThan(1);
+    expect(layout.checklistOverflow).toBe(false);
+    await expect(page.getByText('3/11', { exact: true })).toBeVisible();
+  }
   await expect(page.getByRole('navigation', { name: 'Authenticated navigation' })).toHaveCount(0);
+}
+
+async function expectNoDedicatedStatusBanner(page: Page) {
+  await expect(page.getByText('🔴 RECORDING — keep screen on')).toHaveCount(0);
+  await expect(page.getByText('📱 LIVE — synced from mobile device')).toHaveCount(0);
+  await expect(page.locator('[data-meeting-status-location="app-header"]')).toBeVisible();
 }
 
 test('phone call, recording in progress: shows Recording (Twilio) indicator, Hang Up button, sane timer, and NOT the record-to-see-transcript empty state', async ({ page }) => {
@@ -87,8 +115,8 @@ test.describe('browser call live meeting surface', () => {
     await expect(page.getByRole('heading', { name: 'Live Transcript' })).toBeVisible();
     await expect(page.getByText('I can see the live transcript.')).toBeVisible();
     await expect(page.getByLabel('Browser call controls')).toBeVisible();
-    await expect(page.getByText(/Browser call · Call ended/)).toBeVisible();
-    await expect(page.getByText(/ARIA coaching will appear/i)).toBeVisible();
+    await expect(page.getByText(/Browser call · (Call ended|Finalizing meeting…)/)).toBeVisible();
+    await expect(page.getByText(/ARIA coaching will appear|ARIA Coaching/i).first()).toBeVisible();
     await page.screenshot({ path: 'test-results/browser-call-live-desktop.png', fullPage: true });
   });
 });
@@ -173,19 +201,76 @@ test.describe('desktop active meeting three-column viewport contract', () => {
       test('in-person fits without document overflow', async ({ page }) => {
         await page.goto(`${BASE}/meetings/in-person/active`);
         await expectViewportWorkspace(page, 'In-person meeting controls');
+        await expectNoDedicatedStatusBanner(page);
         await expect(page.locator('[data-meeting-column="type"] [data-meeting-end-control]')).toBeVisible();
       });
       test('phone fits without document overflow and keeps hang-up guidance', async ({ page }) => {
         await page.goto(`${BASE}/meetings/phone-recording/active`);
         await expectViewportWorkspace(page, 'Phone meeting controls');
+        await expectNoDedicatedStatusBanner(page);
+        await expect(page.getByText('Recording (Twilio)')).toBeVisible();
         await expect(page.getByText('Hang up your phone to end this meeting.')).toBeVisible();
       });
       test('uploaded recording fits without document overflow', async ({ page }) => {
         await page.goto(`${BASE}/recordings/analyze`);
         await expectViewportWorkspace(page, 'Playback and analysis controls');
+        await expect(page.getByText('🔴 RECORDING — keep screen on')).toHaveCount(0);
+        await expect(page.getByText('📱 LIVE — synced from mobile device')).toHaveCount(0);
         await expect(page.getByRole('heading', { name: 'Choose a recording' })).toBeVisible();
         await expect(page.getByRole('heading', { name: 'Playback & analysis controls' })).toBeVisible();
       });
     });
   }
+});
+
+
+test.describe('observer synced meeting status', () => {
+  test.use({ viewport: { width: 1280, height: 720 } });
+  test('keeps mobile-sync truth in compact existing surfaces, not a top banner', async ({ page }) => {
+    await page.goto(`${BASE}/meetings/mobile-sync/active`);
+    await expectViewportWorkspace(page, 'In-person meeting controls');
+    await expectNoDedicatedStatusBanner(page);
+    await expect(page.locator('[data-meeting-status-location="app-header"]')).toContainText('Synced from mobile');
+    await expect(page.getByText('Live from phone')).toBeVisible();
+    await expect(page.getByText('Synced from mobile', { exact: true })).toBeVisible();
+  });
+});
+
+test.describe('owner microphone recording status', () => {
+  test.use({ viewport: { width: 1280, height: 720 } });
+  test('starts recording without restoring the removed top banner and keeps compact truthful indicators', async ({ page }) => {
+    await page.addInitScript(() => {
+      class FakeAudioContext {
+        audioWorklet = { addModule: async () => {} };
+        destination = {};
+        createMediaStreamSource() { return { connect() {} }; }
+        close() { return Promise.resolve(); }
+      }
+      class FakeAudioWorkletNode {
+        port = { onmessage: null };
+        connect() {}
+        disconnect() {}
+      }
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+      });
+      Object.defineProperty(navigator, 'wakeLock', {
+        configurable: true,
+        value: { request: async () => ({ release: async () => {} }) },
+      });
+      Object.defineProperty(window, 'AudioContext', { configurable: true, value: FakeAudioContext });
+      Object.defineProperty(window, 'AudioWorkletNode', { configurable: true, value: FakeAudioWorkletNode });
+    });
+
+    await page.goto(`${BASE}/meetings/in-person/active`);
+    await page.getByRole('button', { name: /Record/ }).click();
+    await page.getByRole('button', { name: /Confirm/ }).click();
+
+    await expect(page.locator('[data-meeting-status-location="app-header"]')).toContainText(/^Recording · /);
+    await expect(page.getByText('Microphone recording live')).toBeVisible();
+    await expect(page.getByText('🔴 RECORDING — keep screen on')).toHaveCount(0);
+    const workspaceY = await page.locator('[data-active-meeting-layout="three-column"]').evaluate(element => element.getBoundingClientRect().y);
+    expect(workspaceY).toBe(104);
+  });
 });

@@ -16,6 +16,19 @@ const PORT = process.env.MOCK_PORT || 4100;
 const now = new Date();
 const startedAt = now.toISOString();
 
+const checklist = Array.from({ length: 11 }, (_, index) => ({
+  id: `item-${index + 1}`,
+  label: `Checklist item ${index + 1} has readable guidance`,
+  done: index < 3,
+}));
+const coaching = {
+  disc: { detected: 'D', confidence: 'high', emoji: '🎯', label: 'Direct', tip: 'Keep it concise.' },
+  stage: { current: 'first_go_around', label: 'First Go Around' },
+  checklist,
+  nudges: ['Ask the next question.'],
+  urgent: null,
+};
+
 const MEETINGS = {
   'browser-live': {
     id: 'browser-live',
@@ -65,6 +78,19 @@ const MEETINGS = {
     is_owner_session: true,
     title: 'In Person Customer',
   },
+  'mobile-sync': {
+    id: 'mobile-sync',
+    channel: 'in_person',
+    call_sid: null,
+    status: 'active',
+    started_at: startedAt,
+    ended_at: null,
+    recording_status: null,
+    customer_name: 'Mobile Sync Customer',
+    origin_client: 'mobile',
+    is_owner_session: false,
+    title: 'Mobile Sync Customer',
+  },
 };
 
 const server = http.createServer((req, res) => {
@@ -110,7 +136,7 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname.match(/^\/api\/meetings\/[^/]+\/coaching\/latest$/)) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ coaching: null }));
+    res.end(JSON.stringify({ coaching }));
     return;
   }
 

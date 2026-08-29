@@ -124,6 +124,16 @@ describe('canonical meeting routes', () => {
     </Routes></MemoryRouter>);
     await screen.findByRole('heading', { name: 'Live Transcript' });
     expectThreeColumnActiveMeeting(label);
+    const feedback = screen.getByRole('region', { name: 'ARIA Feedback' });
+    const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
+    expect(feedback.contains(panel)).toBe(true);
+    expect(Array.from(panel.querySelectorAll('[data-coaching-waiting]')).map(node => node.textContent)).toEqual([
+      'Waiting on data...',
+      'Waiting on data...',
+      'Waiting on data...',
+      'Waiting on data...',
+      'Waiting on data...',
+    ]);
     const typeColumn = screen.getByRole('region', { name: label });
     if (channel === 'phone') {
       const browserControls = typeColumn.querySelector('[data-browser-call-controls]');

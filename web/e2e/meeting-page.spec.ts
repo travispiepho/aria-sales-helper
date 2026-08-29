@@ -17,6 +17,8 @@ async function expectViewportWorkspace(page: Page, expectedTypeLabel: string) {
   await expect(workspace).toBeVisible();
   await expect(workspace.locator(':scope > [data-meeting-column]')).toHaveCount(3);
   await expect(page.getByRole('region', { name: expectedTypeLabel })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'ARIA Feedback' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'ARIA Coaching' })).toBeVisible();
   const renameBox = await workspace.locator('[data-speaker-controls]').boundingBox();
   const transcriptBox = await workspace.locator('[data-live-transcript]').boundingBox();
   expect(renameBox && transcriptBox && renameBox.y + renameBox.height <= transcriptBox.y).toBeTruthy();
@@ -62,6 +64,13 @@ async function expectViewportWorkspace(page: Page, expectedTypeLabel: string) {
     await expect(page.getByText('3/11', { exact: true })).toBeVisible();
   }
   await expect(page.getByRole('navigation', { name: 'Authenticated navigation' })).toHaveCount(0);
+}
+
+async function expectWaitingCoachingSections(page: Page) {
+  const panel = page.getByRole('region', { name: 'ARIA Coaching' });
+  for (const section of ['disc', 'urgent', 'stage', 'checklist', 'nudges']) {
+    await expect(panel.locator(`[data-coaching-waiting="${section}"]`)).toHaveText('Waiting on data...');
+  }
 }
 
 async function expectNoDedicatedStatusBanner(page: Page) {
@@ -201,12 +210,14 @@ test.describe('desktop active meeting three-column viewport contract', () => {
       test('in-person fits without document overflow', async ({ page }) => {
         await page.goto(`${BASE}/meetings/in-person/active`);
         await expectViewportWorkspace(page, 'In-person meeting controls');
+        await expectWaitingCoachingSections(page);
         await expectNoDedicatedStatusBanner(page);
         await expect(page.locator('[data-meeting-column="type"] [data-meeting-end-control]')).toBeVisible();
       });
       test('phone fits without document overflow and keeps hang-up guidance', async ({ page }) => {
         await page.goto(`${BASE}/meetings/phone-recording/active`);
         await expectViewportWorkspace(page, 'Phone meeting controls');
+        await expectWaitingCoachingSections(page);
         await expectNoDedicatedStatusBanner(page);
         await expect(page.getByText('Recording (Twilio)')).toBeVisible();
         await expect(page.getByText('Hang up your phone to end this meeting.')).toBeVisible();
@@ -214,6 +225,7 @@ test.describe('desktop active meeting three-column viewport contract', () => {
       test('uploaded recording fits without document overflow', async ({ page }) => {
         await page.goto(`${BASE}/recordings/analyze`);
         await expectViewportWorkspace(page, 'Playback and analysis controls');
+        await expectWaitingCoachingSections(page);
         await expect(page.getByText('🔴 RECORDING — keep screen on')).toHaveCount(0);
         await expect(page.getByText('📱 LIVE — synced from mobile device')).toHaveCount(0);
         await expect(page.getByRole('heading', { name: 'Choose a recording' })).toBeVisible();

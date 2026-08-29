@@ -130,6 +130,16 @@ describe('UploadedRecordingPage', () => {
   it('renders the complete uploaded workflow in the shared three-column active structure', () => {
     renderPage();
     expectThreeColumnWorkspace();
+    const feedback = screen.getByRole('region', { name: 'ARIA Feedback' });
+    const coaching = screen.getByRole('region', { name: 'ARIA Coaching' });
+    expect(feedback.contains(coaching)).toBe(true);
+    expect(Array.from(coaching.querySelectorAll('[data-coaching-waiting]')).map(node => node.textContent)).toEqual([
+      'Waiting on data...',
+      'Waiting on data...',
+      'Waiting on data...',
+      'Waiting on data...',
+      'Waiting on data...',
+    ]);
     const typeColumn = document.querySelector('[data-meeting-column="type"]')!;
     expect(typeColumn.contains(screen.getByRole('group', { name: 'Choose a recording' }))).toBe(true);
     expect(typeColumn.contains(screen.getByRole('heading', { name: 'Playback & analysis controls' }))).toBe(true);
@@ -203,6 +213,7 @@ describe('UploadedRecordingPage', () => {
 
   it('renders all 11 uploaded-recording coaching checklist items in the shared wrapped grid', async () => {
     const applyLiveMessage = await startAnalysis();
+    const waitingPanel = screen.getByRole('region', { name: 'ARIA Coaching' });
     const checklist = Array.from({ length: 11 }, (_, index) => ({
       id: `upload-item-${index + 1}`,
       label: `Uploaded checklist item ${index + 1}`,
@@ -222,11 +233,17 @@ describe('UploadedRecordingPage', () => {
 
     await screen.findByText('Uploaded checklist item 11');
     const coaching = screen.getByRole('region', { name: 'ARIA Coaching' });
+    expect(coaching).toBe(waitingPanel);
     const grid = coaching.querySelector('[data-coaching-checklist]');
     expect(grid).toBeTruthy();
     expect(grid!.className).toContain('sm:grid-cols-2');
     expect(coaching.querySelectorAll('[data-coaching-checklist-item]')).toHaveLength(11);
     expect(screen.getByText('4/11')).toBeTruthy();
+    expect(coaching.querySelector('[data-coaching-waiting="disc"]')).toBeNull();
+    expect(coaching.querySelector('[data-coaching-waiting="stage"]')).toBeNull();
+    expect(coaching.querySelector('[data-coaching-waiting="checklist"]')).toBeNull();
+    expect(coaching.querySelector('[data-coaching-waiting="nudges"]')).toBeNull();
+    expect(coaching.querySelector('[data-coaching-waiting="urgent"]')?.textContent).toBe('Waiting on data...');
   });
 
   it('waits for the server start acknowledgement before local playback begins', async () => {

@@ -538,10 +538,11 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
       // Phase 3: real-time coaching update
       const incoming = msg.data as CoachingData;
       // Grow the locked set — never shrink it
-      if (incoming.checklist) {
+      const incomingChecklist = incoming.checklist;
+      if (incomingChecklist) {
         setLockedChecked(prev => {
           const next = new Set(prev);
-          incoming.checklist.filter(i => i.done).forEach(i => next.add(i.id));
+          incomingChecklist.filter(i => i.done).forEach(i => next.add(i.id));
           return next;
         });
       }
@@ -727,10 +728,11 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
         if (msg.coaching) {
           const c = msg.coaching as CoachingData;
           setCoachingData(c);
-          if (c.checklist) {
+          const snapshotChecklist = c.checklist;
+          if (snapshotChecklist) {
             setLockedChecked(prev => {
               const next = new Set(prev);
-              c.checklist.filter(i => i.done).forEach(i => next.add(i.id));
+              snapshotChecklist.filter(i => i.done).forEach(i => next.add(i.id));
               return next;
             });
           }

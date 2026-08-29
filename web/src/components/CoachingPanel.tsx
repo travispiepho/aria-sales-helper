@@ -28,15 +28,15 @@ export interface CoachingChecklistItem {
 }
 
 export interface CoachingData {
-  disc: CoachingDisc;
-  stage: CoachingStage;
-  checklist: CoachingChecklistItem[];
-  nudges: string[];
-  urgent: string | null;
+  disc?: CoachingDisc | null;
+  stage?: CoachingStage | null;
+  checklist?: CoachingChecklistItem[] | null;
+  nudges?: string[] | null;
+  urgent?: string | null;
 }
 
 interface CoachingPanelProps {
-  coaching: CoachingData | null;
+  coaching?: CoachingData | null;
   defaultCollapsed?: boolean;
 }
 
@@ -75,8 +75,24 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
   // Never show blank — holds the last nudge that was actually rendered
   const lastValidNudgeRef = useRef<string>('');
 
-  // Nudges only — urgent has its own dedicated section near the DISC card
-  const allNudges = coaching?.nudges || [];
+  // Normalize every independently-arriving section. The server can produce a
+  // partial first coaching pass, so one populated section must never make the
+  // others render blank or disappear.
+  const disc = coaching?.disc ?? null;
+  const stage = coaching?.stage ?? null;
+  const checklist = Array.isArray(coaching?.checklist) ? coaching.checklist : [];
+  const allNudges = Array.isArray(coaching?.nudges)
+    ? coaching.nudges.filter((nudge): nudge is string => typeof nudge === 'string' && nudge.trim().length > 0)
+    : [];
+  const urgent = typeof coaching?.urgent === 'string' ? coaching.urgent.trim() : '';
+
+  const hasDisc = !!disc && !!(
+    disc.emoji?.trim()
+    || disc.label?.trim()
+    || disc.tip?.trim()
+    || (disc.detected && disc.detected !== 'unknown')
+  );
+  const hasStage = !!stage && !!(stage.label?.trim() || stage.current?.trim());
 
   // Clamp index so it's never out of bounds even mid-render
   const safeIndex = allNudges.length > 0 ? nudgeIndex % allNudges.length : 0;
@@ -120,24 +136,13 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
     pauseTimerRef.current = setTimeout(() => setPaused(false), 20000);
   }
 
-  if (!coaching) {
-    return (
-      <div className="bg-indigo-50 border border-indigo-200 rounded-2xl px-4 py-3 flex items-center gap-2 text-sm text-indigo-500">
-        <span className="text-lg">🧭</span>
-        <span>ARIA coaching will appear after a few transcript segments…</span>
-      </div>
-    );
-  }
-
-  const { disc, stage, checklist, nudges, urgent } = coaching;
-
-  const stageIndex = STAGE_ORDER.indexOf(stage.current);
+  const stageIndex = stage?.current ? STAGE_ORDER.indexOf(stage.current) : -1;
   const stageProgress = stageIndex >= 0 ? Math.round(((stageIndex + 1) / STAGE_ORDER.length) * 100) : 0;
 
   const doneCount = checklist.filter(item => item.done).length;
 
   return (
-    <div className="bg-white border border-indigo-200 rounded-2xl shadow-sm overflow-hidden">
+    <div role="region" aria-label="ARIA Coaching" className="bg-white border border-indigo-200 rounded-2xl shadow-sm overflow-hidden">
       {/* Header / collapse toggle */}
       <button
         onClick={() => setCollapsed(c => !c)}
@@ -151,7 +156,7 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
               💡 Tip
             </span>
           )}
-          {!collapsed && !urgent && (
+          {!collapsed && !urgent && checklist.length > 0 && (
             <span className="ml-1 text-indigo-300 text-xs">
               {doneCount}/{checklist.length} done
             </span>
@@ -168,63 +173,79 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
 
 
           {/* ── DISC card ── */}
-          <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-3">
-            <div className="flex items-center gap-3">
-              {disc.emoji && (
-                <span className="text-4xl leading-none">{disc.emoji}</span>
-              )}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-sm font-bold text-indigo-900">
-                    {disc.label}
-                  </span>
-                  {disc.confidence && (
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${CONFIDENCE_STYLES[disc.confidence] || CONFIDENCE_STYLES.low}`}>
-                      {disc.confidence}
-                    </span>
+          <div data-coaching-section="disc" className="bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-3">
+            <div className="text-xs font-semibold text-indigo-500 uppercase tracking-wide mb-2">DISC Style</div>
+            {hasDisc && disc ? (
+              <div className="flex items-center gap-3">
+                {disc.emoji && (
+                  <span className="text-4xl leading-none">{disc.emoji}</span>
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {disc.label && (
+                      <span className="text-sm font-bold text-indigo-900">{disc.label}</span>
+                    )}
+                    {disc.confidence && (
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${CONFIDENCE_STYLES[disc.confidence] || CONFIDENCE_STYLES.low}`}>
+                        {disc.confidence}
+                      </span>
+                    )}
+                  </div>
+                  {disc.tip && (
+                    <p className="text-xs text-indigo-600 italic mt-0.5">{disc.tip}</p>
                   )}
                 </div>
-                {disc.tip && (
-                  <p className="text-xs text-indigo-600 italic mt-0.5">{disc.tip}</p>
-                )}
               </div>
-            </div>
+            ) : (
+              <p data-coaching-waiting="disc" className="text-sm text-indigo-500">Waiting on data...</p>
+            )}
           </div>
 
           {/* ── Situational DISC coaching (urgent) ── */}
-          {urgent && (
-            <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-3 flex gap-2">
-              <span className="text-lg leading-none flex-shrink-0 mt-0.5">💡</span>
-              <p className="text-sm text-orange-900 leading-snug">{urgent}</p>
-            </div>
-          )}
+          <div data-coaching-section="urgent">
+            <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Urgent Alert</div>
+            {urgent ? (
+              <div className="bg-orange-50 border border-orange-200 rounded-xl px-3 py-3 flex gap-2">
+                <span className="text-lg leading-none flex-shrink-0 mt-0.5">💡</span>
+                <p className="text-sm text-orange-900 leading-snug">{urgent}</p>
+              </div>
+            ) : (
+              <p data-coaching-waiting="urgent" className="text-sm text-gray-400">Waiting on data...</p>
+            )}
+          </div>
 
           {/* ── Sales stage ── */}
-          <div>
+          <div data-coaching-section="stage">
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Stage</span>
-              <span className="text-xs text-gray-500">{stageProgress}%</span>
+              {hasStage && <span className="text-xs text-gray-500">{stageProgress}%</span>}
             </div>
-            <div className="text-sm font-medium text-gray-800 mb-1.5">{stage.label}</div>
-            <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-indigo-500 rounded-full transition-all duration-500"
-                style={{ width: `${stageProgress}%` }}
-              />
-            </div>
+            {hasStage && stage ? (
+              <>
+                <div className="text-sm font-medium text-gray-800 mb-1.5">{stage.label || stage.current}</div>
+                <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                    style={{ width: `${stageProgress}%` }}
+                  />
+                </div>
+              </>
+            ) : (
+              <p data-coaching-waiting="stage" className="text-sm text-gray-400">Waiting on data...</p>
+            )}
           </div>
 
           {/* ── Checklist ── */}
-          <div>
+          <div data-coaching-section="checklist">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">1st Go Around</span>
-              <span className="text-xs text-gray-500">{doneCount}/{checklist.length}</span>
+              {checklist.length > 0 && <span className="text-xs text-gray-500">{doneCount}/{checklist.length}</span>}
             </div>
             <div
               data-coaching-checklist
               className="grid grid-cols-1 sm:grid-cols-2 gap-2"
             >
-              {checklist.map(item => (
+              {checklist.length > 0 ? checklist.map(item => (
                 <div
                   key={item.id}
                   data-coaching-checklist-item={item.id}
@@ -239,58 +260,64 @@ export default function CoachingPanel({ coaching, defaultCollapsed = false }: Co
                     {item.label}
                   </span>
                 </div>
-              ))}
+              )) : (
+                <p data-coaching-waiting="checklist" className="text-sm text-gray-400">Waiting on data...</p>
+              )}
             </div>
           </div>
 
           {/* ── Nudges ── (cycling, one at a time) */}
-          {allNudges.length > 0 && (
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                  Next Move
-                </span>
-                {allNudges.length > 1 && (
-                  <span className="text-xs text-gray-400">
-                    {safeIndex + 1}/{allNudges.length}
-                  </span>
-                )}
-              </div>
-
-              {/* Current nudge — fades between transitions, never goes blank */}
-              <div
-                onClick={handleNudgeTap}
-                style={{ transition: 'opacity 0.3s ease', opacity: visible ? 1 : 0 }}
-                className={`rounded-xl px-4 py-3 text-sm font-medium cursor-pointer select-none ${
-                  displayNudge?.startsWith('🚨')
-                    ? 'bg-red-50 border border-red-200 text-red-900'
-                    : 'bg-yellow-50 border border-yellow-200 text-yellow-900'
-                }`}
-              >
-                {displayNudge}
-                {paused && (
-                  <span className="ml-2 text-xs opacity-50">⏸</span>
-                )}
-              </div>
-
-              {/* Dot navigation */}
+          <div data-coaching-section="nudges">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                Next Move
+              </span>
               {allNudges.length > 1 && (
-                <div className="flex justify-center gap-1.5 mt-2">
-                  {allNudges.map((_, i) => (
-                    <button
-                      key={i}
-                      onClick={() => goToNudge(i)}
-                      className={`rounded-full transition-all ${
-                        i === safeIndex
-                          ? 'w-4 h-2 bg-yellow-500'
-                          : 'w-2 h-2 bg-gray-300 hover:bg-gray-400'
-                      }`}
-                    />
-                  ))}
-                </div>
+                <span className="text-xs text-gray-400">
+                  {safeIndex + 1}/{allNudges.length}
+                </span>
               )}
             </div>
-          )}
+
+            {allNudges.length > 0 ? (
+              <>
+                {/* Current nudge — fades between transitions, never goes blank */}
+                <div
+                  onClick={handleNudgeTap}
+                  style={{ transition: 'opacity 0.3s ease', opacity: visible ? 1 : 0 }}
+                  className={`rounded-xl px-4 py-3 text-sm font-medium cursor-pointer select-none ${
+                    displayNudge?.startsWith('🚨')
+                      ? 'bg-red-50 border border-red-200 text-red-900'
+                      : 'bg-yellow-50 border border-yellow-200 text-yellow-900'
+                  }`}
+                >
+                  {displayNudge}
+                  {paused && (
+                    <span className="ml-2 text-xs opacity-50">⏸</span>
+                  )}
+                </div>
+
+                {/* Dot navigation */}
+                {allNudges.length > 1 && (
+                  <div className="flex justify-center gap-1.5 mt-2">
+                    {allNudges.map((_, i) => (
+                      <button
+                        key={i}
+                        onClick={() => goToNudge(i)}
+                        className={`rounded-full transition-all ${
+                          i === safeIndex
+                            ? 'w-4 h-2 bg-yellow-500'
+                            : 'w-2 h-2 bg-gray-300 hover:bg-gray-400'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <p data-coaching-waiting="nudges" className="text-sm text-gray-400">Waiting on data...</p>
+            )}
+          </div>
         </div>
       )}
     </div>

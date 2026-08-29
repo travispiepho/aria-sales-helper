@@ -136,7 +136,8 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname.match(/^\/api\/meetings\/[^/]+\/coaching\/latest$/)) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ coaching }));
+    const waitingForFirstPass = url.pathname.includes('/in-person/') || url.pathname.includes('/phone-recording/');
+    res.end(JSON.stringify({ coaching: waitingForFirstPass ? null : coaching }));
     return;
   }
 

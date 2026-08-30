@@ -153,24 +153,22 @@ describe('UploadedRecordingPage', () => {
     expect(screen.queryByText(/Stop Analysis/)).toBeNull();
   });
 
-  // 2026-08-29 (aria_left_panel_title_type_duration): this page's title
-  // block gets the same "title + type label together" row-1 treatment as
-  // MeetingPage.tsx's in-person/phone blocks, with the existing "Active ·
-  // local playback..." line remaining the distinct second row directly
-  // below (this page has no elapsed-timer duration value to isolate here
-  // — see the code comment at this block for why).
-  it('renders the title and "Uploaded Recording" type label together on row 1, with the status line as a distinct row 2', () => {
+  // 2026-08-30 (aria_uploaded_recording_simplify_copy): per Gabe's explicit
+  // ask, this page's title row no longer carries the "Uploaded Recording"
+  // type label (that was added by aria_left_panel_title_type_duration for
+  // parity with MeetingPage.tsx, but removed here as a deliberate
+  // simplification for THIS PAGE ONLY), and the status line below it is
+  // simplified from "Active · local playback with live ARIA coaching" down
+  // to just "Active".
+  it('renders the title with no type label, and a simplified "Active" status line as row 2', () => {
     renderPage();
     const statusBlock = document.querySelector('[data-meeting-status-location="left-column"]')!;
     expect(statusBlock).toBeTruthy();
     const titleEl = within(statusBlock as HTMLElement).getByText('Analyze a Recording');
-    const typeLabelEl = statusBlock.querySelector('[data-meeting-type-label="left-column"]')!;
-    expect(typeLabelEl.textContent).toBe('Uploaded Recording');
-    // Title and type label share row 1's parent container.
-    expect(titleEl.parentElement).toBe(typeLabelEl.parentElement);
-    const statusLine = within(statusBlock as HTMLElement).getByText(/^Active · local playback with live ARIA coaching$/);
-    // Status/duration line is a sibling of the title+type row, not nested
-    // inside it.
+    expect(statusBlock.querySelector('[data-meeting-type-label="left-column"]')).toBeNull();
+    expect(within(statusBlock as HTMLElement).queryByText(/Uploaded Recording/)).toBeNull();
+    const statusLine = within(statusBlock as HTMLElement).getByText(/^Active$/);
+    // Status line is a sibling of the title row, not nested inside it.
     expect(statusLine.parentElement).toBe(statusBlock);
     expect(titleEl.parentElement).not.toBe(statusBlock);
   });
@@ -235,9 +233,8 @@ describe('UploadedRecordingPage', () => {
     expect(input.getAttribute('accept')).toContain('.mp4');
   });
 
-  it('shows privacy copy, file metadata, and gates start on authority acknowledgment', async () => {
+  it('shows file metadata and gates start on authority acknowledgment', async () => {
     renderPage();
-    expect(screen.getByText(/source file stays on this device/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', true);
     await selectAudio();
     expect(screen.getByText('customer-call.wav')).toBeTruthy();
@@ -294,7 +291,6 @@ describe('UploadedRecordingPage', () => {
     expect(screen.queryByRole('group', { name: 'Choose a recording' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Choose a recording' })).toBeNull();
     expect(screen.queryByLabelText('Local audio or MP4 file')).toBeNull();
-    expect(screen.queryByText(/Your source file stays on this device/i)).toBeNull();
 
     // Surrounding sections remain unaffected while active.
     expect(screen.getByRole('heading', { name: 'Playback & analysis controls' })).toBeTruthy();

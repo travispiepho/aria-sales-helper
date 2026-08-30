@@ -445,33 +445,22 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
               connection state comparable to MeetingPage.tsx's owner/observer
               sockets for this local-file-playback flow).
 
-              2026-08-29 (aria_left_panel_title_type_duration): row 1 now
-              pairs the title with a short "Uploaded Recording" type label,
-              matching MeetingPage.tsx's title-row/duration-row split for
-              its in-person and phone-call meeting types. Row 2 is left
-              byte-for-byte unchanged: this block has no live elapsed-time
-              counter to isolate onto its own line (the file's actual
-              playback Duration is a separate static field further down in
-              this same column, not part of this title block at all), so
-              there is no duration value here to split out — the existing
-              "Active · local playback..." line already is the single line
-              directly below the title, which already satisfies "distinct
-              second line" for this page's one-and-only (uploaded-recording)
-              type. */}
+              2026-08-30 (aria_uploaded_recording_simplify_copy): per Gabe's
+              explicit ask, this page's title row no longer carries the
+              "Uploaded Recording" type label added by
+              aria_left_panel_title_type_duration, and row 2 is simplified
+              from "Active · local playback with live ARIA coaching" down to
+              just "Active". This is a copy simplification for THIS PAGE
+              ONLY — MeetingPage.tsx's equivalent type labels are unchanged
+              and out of scope. */}
           <div
             data-meeting-status-location="left-column"
             className="flex-none rounded-2xl px-4 py-3 bg-green-700 text-white"
           >
             <div className="flex items-baseline gap-2 min-w-0">
               <p className="text-lg font-bold leading-tight truncate min-w-0">Analyze a Recording</p>
-              <span
-                data-meeting-type-label="left-column"
-                className="flex-shrink-0 text-white/75 text-[11px] font-semibold uppercase tracking-wide"
-              >
-                Uploaded Recording
-              </span>
             </div>
-            <p className="text-white/80 text-sm leading-snug truncate">Active · local playback with live ARIA coaching</p>
+            <p className="text-white/80 text-sm leading-snug truncate">Active</p>
           </div>
 
           {/* 2026-08-29 (aria_customer_info_editable_section): renders
@@ -503,9 +492,6 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             <div role="group" aria-labelledby="recording-selection-heading" className="space-y-4">
               <div>
                 <h1 id="recording-selection-heading" className="font-semibold text-gray-900">Choose a recording</h1>
-                <p className="text-sm text-gray-600 mt-1">
-                  Your source file stays on this device. ARIA never uploads or stores the source blob; only decoded mono 16-kHz audio is streamed during real-time playback.
-                </p>
               </div>
 
               <label className="block">

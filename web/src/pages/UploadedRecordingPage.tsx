@@ -476,7 +476,14 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
           </section>
         </section>
 
-        <section data-meeting-column="type" aria-label="Playback and analysis controls" className="uploaded-type-column bg-white rounded-2xl shadow-sm border border-gray-100 p-5 space-y-4">
+          {/* aria_coaching_left_panel_space_between_layout (2026-08-30): the
+              fixed `space-y-4` gap Tailwind utility that used to sit here
+              is removed in favor of `.uploaded-type-column`'s own
+              `justify-content: space-between` + `gap: 1rem` (index.css) so
+              this column's top-level children pin top/bottom and evenly
+              distribute in between, matching MeetingPage.tsx's equivalent
+              left column instead of a purely fixed vertical rhythm. */}
+        <section data-meeting-column="type" aria-label="Playback and analysis controls" className="uploaded-type-column bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
           {/* 2026-08-29 (aria_active_meeting_banner_info_left_panel): the
               title/status truth that used to live in the page-top AppHeader
               banner (now not rendered at all on this page — see above) now

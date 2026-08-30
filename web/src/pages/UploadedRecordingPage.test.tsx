@@ -154,6 +154,18 @@ describe('UploadedRecordingPage', () => {
     expect(screen.queryByText(/Stop Analysis/)).toBeNull();
   });
 
+  // aria_coaching_left_panel_space_between_layout (2026-08-30): the left
+  // "type" column's own top-to-bottom children (title/status block,
+  // CustomerInfoSection + upload/playback content, End Meeting control)
+  // now rely on `.uploaded-type-column`'s `justify-content: space-between`
+  // (index.css) rather than a fixed Tailwind `space-y-4` gap.
+  it('uses the space-between left-column class (not a fixed space-y gap) for the type column', () => {
+    renderPage();
+    const typeColumn = document.querySelector('[data-meeting-column="type"]')!;
+    expect(typeColumn.className).toContain('uploaded-type-column');
+    expect(typeColumn.className).not.toContain('space-y-4');
+  });
+
   // 2026-08-30 (aria_uploaded_recording_simplify_copy): per Gabe's explicit
   // ask, this page's title row no longer carries the "Uploaded Recording"
   // type label (that was added by aria_left_panel_title_type_duration for

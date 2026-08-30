@@ -47,6 +47,12 @@ describe('CoachingPanel empty and live states', () => {
     // The panel always fills the full height of its container.
     expect(panel.className).toContain('flex-1');
     expect(panel.className).toContain('flex-col');
+    // aria_coaching_left_panel_space_between_layout: Troy's explicit
+    // exception — the fully-empty "Waiting on data..." state must NOT get
+    // the new justify-between layout; it keeps the original space-y-4 flow.
+    const body = panel.querySelector('[data-coaching-body]');
+    expect(body?.className).toContain('space-y-4');
+    expect(body?.className).not.toContain('justify-between');
   });
 
   it('replaces placeholders with real content live without remounting the panel, and stays full height in both states', () => {
@@ -67,6 +73,27 @@ describe('CoachingPanel empty and live states', () => {
     // Root className (and therefore the full-height layout contract) is
     // identical whether the panel is showing placeholders or real data.
     expect(panel.className).toBe(emptyStateClassName);
+
+    // aria_coaching_left_panel_space_between_layout: once real coaching
+    // data has arrived, the body wrapper switches to the top/bottom-
+    // anchored, evenly-spaced layout instead of the fixed space-y-4 gap.
+    const body = panel.querySelector('[data-coaching-body]');
+    expect(body?.className).toContain('justify-between');
+    expect(body?.className).toContain('flex-col');
+    expect(body?.className).not.toContain('space-y-4');
+  });
+
+  it('applies the space-between layout for a partial coaching pass (some sections still waiting), not just a fully-populated one', () => {
+    render(<CoachingPanel coaching={{ checklist, nudges: ['Ask the next question.'] }} />);
+    const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
+    const body = panel.querySelector('[data-coaching-body]');
+
+    // disc/stage/urgent are still individually showing "Waiting on data..."
+    // placeholders, but the panel as a whole has real data (checklist +
+    // nudges) — Troy's exception is only for the FULLY empty state.
+    expect(panel.querySelector('[data-coaching-waiting="disc"]')).toBeTruthy();
+    expect(body?.className).toContain('justify-between');
+    expect(body?.className).not.toContain('space-y-4');
   });
 
   it('keeps placeholders only for sections missing from a partial coaching pass', () => {

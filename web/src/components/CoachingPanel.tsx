@@ -96,6 +96,18 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
   );
   const hasStage = !!stage && !!(stage.label?.trim() || stage.current?.trim());
 
+  // Troy's ask (aria_coaching_left_panel_space_between_layout): once the
+  // panel has ANY real coaching data, its sections switch from a fixed
+  // vertical gap to a top/bottom-anchored, evenly-distributed layout
+  // (`justify-between`). The explicit exception is the fully-empty "Waiting
+  // on data..." state (nothing has arrived yet at all) — that state's
+  // layout is left byte-for-byte as it was before this change. A PARTIAL
+  // coaching pass (some sections populated, others still individually
+  // showing their own "Waiting on data..." placeholder) still counts as
+  // "has data" here and gets the new layout — only the all-empty case is
+  // carved out.
+  const hasAnyCoachingData = hasDisc || hasStage || checklist.length > 0 || allNudges.length > 0 || !!urgent;
+
   // Clamp index so it's never out of bounds even mid-render
   const safeIndex = allNudges.length > 0 ? nudgeIndex % allNudges.length : 0;
   const currentNudge = allNudges[safeIndex];
@@ -163,8 +175,21 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
         </span>
       </div>
 
-      {/* Body — always rendered, fills remaining panel height, scrolls internally if content overflows */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4">
+      {/* Body — always rendered, fills remaining panel height, scrolls internally if content overflows.
+          Troy's space-between ask: once hasAnyCoachingData is true, the first
+          section pins to the top, the last section pins to the bottom, and
+          everything between gets evenly distributed spacing (`justify-between`,
+          flex column) instead of the fixed `space-y-4` gap. The exception — the
+          fully-empty "Waiting on data..." state — keeps the exact `space-y-4`
+          layout it always had. */}
+      <div
+        data-coaching-body
+        className={
+          hasAnyCoachingData
+            ? 'flex-1 min-h-0 overflow-y-auto px-4 py-3 flex flex-col justify-between gap-4'
+            : 'flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-4'
+        }
+      >
 
 
           {/* ── DISC card ── */}

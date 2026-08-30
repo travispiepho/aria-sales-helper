@@ -57,6 +57,21 @@
     overflow: hidden;
   }
 
+  /* aria_coaching_left_panel_space_between_layout (2026-08-30): the left
+     column's TOP-LEVEL children (title/status block, the scrollable
+     content wrapper below, and the bottom End Meeting control) pin to the
+     top and bottom of the column with any leftover vertical space evenly
+     distributed between them, instead of the previous fixed `gap: 1rem`
+     flow only. `.active-meeting-transcript-column` shares `.active-meeting-
+     column`'s base flex rules but is NOT given this override — Troy's ask
+     was specifically the left panel and the coaching panel, not the
+     transcript column. `gap: 1rem` above still applies as a minimum
+     spacing floor even when justify-content adds extra distributed space
+     (both compose in modern flexbox). */
+  .active-meeting-type-column {
+    justify-content: space-between;
+  }
+
   .active-meeting-column-scroll {
     min-height: 0;
     overflow-y: auto;
@@ -68,8 +83,18 @@
     margin-top: 1rem;
   }
 
+  /* aria_coaching_left_panel_space_between_layout (2026-08-30): bottom-
+     pinning for this control used to be its own `margin-top: auto` (which
+     consumes ALL leftover flex space itself, leaving nothing for a parent
+     `justify-content: space-between` to distribute). Both left-column
+     parents that render this control (`.active-meeting-type-column` and
+     `.uploaded-type-column`) now own `justify-content: space-between`
+     directly, which already pins this — as the LAST child — to the
+     bottom edge on its own; the auto margin is removed so the freed
+     space is available for space-between to distribute among the
+     children above it instead of being swallowed entirely by this one
+     child's margin. */
   .active-meeting-end-control {
-    margin-top: auto;
     flex: none;
   }
 
@@ -99,12 +124,26 @@
     padding: 1rem;
   }
 
+  /* aria_coaching_left_panel_space_between_layout (2026-08-30): this
+     column's direct children (title/status block, CustomerInfoSection,
+     the conditional upload/playback sections, and the bottom End Meeting
+     control) are its own top-to-bottom list — same space-between
+     treatment as `.active-meeting-type-column` above, and for the same
+     reason: pin first/last, evenly distribute any leftover vertical room
+     among what's in between, only actually visible when the column has
+     more height than its children need (e.g. after the pre-analysis
+     upload chrome unmounts once analysis starts). `gap: 1rem` (matching
+     the `space-y-4` Tailwind utility this class carries on the page,
+     which sets an identical 1rem vertical gap) remains the composed
+     minimum spacing floor. */
   .uploaded-type-column {
     grid-area: type;
     display: flex;
     min-width: 0;
     min-height: 0;
     flex-direction: column;
+    justify-content: space-between;
+    gap: 1rem;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;

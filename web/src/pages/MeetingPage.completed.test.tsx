@@ -118,3 +118,29 @@ describe('MeetingPage Google Docs export visibility', () => {
     expect(screen.queryByText(/export.*google|google.*doc/i)).toBeNull();
   });
 });
+
+// aria_coaching_left_panel_space_between_layout (2026-08-30): the left
+// ("type") column of an ACTIVE in-person/phone meeting relies on
+// `.active-meeting-type-column`'s `justify-content: space-between`
+// (index.css) so its top-level children (title/status block, the scrollable
+// content wrapper, and the bottom End Meeting control) pin top/bottom with
+// evenly distributed space in between, instead of a purely fixed gap.
+describe('MeetingPage active left column layout', () => {
+  it('applies the space-between left-column class to the active type column', async () => {
+    mocks.getMeeting.mockResolvedValue({
+      id: 'meeting-active-1',
+      rep_id: 'rep-1',
+      status: 'active',
+      channel: 'in_person',
+      origin_client: 'web',
+      is_owner_session: true,
+      started_at: '2026-08-27T20:00:00.000Z',
+      speaker_labels: {},
+    });
+    renderMode = 'active';
+    renderMeeting();
+
+    const typeColumn = await screen.findByRole('region', { name: 'In-person meeting controls' });
+    expect(typeColumn.className).toContain('active-meeting-type-column');
+  });
+});

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import MeetingRouteResolver from './MeetingRouteResolver';
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   getMeeting: vi.fn(), getSegments: vi.fn(), getLatestCoaching: vi.fn(), updateMeeting: vi.fn(),
 }));
 const call = vi.hoisted(() => ({
-  state: 'ended' as 'ended' | 'connected', meetingId: 'phone-1', muted: false, error: '',
+  state: 'ended' as 'ended' | 'connected' | 'idle', meetingId: 'phone-1' as string | null, muted: false, error: '',
   start: vi.fn(), toggleMute: vi.fn(), hangUp: vi.fn(), waitForTerminal: vi.fn(), clear: vi.fn(),
 }));
 
@@ -191,6 +191,72 @@ describe('canonical meeting routes', () => {
     await screen.findByRole('heading', { name: 'Live Transcript' });
     screen.getByRole('button', { name: /End Meeting/ }).click();
     await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-1/post'));
+  });
+
+  // 2026-08-29 (aria_browser_call_end_meeting_button): a browser call used
+  // to render NO end control at all in this bottom-of-left-column position
+  // (the `!isThisBrowserCall && isOwnerSession` skip) — ending only happened
+  // via the now-removed BrowserCallControls Hang Up button. It now renders
+  // the same shared EndMeetingButton as every other active meeting type,
+  // and clicking it (after confirming, since the call is still live) both
+  // hangs up the live Twilio Voice SDK call AND finalizes the meeting row
+  // exactly like the in-person flow.
+  it('renders a functional End Meeting button (not the phone Hang-Up status) for the active browser call, and clicking it hangs up the live call and finalizes the meeting', async () => {
+    mocks.getMeeting.mockResolvedValue(fixture('active', 'phone'));
+    mocks.updateMeeting.mockResolvedValue(fixture('completed', 'phone'));
+    call.state = 'connected';
+    call.meetingId = 'phone-1';
+    render(<MemoryRouter initialEntries={['/meetings/phone-1/active']}><Routes>
+      <Route path="/meetings/:id/active" element={<><MeetingPage meetingId="phone-1" pageMode="active" /><Probe /></>} />
+      <Route path="/meetings/:id/post" element={<Probe />} />
+    </Routes></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Live Transcript' });
+
+    // No non-functional "Hang up your phone" status div for a browser call.
+    expect(screen.queryByText(/Hang up your phone to end this meeting/i)).toBeNull();
+    const endButton = screen.getByRole('button', { name: /End Meeting/ });
+    expect(endButton.closest('[data-meeting-end-control]')).toBeTruthy();
+
+    // The call is still live — clicking End Meeting confirms first, same as
+    // an in-progress in-person recording, before actually ending anything.
+    endButton.click();
+    const confirmDialog = await screen.findByText('End this meeting?');
+    expect(call.hangUp).not.toHaveBeenCalled();
+    expect(mocks.updateMeeting).not.toHaveBeenCalled();
+    const confirmButton = within(confirmDialog.closest('div.bg-white') as HTMLElement)
+      .getByRole('button', { name: /End Meeting/ });
+    confirmButton.click();
+
+    await waitFor(() => expect(call.hangUp).toHaveBeenCalledOnce());
+    await waitFor(() => expect(mocks.updateMeeting).toHaveBeenCalledWith('phone-1', expect.objectContaining({ status: 'completed' })));
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/phone-1/post'));
+  });
+
+  it('does not call browserCall.hangUp when ending a non-browser-call meeting (regression: in-person and rep-answered Twilio phone calls unaffected)', async () => {
+    mocks.getMeeting.mockResolvedValue(fixture('active'));
+    mocks.updateMeeting.mockResolvedValue(fixture('completed'));
+    call.state = 'idle';
+    call.meetingId = null;
+    render(<MemoryRouter initialEntries={['/meetings/meeting-1/active']}><Routes>
+      <Route path="/meetings/:id/active" element={<><MeetingPage meetingId="meeting-1" pageMode="active" /><Probe /></>} />
+      <Route path="/meetings/:id/post" element={<Probe />} />
+    </Routes></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Live Transcript' });
+    screen.getByRole('button', { name: /End Meeting/ }).click();
+    await waitFor(() => expect(screen.getByLabelText('location').textContent).toBe('/meetings/meeting-1/post'));
+    expect(call.hangUp).not.toHaveBeenCalled();
+  });
+
+  it('keeps the rep-answered Twilio phone call\'s non-functional Hang-Up status unchanged when it is not this browser call', async () => {
+    mocks.getMeeting.mockResolvedValue({ ...fixture('active', 'phone'), recording_status: 'in-progress' });
+    call.state = 'idle';
+    call.meetingId = 'other-browser-call';
+    render(<MemoryRouter initialEntries={['/meetings/phone-1/active']}><Routes>
+      <Route path="/meetings/:id/active" element={<MeetingPage meetingId="phone-1" pageMode="active" /> } />
+    </Routes></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Live Transcript' });
+    expect(screen.getByText(/Hang up your phone to end this meeting/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /End Meeting/ })).toBeNull();
   });
 
   it('does not redirect an active canonical URL when the server still says active', async () => {

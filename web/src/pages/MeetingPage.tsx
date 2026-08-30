@@ -22,8 +22,15 @@ import AppHeader from '../components/AppHeader';
 import BrowserCallControls from '../components/BrowserCallControls';
 import { EndMeetingButton, EndMeetingConfirmModal } from '../components/EndMeetingButton';
 import MeetingTitleEditor from '../components/MeetingTitleEditor';
-import { useBrowserCall } from '../lib/browserCall';
+import { BrowserCallState, useBrowserCall } from '../lib/browserCall';
 import { inRecordingPath, postRecordingPath } from '../lib/meetingRoutes';
+
+// 2026-08-29 (aria_browser_call_end_meeting_button): the same "a live call is
+// still up" state set BrowserCallControls used to gate its own Hang Up
+// button on (before that button was removed in favor of the standard bottom-
+// of-left-column End Meeting control) — used here so handleEndMeetingButton-
+// Click() knows whether ending right now would drop a live customer call.
+const BROWSER_CALL_LIVE_STATES: BrowserCallState[] = ['initializing', 'dialing', 'ringing', 'connecting', 'connected'];
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1026,6 +1033,19 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
   // separate, explicit "✨ Generate Summary" action in the post-meeting view
   // (pre-existing behavior, unchanged by this pass).
   async function handleEndMeeting() {
+    // 2026-08-29 (aria_browser_call_end_meeting_button): a browser call has
+    // no client-captured mic pipeline for stopRecording() to tear down
+    // (isRecording never becomes true for it — startRecording()/the Record
+    // button are never reached for a browser call, same as a Twilio phone
+    // call), but it DOES have a live Twilio Voice SDK call in this very tab
+    // that must be hung up as part of "ending" it — that's the behavior the
+    // now-removed BrowserCallControls Hang Up button used to provide.
+    // Composing it here (ahead of stopRecording()'s no-op-for-this-case call
+    // and the finalize PATCH below) means the SAME single handler this
+    // button already calls for every other meeting type also terminates the
+    // live call for a browser call, so neither side effect (kill the call /
+    // finalize the meeting row) can happen without the other.
+    if (browserCall.meetingId === meetingId) browserCall.hangUp();
     stopRecording();
     if (!meetingId) return;
     try {
@@ -1059,7 +1079,18 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
   // hard-to-undo path is stopping an in-progress recording, so that's the
   // only path that gets the extra click.
   function handleEndMeetingButtonClick() {
-    if (isRecording) {
+    // 2026-08-29 (aria_browser_call_end_meeting_button): a browser call is
+    // just as consequential to end mid-call as an in-progress in-person
+    // recording — it drops a LIVE customer call, not just a local mic — so
+    // it gets the same confirm-before-ending guard while the call is still
+    // live (any state BrowserCallControls itself used to treat as "active":
+    // initializing through connected). Once the call has already ended/
+    // errored on its own, there's nothing live left to drop, so it falls
+    // through to the no-confirm-needed path below, same as an unstarted
+    // in-person meeting.
+    const isThisBrowserCallLive = browserCall.meetingId === meetingId
+      && BROWSER_CALL_LIVE_STATES.includes(browserCall.state);
+    if (isRecording || isThisBrowserCallLive) {
       setShowEndMeetingConfirm(true);
     } else {
       handleEndMeeting();
@@ -1657,9 +1688,15 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
                 </div>
               </div>
 
-              {!isThisBrowserCall && isOwnerSession && (
+              {isOwnerSession && (
                 <div data-meeting-end-control className="active-meeting-end-control">
-                  {isTwilioPhoneCall ? (
+                  {isTwilioPhoneCall && !isThisBrowserCall ? (
+                    // Rep-answers-on-their-own-physical-phone Twilio call
+                    // ONLY. isTwilioPhoneCall (channel === 'phone' &&
+                    // !!call_sid) is also true for a browser call, so
+                    // isThisBrowserCall is checked first — a browser call
+                    // never falls into this non-functional status div (see
+                    // the EndMeetingButton branch below instead).
                     <div
                       role="status"
                       aria-live="polite"
@@ -1671,6 +1708,19 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
                       </span>
                     </div>
                   ) : (
+                    // 2026-08-29 (aria_browser_call_end_meeting_button): a
+                    // browser call used to be EXPLICITLY SKIPPED here
+                    // (`!isThisBrowserCall && isOwnerSession`) and rendered
+                    // no end control at all — ending only happened via the
+                    // now-removed BrowserCallControls Hang Up button higher
+                    // in this column. It now renders the exact same shared
+                    // End Meeting button as in-person/uploaded-recording;
+                    // handleEndMeeting() (see above) already composes
+                    // browserCall.hangUp() ahead of the finalize PATCH
+                    // whenever this tab is the one that placed the call, so
+                    // clicking this both drops the live Twilio Voice SDK
+                    // call and finalizes the meeting record, same as every
+                    // other active meeting type.
                     <EndMeetingButton onClick={handleEndMeetingButtonClick} />
                   )}
                 </div>

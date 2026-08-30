@@ -113,6 +113,18 @@ describe('CoachingPanel checklist layout', () => {
     );
 
     expect(sections[sections.length - 1]).toBe('checklist');
-    expect(sections).toEqual(['disc', 'urgent', 'stage', 'nudges', 'checklist']);
+    expect(sections).toEqual(['disc', 'urgent', 'stage', 'nudges', 'progress', 'checklist']);
+  });
+
+  it('renders the progress bar as the second-to-last section, directly above the checklist', () => {
+    const { container } = render(
+      <CoachingPanel coaching={{ ...coaching, urgent: 'Pause and address the concern.' }} />
+    );
+    const sections = Array.from(container.querySelectorAll('[data-coaching-section]')).map(
+      el => el.getAttribute('data-coaching-section')
+    );
+
+    expect(sections[sections.length - 2]).toBe('progress');
+    expect(sections[sections.length - 1]).toBe('checklist');
   });
 });

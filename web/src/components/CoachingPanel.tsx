@@ -216,15 +216,7 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
               {hasStage && <span className="text-xs text-gray-500">{stageProgress}%</span>}
             </div>
             {hasStage && stage ? (
-              <>
-                <div className="text-sm font-medium text-gray-800 mb-1.5">{stage.label || stage.current}</div>
-                <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-indigo-500 rounded-full transition-all duration-500"
-                    style={{ width: `${stageProgress}%` }}
-                  />
-                </div>
-              </>
+              <div className="text-sm font-medium text-gray-800 mb-1.5">{stage.label || stage.current}</div>
             ) : (
               <p data-coaching-waiting="stage" className="text-sm text-gray-400">Waiting on data...</p>
             )}
@@ -282,6 +274,18 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
               <p data-coaching-waiting="nudges" className="text-sm text-gray-400">Waiting on data...</p>
             )}
           </div>
+
+          {/* ── Stage progress bar ── */}
+          {hasStage && (
+            <div data-coaching-section="progress">
+              <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                  style={{ width: `${stageProgress}%` }}
+                />
+              </div>
+            </div>
+          )}
 
           {/* ── Checklist ── */}
           <div data-coaching-section="checklist">

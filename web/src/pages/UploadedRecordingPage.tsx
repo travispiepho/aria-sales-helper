@@ -256,18 +256,27 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
 
   // Entry point for the bottom "End Meeting" button (the renamed/restyled
   // former "Stop Analysis" control) — parity with MeetingPage.tsx's
-  // handleEndMeetingButtonClick(). The button is only ever rendered enabled
-  // while state is 'playing' or 'paused', i.e. there is already live
-  // playback/analysis in flight and audio has already been streamed for
-  // transcription — the uploaded-recording equivalent of MeetingPage's
-  // "isRecording" gate (there is no reachable enabled state here that is
-  // "active but nothing captured yet", unlike MeetingPage's pre-Record
-  // window). So, unlike MeetingPage, this always shows the confirm dialog
-  // rather than conditionally skipping it. Confirm calls the exact same
-  // finalize() the old Stop Analysis button called; Cancel just dismisses
-  // with no side effects and analysis continues.
+  // handleEndMeetingButtonClick() for the states where there is genuinely
+  // live playback/analysis in flight.
+  //
+  // 2026-08-30 (aria_uploaded_recording_end_always_active): Troy's ask —
+  // reps landing on this page in 'idle' (nothing selected/started yet),
+  // 'preparing' (starting up), 'error' (a prior attempt failed), or
+  // 'complete' (analysis already finished — a separate "View completed
+  // meeting analysis" button covers that case) had NO way to get back to
+  // the homepage, because the button below was `disabled` in exactly those
+  // states. There is nothing destructive to confirm in any of those states
+  // (no live recording/streaming is in flight), so clicking End Meeting
+  // here just navigates straight home — no confirm dialog. Only while
+  // 'playing' or 'paused' does this open the confirm dialog and, on
+  // Confirm, call the exact same finalize() as before — that path is
+  // UNCHANGED from prior behavior.
   function handleEndMeetingButtonClick() {
-    setShowEndMeetingConfirm(true);
+    if (state === 'playing' || state === 'paused') {
+      setShowEndMeetingConfirm(true);
+      return;
+    }
+    navigate('/');
   }
 
   async function handlePlaybackDisconnect(cause: Error) {
@@ -601,15 +610,29 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
               label/icon, placement (bottom of this left/type column, pinned
               via .active-meeting-end-control's margin-top: auto — the exact
               mechanism MeetingPage.tsx's in-person End Meeting button uses),
-              styling, and confirm-before-ending UX as the in-person page (see
-              EndMeetingButton/EndMeetingConfirmModal in
-              ../components/EndMeetingButton, extracted from MeetingPage.tsx
-              for guaranteed parity). Functionally unchanged: Confirm still
-              calls the same finalize() the old Stop Analysis button called. */}
+              and styling as the in-person page (see EndMeetingButton/
+              EndMeetingConfirmModal in ../components/EndMeetingButton,
+              extracted from MeetingPage.tsx for guaranteed parity).
+
+              2026-08-30 (aria_uploaded_recording_end_always_active): only
+              disabled during 'stopping' — a finalize() is already in flight
+              at that point (async round-trip to acknowledge/persist
+              completion), and a second click mid-finalize has no well-
+              defined action, so it's momentarily disabled rather than firing
+              a redundant finalize or an ambiguous home-nav while that
+              settles. Every OTHER state ('idle', 'preparing', 'playing',
+              'paused', 'error', 'complete') now leaves this always
+              clickable — Troy's ask was that this button always be a
+              working escape hatch back to home. See
+              handleEndMeetingButtonClick() above for the per-state
+              behavior: playing/paused still opens the confirm dialog and
+              Confirm still calls the same finalize() as before (unchanged);
+              every other reachable state navigates straight home since
+              there's nothing live to confirm ending. */}
           <div data-meeting-end-control className="active-meeting-end-control">
             <EndMeetingButton
               onClick={handleEndMeetingButtonClick}
-              disabled={state !== 'playing' && state !== 'paused'}
+              disabled={state === 'stopping'}
             />
           </div>
         </section>

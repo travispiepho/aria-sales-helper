@@ -230,37 +230,6 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
             )}
           </div>
 
-          {/* ── Checklist ── */}
-          <div data-coaching-section="checklist">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">1st Go Around</span>
-              {checklist.length > 0 && <span className="text-xs text-gray-500">{doneCount}/{checklist.length}</span>}
-            </div>
-            <div
-              data-coaching-checklist
-              className="grid grid-cols-1 sm:grid-cols-2 gap-2"
-            >
-              {checklist.length > 0 ? checklist.map(item => (
-                <div
-                  key={item.id}
-                  data-coaching-checklist-item={item.id}
-                  className={`min-w-0 flex items-start gap-2 text-sm rounded-lg px-3 py-2 ${
-                    item.done ? 'text-green-700' : 'text-gray-500'
-                  }`}
-                >
-                  <span className="flex-shrink-0 text-base leading-none mt-0.5">
-                    {item.done ? '✅' : '🔲'}
-                  </span>
-                  <span className={`min-w-0 break-words leading-snug ${item.done ? 'line-through opacity-70' : ''}`}>
-                    {item.label}
-                  </span>
-                </div>
-              )) : (
-                <p data-coaching-waiting="checklist" className="text-sm text-gray-400">Waiting on data...</p>
-              )}
-            </div>
-          </div>
-
           {/* ── Nudges ── (cycling, one at a time) */}
           <div data-coaching-section="nudges">
             <div className="flex items-center justify-between mb-2">
@@ -312,6 +281,37 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
             ) : (
               <p data-coaching-waiting="nudges" className="text-sm text-gray-400">Waiting on data...</p>
             )}
+          </div>
+
+          {/* ── Checklist ── */}
+          <div data-coaching-section="checklist">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">1st Go Around</span>
+              {checklist.length > 0 && <span className="text-xs text-gray-500">{doneCount}/{checklist.length}</span>}
+            </div>
+            <div
+              data-coaching-checklist
+              className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+            >
+              {checklist.length > 0 ? checklist.map(item => (
+                <div
+                  key={item.id}
+                  data-coaching-checklist-item={item.id}
+                  className={`min-w-0 flex items-start gap-2 text-sm rounded-lg px-3 py-2 ${
+                    item.done ? 'text-green-700' : 'text-gray-500'
+                  }`}
+                >
+                  <span className="flex-shrink-0 text-base leading-none mt-0.5">
+                    {item.done ? '✅' : '🔲'}
+                  </span>
+                  <span className={`min-w-0 break-words leading-snug ${item.done ? 'line-through opacity-70' : ''}`}>
+                    {item.label}
+                  </span>
+                </div>
+              )) : (
+                <p data-coaching-waiting="checklist" className="text-sm text-gray-400">Waiting on data...</p>
+              )}
+            </div>
           </div>
       </div>
     </div>

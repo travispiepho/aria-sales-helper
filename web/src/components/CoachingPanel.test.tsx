@@ -103,4 +103,16 @@ describe('CoachingPanel checklist layout', () => {
     expect(screen.queryByRole('button', { name: /ARIA Coaching/ })).toBeNull();
     expect(container.querySelectorAll('[data-coaching-checklist-item]')).toHaveLength(11);
   });
+
+  it('renders the checklist section last, below all other coaching sections', () => {
+    const { container } = render(
+      <CoachingPanel coaching={{ ...coaching, urgent: 'Pause and address the concern.' }} />
+    );
+    const sections = Array.from(container.querySelectorAll('[data-coaching-section]')).map(
+      el => el.getAttribute('data-coaching-section')
+    );
+
+    expect(sections[sections.length - 1]).toBe('checklist');
+    expect(sections).toEqual(['disc', 'urgent', 'stage', 'nudges', 'checklist']);
+  });
 });

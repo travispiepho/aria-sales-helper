@@ -2339,7 +2339,7 @@ Detect:
 FIELD GUIDANCE:
 - disc.tip: Static one-liner on how to sell to this style (under 15 words). Example: "Lead with ROI, skip the story."
 - nudges: 1-4 short action items for what the rep should do next (under 10 words each).
-- urgent: DISC-based situational coaching — if you detect the rep made a misstep, missed a read on the prospect's style, or the conversation is drifting off track, write a brief recovery tip here (1-2 sentences max). Base it on what you know about this prospect's DISC style. Examples: "This Dove is pulling back — slow down and reassure before asking for price range." / "You over-explained to an Eagle — pivot to options and let them choose." / "The Owl asked for specifics you didn't answer — loop back and give the exact detail." Set to null if the conversation is on track and no correction is needed.
+- urgent: DISC-based situational coaching — if you detect the rep made a misstep, missed a read on the prospect's style, or the conversation is drifting off track, write a brief recovery tip here. The rep reads this mid-conversation while actively talking to the customer, so it must be glanceable in under two seconds: ONE short sentence, 12 words or fewer, imperative and actionable — never a paragraph or multiple clauses stacked with em-dashes. Base it on what you know about this prospect's DISC style. Examples: "Slow down, reassure this Dove before pricing." / "Pivot to options — let the Eagle choose." / "Loop back, give the Owl that exact detail." Set to null if the conversation is on track and no correction is needed.
 
 Return the exact JSON shape specified.`;
 

@@ -195,6 +195,53 @@ describe('UploadedRecordingPage', () => {
     expect(consent.compareDocumentPosition(start) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('hides the entire Choose a recording section once analysis is active, and shows it again while no analysis is active', async () => {
+    renderPage();
+    expect(screen.getByRole('group', { name: 'Choose a recording' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Choose a recording' })).toBeTruthy();
+    expect(screen.getByLabelText('Local audio or MP4 file')).toBeTruthy();
+
+    await selectAudio();
+    // A file is selected but Start Analysis has not been clicked yet
+    // (`active` is still false at this point) — the chooser stays visible
+    // so the user can still pick a different file before starting.
+    expect(screen.getByRole('group', { name: 'Choose a recording' })).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await screen.findByRole('heading', { name: 'Live transcript' });
+
+    // Now analysis is active: the whole section must be gone, not merely
+    // disabled.
+    expect(screen.queryByRole('group', { name: 'Choose a recording' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Choose a recording' })).toBeNull();
+    expect(screen.queryByLabelText('Local audio or MP4 file')).toBeNull();
+    expect(screen.queryByText(/Your source file stays on this device/i)).toBeNull();
+
+    // Surrounding sections remain unaffected while active.
+    expect(screen.getByRole('heading', { name: 'Playback & analysis controls' })).toBeTruthy();
+    expect(screen.getByLabelText('Selected recording playback')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /End Meeting/ })).toBeTruthy();
+  });
+
+  it('shows the Choose a recording section again after a fresh mount following completion (no active/selected file)', async () => {
+    const { unmount } = renderPage();
+    await selectAudio();
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await screen.findByRole('heading', { name: 'Live transcript' });
+    expect(screen.queryByRole('group', { name: 'Choose a recording' })).toBeNull();
+
+    // This page always navigates away on completion (to the post-recording
+    // route on a different component), so a returning user gets a fresh
+    // mount with `active` back to false rather than this same instance
+    // staying mounted mid-analysis. Simulate that fresh instance here.
+    unmount();
+    renderPage();
+    expect(screen.getByRole('group', { name: 'Choose a recording' })).toBeTruthy();
+    expect(screen.getByLabelText('Local audio or MP4 file')).toBeTruthy();
+  });
+
   it('orders coaching above the transcript and groups playback details, progress, and controls below it', async () => {
     await startAnalysis();
 

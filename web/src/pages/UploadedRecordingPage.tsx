@@ -418,26 +418,38 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             <p className="text-white/80 text-sm leading-snug truncate">Active · local playback with live ARIA coaching</p>
           </div>
 
-          <div role="group" aria-labelledby="recording-selection-heading" className="space-y-4">
-            <div>
-              <h1 id="recording-selection-heading" className="font-semibold text-gray-900">Choose a recording</h1>
-              <p className="text-sm text-gray-600 mt-1">
-                Your source file stays on this device. ARIA never uploads or stores the source blob; only decoded mono 16-kHz audio is streamed during real-time playback.
-              </p>
-            </div>
+          {/* 2026-08-29 (aria_uploaded_recording_hide_selector_after_pick):
+              once analysis is active (a recording has been selected AND
+              "Start Analysis" has run — see the `active` state derivation
+              above), the entire "Choose a recording" section (heading,
+              privacy copy, and file input) is unmounted rather than merely
+              disabled. This page never navigates away on its own while
+              active (completion navigates to the post-recording route,
+              which is a different page/component), so this section reliably
+              reappears on any fresh mount or full reset where `active` is
+              false and a new file can be chosen. */}
+          {!active && (
+            <div role="group" aria-labelledby="recording-selection-heading" className="space-y-4">
+              <div>
+                <h1 id="recording-selection-heading" className="font-semibold text-gray-900">Choose a recording</h1>
+                <p className="text-sm text-gray-600 mt-1">
+                  Your source file stays on this device. ARIA never uploads or stores the source blob; only decoded mono 16-kHz audio is streamed during real-time playback.
+                </p>
+              </div>
 
-            <label className="block">
-              <span className="text-sm font-medium text-gray-700">Local audio or MP4 file</span>
-              <input
-                aria-label="Local audio or MP4 file"
-                type="file"
-                accept={UPLOADED_RECORDING_ACCEPT}
-                disabled={active}
-                onChange={event => resetSelectedFile(event.target.files?.[0] ?? null)}
-                className="mt-2 block w-full min-h-11 text-sm text-gray-700 file:min-h-11 file:mr-3 file:px-4 file:border-0 file:rounded-xl file:bg-blue-50 file:text-blue-700 file:font-semibold disabled:opacity-60"
-              />
-            </label>
-          </div>
+              <label className="block">
+                <span className="text-sm font-medium text-gray-700">Local audio or MP4 file</span>
+                <input
+                  aria-label="Local audio or MP4 file"
+                  type="file"
+                  accept={UPLOADED_RECORDING_ACCEPT}
+                  disabled={active}
+                  onChange={event => resetSelectedFile(event.target.files?.[0] ?? null)}
+                  className="mt-2 block w-full min-h-11 text-sm text-gray-700 file:min-h-11 file:mr-3 file:px-4 file:border-0 file:rounded-xl file:bg-blue-50 file:text-blue-700 file:font-semibold disabled:opacity-60"
+                />
+              </label>
+            </div>
+          )}
 
           <h2 className="font-semibold text-gray-900">Playback &amp; analysis controls</h2>
 

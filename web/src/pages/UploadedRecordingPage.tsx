@@ -41,6 +41,20 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
   const [segments, setSegments] = useState<LiveSegment[]>([]);
   const [interimText, setInterimText] = useState('');
   const [coaching, setCoaching] = useState<CoachingData | null>(null);
+  // 2026-08-30 (aria_coaching_checklist_persist_checked_state): mirrors
+  // MeetingPage.tsx's own lockedChecked Set (see its "Fix checklist
+  // stickiness" commit, 197442e) — once a checklist item is reported
+  // done:true by any live `coaching` WS push, remember its id here forever
+  // for THIS meeting/analysis run, so a later coaching pass whose derived
+  // signal regresses (e.g. lower-confidence re-evaluation of the same
+  // transcript window) can never flip it back to unchecked in the UI. This
+  // page previously had no equivalent of that ratchet at all — raw
+  // `coaching.checklist` from the latest WS message was passed straight
+  // through to CoachingPanel, so a checked box could visibly uncheck itself
+  // mid-analysis with no rep action. Reset alongside `coaching` itself in
+  // handleStart() below so a fresh analysis run starts with a fresh,
+  // fully-unchecked checklist — no state leaks across recordings.
+  const [lockedChecked, setLockedChecked] = useState<Set<string>>(new Set());
   const [speakerLabels, setSpeakerLabels] = useState<Record<string, string>>({});
   const [meetingId, setMeetingId] = useState<string | null>(null);
   // 2026-08-29 (aria_customer_info_editable_section): mirrors MeetingPage's
@@ -177,7 +191,18 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
         segment.speaker === from ? { ...segment, speaker: to } : segment
       )));
     } else if (msg.type === 'coaching' && msg.data) {
-      setCoaching(msg.data as CoachingData);
+      const incoming = msg.data as CoachingData;
+      // Grow the locked set — never shrink it (see lockedChecked's own
+      // comment above for why this ratchet exists).
+      const incomingChecklist = incoming.checklist;
+      if (incomingChecklist) {
+        setLockedChecked(prev => {
+          const next = new Set(prev);
+          incomingChecklist.filter(i => i.done).forEach(i => next.add(i.id));
+          return next;
+        });
+      }
+      setCoaching(incoming);
     } else if (msg.type === 'error') {
       setError(typeof msg.error === 'string' ? msg.error : 'ARIA could not analyze this recording.');
     }
@@ -303,6 +328,9 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
     setSegments([]);
     setInterimText('');
     setCoaching(null);
+    // Fresh analysis run = fresh checklist — no sticky state leaks from a
+    // previous recording into this one.
+    setLockedChecked(new Set());
     setProgress(0);
     userScrolledUpRef.current = false;
     setState('preparing');
@@ -392,7 +420,15 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
       <main data-active-meeting-layout="three-column" className="uploaded-active-meeting-workspace">
         <section data-meeting-column="feedback" aria-label="ARIA Feedback" className="uploaded-feedback-column">
           <div data-aria-feedback-panel className="w-full h-full flex flex-col">
-            <CoachingPanel coaching={coaching} />
+            <CoachingPanel
+              coaching={coaching ? {
+                ...coaching,
+                checklist: coaching.checklist?.map(item => ({
+                  ...item,
+                  done: item.done || lockedChecked.has(item.id),
+                })) ?? [],
+              } : null}
+            />
           </div>
         </section>
         <section data-meeting-column="transcript" aria-label="Speaker and transcript controls" className="uploaded-right-column">

@@ -411,6 +411,100 @@ describe('UploadedRecordingPage', () => {
     expect(coaching.querySelector('[data-coaching-waiting="urgent"]')?.textContent).toBe('Waiting on data...');
   });
 
+  it('never unchecks a checklist item once a coaching push marks it done, even if a later push regresses it (aria_coaching_checklist_persist_checked_state)', async () => {
+    const applyLiveMessage = await startAnalysis();
+    const baseChecklist = Array.from({ length: 3 }, (_, index) => ({
+      id: `ratchet-item-${index + 1}`,
+      label: `Ratchet checklist item ${index + 1}`,
+      done: false,
+    }));
+
+    // First coaching pass: item 2 becomes checked.
+    applyLiveMessage({
+      type: 'coaching',
+      data: {
+        disc: null,
+        stage: null,
+        checklist: baseChecklist.map((item, i) => ({ ...item, done: i === 1 })),
+        nudges: [],
+        urgent: null,
+      },
+    });
+    await screen.findByText('1/3');
+
+    // Second coaching pass: the derived engine "changes its mind" and
+    // reports item 2 as no longer done (e.g. lower-confidence re-evaluation
+    // of the same transcript window). It must stay checked in the UI.
+    applyLiveMessage({
+      type: 'coaching',
+      data: {
+        disc: null,
+        stage: null,
+        checklist: baseChecklist.map(item => ({ ...item, done: false })),
+        nudges: [],
+        urgent: null,
+      },
+    });
+
+    await waitFor(() => expect(screen.getByText('1/3')).toBeTruthy());
+    const coaching = screen.getByRole('region', { name: 'ARIA Coaching' });
+    const item2 = coaching.querySelector('[data-coaching-checklist-item="ratchet-item-2"]');
+    expect(item2?.textContent).toContain('✅');
+
+    // A third pass can still check NEW items going forward.
+    applyLiveMessage({
+      type: 'coaching',
+      data: {
+        disc: null,
+        stage: null,
+        checklist: baseChecklist.map((item, i) => ({ ...item, done: i === 1 || i === 2 })),
+        nudges: [],
+        urgent: null,
+      },
+    });
+    await screen.findByText('2/3');
+    const item3 = screen.getByRole('region', { name: 'ARIA Coaching' })
+      .querySelector('[data-coaching-checklist-item="ratchet-item-3"]');
+    expect(item3?.textContent).toContain('✅');
+  });
+
+  it('starts a fresh analysis run with a fully unchecked checklist — no sticky state leaks across recordings', async () => {
+    const { unmount } = renderPage();
+    const applyLiveMessage = await (async () => {
+      let handler: ((message: unknown) => void) | undefined;
+      mocks.connect.mockImplementation(async (h: (message: unknown) => void) => { handler = h; });
+      await selectAudio();
+      await userEvent.click(screen.getByRole('checkbox'));
+      await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+      await waitFor(() => expect(handler).toBeTruthy());
+      await screen.findByRole('heading', { name: 'Live transcript' });
+      return handler!;
+    })();
+    applyLiveMessage({
+      type: 'coaching',
+      data: {
+        disc: null,
+        stage: null,
+        checklist: [{ id: 'leftover-item', label: 'Leftover item', done: true }],
+        nudges: [],
+        urgent: null,
+      },
+    });
+    await screen.findByText('1/1');
+
+    // This page always navigates away on a completed analysis (to a
+    // different component/route — see the "shows the Choose a recording
+    // section again after a fresh mount" test above for the established
+    // precedent), so the realistic "new meeting" boundary is a fresh mount.
+    // The previous meeting's locked-checked state must not leak into it.
+    unmount();
+    renderPage();
+
+    const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
+    expect(panel.querySelector('[data-coaching-waiting="checklist"]')).toBeTruthy();
+    expect(screen.queryByText('Leftover item')).toBeNull();
+  });
+
   it('waits for the server start acknowledgement before local playback begins', async () => {
     let acknowledgeStart: (() => void) | undefined;
     mocks.start.mockImplementation(() => new Promise<void>(resolve => { acknowledgeStart = resolve; }));

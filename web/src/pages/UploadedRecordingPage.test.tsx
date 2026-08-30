@@ -149,6 +149,28 @@ describe('UploadedRecordingPage', () => {
     expect(screen.queryByText(/Stop Analysis/)).toBeNull();
   });
 
+  // 2026-08-29 (aria_left_panel_title_type_duration): this page's title
+  // block gets the same "title + type label together" row-1 treatment as
+  // MeetingPage.tsx's in-person/phone blocks, with the existing "Active ·
+  // local playback..." line remaining the distinct second row directly
+  // below (this page has no elapsed-timer duration value to isolate here
+  // — see the code comment at this block for why).
+  it('renders the title and "Uploaded Recording" type label together on row 1, with the status line as a distinct row 2', () => {
+    renderPage();
+    const statusBlock = document.querySelector('[data-meeting-status-location="left-column"]')!;
+    expect(statusBlock).toBeTruthy();
+    const titleEl = within(statusBlock as HTMLElement).getByText('Analyze a Recording');
+    const typeLabelEl = statusBlock.querySelector('[data-meeting-type-label="left-column"]')!;
+    expect(typeLabelEl.textContent).toBe('Uploaded Recording');
+    // Title and type label share row 1's parent container.
+    expect(titleEl.parentElement).toBe(typeLabelEl.parentElement);
+    const statusLine = within(statusBlock as HTMLElement).getByText(/^Active · local playback with live ARIA coaching$/);
+    // Status/duration line is a sibling of the title+type row, not nested
+    // inside it.
+    expect(statusLine.parentElement).toBe(statusBlock);
+    expect(titleEl.parentElement).not.toBe(statusBlock);
+  });
+
   it('makes MP4 recordings selectable alongside existing audio formats', () => {
     renderPage();
     const input = screen.getByLabelText('Local audio or MP4 file');

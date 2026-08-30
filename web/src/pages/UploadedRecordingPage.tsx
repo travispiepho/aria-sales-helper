@@ -409,12 +409,34 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
               so the status line is always "Active" while mounted, with no
               connection badge (there is no live audio-pipeline WebSocket
               connection state comparable to MeetingPage.tsx's owner/observer
-              sockets for this local-file-playback flow). */}
+              sockets for this local-file-playback flow).
+
+              2026-08-29 (aria_left_panel_title_type_duration): row 1 now
+              pairs the title with a short "Uploaded Recording" type label,
+              matching MeetingPage.tsx's title-row/duration-row split for
+              its in-person and phone-call meeting types. Row 2 is left
+              byte-for-byte unchanged: this block has no live elapsed-time
+              counter to isolate onto its own line (the file's actual
+              playback Duration is a separate static field further down in
+              this same column, not part of this title block at all), so
+              there is no duration value here to split out — the existing
+              "Active · local playback..." line already is the single line
+              directly below the title, which already satisfies "distinct
+              second line" for this page's one-and-only (uploaded-recording)
+              type. */}
           <div
             data-meeting-status-location="left-column"
             className="flex-none rounded-2xl px-4 py-3 bg-green-700 text-white"
           >
-            <p className="text-lg font-bold leading-tight truncate">Analyze a Recording</p>
+            <div className="flex items-baseline gap-2 min-w-0">
+              <p className="text-lg font-bold leading-tight truncate min-w-0">Analyze a Recording</p>
+              <span
+                data-meeting-type-label="left-column"
+                className="flex-shrink-0 text-white/75 text-[11px] font-semibold uppercase tracking-wide"
+              >
+                Uploaded Recording
+              </span>
+            </div>
             <p className="text-white/80 text-sm leading-snug truncate">Active · local playback with live ARIA coaching</p>
           </div>
 

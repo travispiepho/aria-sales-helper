@@ -1572,16 +1572,46 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
                   (red=recording, indigo=synced-from-mobile,
                   green=active-not-yet-recording) and the same
                   ConnectionBadge component — just restyled to fit a
-                  compact column-top block instead of a full-width banner. */}
+                  compact column-top block instead of a full-width banner.
+
+                  2026-08-29 (aria_left_panel_title_type_duration): row 1
+                  now carries BOTH the title and a short meeting-type label
+                  (`isTwilioPhoneCall ? 'Phone Call' : 'In-Person Meeting'`
+                  below; this page never renders the uploaded-recording
+                  type, that's UploadedRecordingPage.tsx's own block), so
+                  an observer or
+                  rep can see what kind of meeting this is at a glance
+                  without opening the lower "Phone meeting"/"Live recording"
+                  detail card. Row 2 (the existing
+                  `data-meeting-status-location="left-column"` <p>) is left
+                  byte-for-byte unchanged: it was already the duration line,
+                  already visually distinct from the title above it, and
+                  keeping its "Recording ·"/"Synced from mobile ·"/"Active ·"
+                  word prefix (rather than stripping down to bare duration)
+                  is what keeps the observer/synced-from-mobile signal
+                  unambiguous — the block's red/indigo/green tone alone does
+                  not reliably read as "someone else's mic is capturing this,
+                  not mine" the way the words do, and every regression test
+                  below (unit + e2e) already asserts on this exact prefixed
+                  string, so changing it would be a pure regression for zero
+                  net gain over just adding the type label to row 1. */}
               <div
                 className={`flex-none rounded-2xl px-4 py-3 text-white flex items-center gap-3 ${
                   isRecording ? 'bg-red-700' : isSyncedFromMobile ? 'bg-indigo-700' : 'bg-green-700'
                 }`}
               >
                 <div className="min-w-0 flex-1">
-                  <h1 className="text-lg font-bold leading-tight truncate">
-                    {meeting.title || meeting.customer_name || 'Meeting'}
-                  </h1>
+                  <div className="flex items-baseline gap-2 min-w-0">
+                    <h1 className="text-lg font-bold leading-tight truncate min-w-0">
+                      {meeting.title || meeting.customer_name || 'Meeting'}
+                    </h1>
+                    <span
+                      data-meeting-type-label="left-column"
+                      className="flex-shrink-0 text-white/75 text-[11px] font-semibold uppercase tracking-wide"
+                    >
+                      {isTwilioPhoneCall ? 'Phone Call' : 'In-Person Meeting'}
+                    </span>
+                  </div>
                   <p data-meeting-status-location="left-column" className="text-white/80 text-sm leading-snug truncate">
                     {isRecording
                       ? `Recording · ${formatElapsed(elapsedSec)}`

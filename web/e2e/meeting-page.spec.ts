@@ -241,6 +241,11 @@ test.describe('desktop active meeting three-column viewport contract', () => {
         await expectCoachingPanelNeverCollapses(page);
         await expectNoDedicatedStatusBanner(page);
         await expect(page.locator('[data-meeting-column="type"] [data-meeting-end-control]')).toBeVisible();
+        // 2026-08-29 (aria_left_panel_title_type_duration): title + type
+        // label share row 1; duration stays alone on row 2 directly below.
+        const typeLabel = page.locator('[data-meeting-type-label="left-column"]');
+        await expect(typeLabel).toHaveText('In-Person Meeting');
+        await expect(page.locator('[data-meeting-status-location="left-column"]')).toContainText(/^Active · \d+:\d{2}$/);
       });
       test('phone fits without document overflow and keeps hang-up guidance', async ({ page }) => {
         await page.goto(`${BASE}/meetings/phone-recording/active`);
@@ -250,6 +255,9 @@ test.describe('desktop active meeting three-column viewport contract', () => {
         await expectNoDedicatedStatusBanner(page);
         await expect(page.getByText('Recording (Twilio)')).toBeVisible();
         await expect(page.getByText('Hang up your phone to end this meeting.')).toBeVisible();
+        const typeLabel = page.locator('[data-meeting-type-label="left-column"]');
+        await expect(typeLabel).toHaveText('Phone Call');
+        await expect(page.locator('[data-meeting-status-location="left-column"]')).toContainText(/^(Active|Recording) · \d+:\d{2}$/);
       });
       test('uploaded recording fits without document overflow', async ({ page }) => {
         await page.goto(`${BASE}/recordings/analyze`);
@@ -260,6 +268,7 @@ test.describe('desktop active meeting three-column viewport contract', () => {
         await expect(page.getByText('📱 LIVE — synced from mobile device')).toHaveCount(0);
         await expect(page.getByRole('heading', { name: 'Choose a recording' })).toBeVisible();
         await expect(page.getByRole('heading', { name: 'Playback & analysis controls' })).toBeVisible();
+        await expect(page.locator('[data-meeting-type-label="left-column"]')).toHaveText('Uploaded Recording');
       });
     });
   }
@@ -275,6 +284,13 @@ test.describe('observer synced meeting status', () => {
     await expect(page.locator('[data-meeting-status-location="left-column"]')).toContainText('Synced from mobile');
     await expect(page.getByText('Live from phone')).toBeVisible();
     await expect(page.getByText('Synced from mobile', { exact: true })).toBeVisible();
+    // 2026-08-29 (aria_left_panel_title_type_duration): observer/synced case
+    // still gets the same type label as the owner's own in-person session
+    // (mobile-sync is always in-person channel-wise), and the duration line
+    // keeps its "Synced from mobile ·" word prefix so an observer can never
+    // mistake this for their own mic recording.
+    await expect(page.locator('[data-meeting-type-label="left-column"]')).toHaveText('In-Person Meeting');
+    await expect(page.locator('[data-meeting-status-location="left-column"]')).toContainText(/^Synced from mobile · \d+:\d{2}$/);
   });
 });
 

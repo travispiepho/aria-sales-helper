@@ -181,6 +181,50 @@ describe('canonical meeting routes', () => {
     }
   });
 
+  // 2026-08-29 (aria_left_panel_title_type_duration): title+type must now
+  // render together on the block's first row, with the meeting duration
+  // isolated on its own second row directly below — for all three meeting
+  // types this page can render (in-person, rep-answered Twilio phone call,
+  // and the observer/synced-from-mobile case, which is always in-person
+  // channel-wise but renders the indigo tone + "Live from phone" pill).
+  it.each([
+    ['owner in-person', { ...fixture('active', 'in_person'), title: 'Smith Estimate', is_owner_session: true }, 'In-Person Meeting'],
+    ['owner phone', { ...fixture('active', 'phone'), title: 'Jones Call', is_owner_session: true, recording_status: 'in-progress' }, 'Phone Call'],
+  ['observer mobile sync', { ...fixture('active', 'in_person'), title: 'Lee Walkthrough', is_owner_session: false, origin_client: 'mobile' }, 'In-Person Meeting'],
+  ] as const)('renders title+type together on row 1 and duration alone on row 2 for %s', async (_name, meeting, typeLabel) => {
+    mocks.getMeeting.mockResolvedValue(meeting);
+    call.meetingId = 'other-browser-call';
+    render(<MemoryRouter initialEntries={[`/meetings/${meeting.id}/active`]}><Routes>
+      <Route path="/meetings/:id/active" element={<MeetingPage meetingId={meeting.id} pageMode="active" />} />
+    </Routes></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Live Transcript' });
+
+    const typeColumn = document.querySelector('[data-meeting-column="type"]')!;
+    const titleHeading = within(typeColumn as HTMLElement).getByRole('heading', { level: 1 });
+    expect(titleHeading.textContent).toBe(meeting.title);
+
+    const typeLabelEl = typeColumn.querySelector('[data-meeting-type-label="left-column"]');
+    expect(typeLabelEl).toBeTruthy();
+    expect(typeLabelEl!.textContent).toBe(typeLabel);
+    // Title and its type label share row 1: same parent row container, and
+    // the type label must not appear inside the duration row below it.
+    expect(titleHeading.parentElement).toBe(typeLabelEl!.parentElement);
+
+    const durationRow = typeColumn.querySelector('[data-meeting-status-location="left-column"]')!;
+    expect(durationRow).toBeTruthy();
+    // Duration row must be a sibling of (i.e. directly below) the title+type
+    // row, not nested inside it, and must contain no type-label text.
+    expect(durationRow.parentElement).toBe(titleHeading.parentElement!.parentElement);
+    expect(durationRow.textContent).not.toContain(typeLabel);
+    if (meeting.is_owner_session === false) {
+      expect(durationRow.textContent).toMatch(/^Synced from mobile · \d+:\d{2}$/);
+    } else if (meeting.channel === 'phone') {
+      expect(durationRow.textContent).toMatch(/^(Active|Recording) · \d+:\d{2}$/);
+    } else {
+      expect(durationRow.textContent).toMatch(/^Active · \d+:\d{2}$/);
+    }
+  });
+
   it('moves End Meeting to post only after the terminal PATCH response', async () => {
     mocks.getMeeting.mockResolvedValue(fixture('active'));
     mocks.updateMeeting.mockResolvedValue(fixture('completed'));

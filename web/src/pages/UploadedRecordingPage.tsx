@@ -517,52 +517,73 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             </div>
           )}
 
-          <h2 className="font-semibold text-gray-900">Playback &amp; analysis controls</h2>
+          {/* 2026-08-30 (aria_uploaded_recording_hide_metadata_during_analysis):
+              the pre-analysis file-selection chrome below (heading,
+              Filename/Duration/Type metadata, the preview <audio> element +
+              its locked-seeking note, and the consent checkbox) only serves
+              a purpose while a file is being selected/reviewed. Once
+              analysis is active it is unmounted entirely — it reliably
+              reappears whenever `active` is false again (idle for a fresh
+              pick, or complete/error, matching this page's existing
+              idle-only "Choose a recording" section above). The preview
+              <audio> element here is NOT load-bearing for playback/PCM
+              streaming: actual analysis-time playback and PCM chunking are
+              driven entirely by LocalRecordingPlayer's own AudioContext /
+              AudioBufferSourceNode / ScriptProcessorNode (see handleStart()
+              above and lib/uploadedRecording.ts), which is fully independent
+              of this DOM node. previewAudioRef is only touched synchronously
+              in handleStart() (pause/reset) before this section unmounts, so
+              full removal here is safe. */}
+          {!active && (
+            <>
+              <h2 className="font-semibold text-gray-900">Playback &amp; analysis controls</h2>
 
-          {objectUrl && file && (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-3">
-              <dl className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
-                <div><dt className="text-gray-500">Filename</dt><dd className="font-medium text-gray-900 break-all">{file.name}</dd></div>
-                <div><dt className="text-gray-500">Duration</dt><dd className="font-medium text-gray-900">{metadataLoading ? 'Reading…' : formatRecordingDuration(duration)}</dd></div>
-                <div><dt className="text-gray-500">Type</dt><dd className="font-medium text-gray-900">{file.type || 'Unknown'}</dd></div>
-              </dl>
-              <audio
-                ref={previewAudioRef}
-                aria-label="Selected recording playback"
-                controls={!active}
-                controlsList="nodownload noplaybackrate"
-                src={objectUrl}
-                preload="metadata"
-                onLoadedMetadata={event => {
-                  const value = event.currentTarget.duration;
-                  setDuration(Number.isFinite(value) ? value : 0);
-                  setMetadataLoading(false);
-                  if (!Number.isFinite(value) || value <= 0) setError('ARIA could not read this audio file. Choose another file and retry.');
-                }}
-                onError={() => {
-                  setMetadataLoading(false);
-                  setError(isMp4RecordingFile(file) ? recordingDecodeError(file).message : 'ARIA could not decode this audio file. Choose another file and retry.');
-                }}
-                onRateChange={event => { event.currentTarget.playbackRate = PLAYBACK_RATE; }}
-                onSeeking={event => {
-                  if (active) event.currentTarget.currentTime = progress;
-                }}
-                className="w-full"
-              />
-              {active && <p className="text-xs font-medium text-amber-700">Seeking and playback-speed changes are locked while analysis is active. Playback runs at 1x.</p>}
-            </div>
+              {objectUrl && file && (
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-3">
+                  <dl className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
+                    <div><dt className="text-gray-500">Filename</dt><dd className="font-medium text-gray-900 break-all">{file.name}</dd></div>
+                    <div><dt className="text-gray-500">Duration</dt><dd className="font-medium text-gray-900">{metadataLoading ? 'Reading…' : formatRecordingDuration(duration)}</dd></div>
+                    <div><dt className="text-gray-500">Type</dt><dd className="font-medium text-gray-900">{file.type || 'Unknown'}</dd></div>
+                  </dl>
+                  <audio
+                    ref={previewAudioRef}
+                    aria-label="Selected recording playback"
+                    controls={!active}
+                    controlsList="nodownload noplaybackrate"
+                    src={objectUrl}
+                    preload="metadata"
+                    onLoadedMetadata={event => {
+                      const value = event.currentTarget.duration;
+                      setDuration(Number.isFinite(value) ? value : 0);
+                      setMetadataLoading(false);
+                      if (!Number.isFinite(value) || value <= 0) setError('ARIA could not read this audio file. Choose another file and retry.');
+                    }}
+                    onError={() => {
+                      setMetadataLoading(false);
+                      setError(isMp4RecordingFile(file) ? recordingDecodeError(file).message : 'ARIA could not decode this audio file. Choose another file and retry.');
+                    }}
+                    onRateChange={event => { event.currentTarget.playbackRate = PLAYBACK_RATE; }}
+                    onSeeking={event => {
+                      if (active) event.currentTarget.currentTime = progress;
+                    }}
+                    className="w-full"
+                  />
+                  {active && <p className="text-xs font-medium text-amber-700">Seeking and playback-speed changes are locked while analysis is active. Playback runs at 1x.</p>}
+                </div>
+              )}
+
+              <label className="flex items-start gap-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-950">
+                <input
+                  type="checkbox"
+                  checked={consent}
+                  disabled={active}
+                  onChange={event => { setConsent(event.target.checked); setError(null); }}
+                  className="mt-0.5 w-5 h-5 flex-none"
+                />
+                <span>I acknowledge that I have the authority and permission needed to use this recording for analysis.</span>
+              </label>
+            </>
           )}
-
-          <label className="flex items-start gap-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-950">
-            <input
-              type="checkbox"
-              checked={consent}
-              disabled={active}
-              onChange={event => { setConsent(event.target.checked); setError(null); }}
-              className="mt-0.5 w-5 h-5 flex-none"
-            />
-            <span>I acknowledge that I have the authority and permission needed to use this recording for analysis.</span>
-          </label>
 
           {error && (
             <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">

@@ -211,6 +211,20 @@ export async function getCustomer(id: string): Promise<Customer> {
   return request('GET', `/api/customers/${id}`);
 }
 
+// 2026-08-29 (aria_customer_info_editable_section): edits an existing
+// customer record via the new PATCH /api/customers/:id server route
+// (mirrors the same partial-update contract as updateMeeting() below —
+// only fields present in `data` are sent/changed). Used by the new
+// in-meeting CustomerInfoSection component so edits made mid-meeting
+// persist to the same customers table row CustomerIntakeModal originally
+// created, rather than only updating local UI state.
+export async function updateCustomer(
+  id: string,
+  data: Partial<Pick<CustomerInput, 'name' | 'address' | 'phone' | 'email'>>
+): Promise<Customer> {
+  return request('PATCH', `/api/customers/${id}`, data);
+}
+
 // Meetings
 
 export interface Meeting {

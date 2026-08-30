@@ -7,10 +7,13 @@ import {
   getMeetingSegments,
   getLatestCoaching,
   getCoachingReport,
+  getCustomer,
   Meeting,
   CoachingReport,
+  Customer,
   apiFetch,
 } from '../lib/api';
+import CustomerInfoSection from '../components/CustomerInfoSection';
 import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 import RebuttalTeleprompter, { SuggestedLibraryRebuttal } from '../components/RebuttalTeleprompter';
 import { dismissLibraryRebuttal } from '../lib/api';
@@ -219,6 +222,20 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
   const [titleSaving, setTitleSaving] = useState(false);
   const [titleError, setTitleError] = useState<string | null>(null);
 
+  // 2026-08-29 (aria_customer_info_editable_section): the linked customer
+  // row's full editable detail (address/phone/email), fetched separately
+  // via GET /api/customers/:id rather than widening every meetings SELECT
+  // in server.js (several already LEFT JOIN customers for just `name` —
+  // see server.js's shapeMeetingForClient()/GET routes). Meeting objects
+  // returned to the client only ever carry customer_name today; fetching
+  // the customer record once here, keyed off meeting.customer_id, is a
+  // smaller-blast-radius change than touching every one of those SELECTs
+  // and matches the existing GET /api/customers/:id route's own
+  // created_by-scoped access check (a rep can only load a customer they
+  // created, or any customer if admin — the same scoping this page's own
+  // meeting fetch already relies on transitively).
+  const [customer, setCustomer] = useState<Customer | null>(null);
+
   // Refs for audio pipeline
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
@@ -328,6 +345,28 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
       .catch(() => navigate('/'))
       .finally(() => setLoading(false));
   }, [meetingId, navigate, pageMode]);
+
+  // 2026-08-29 (aria_customer_info_editable_section): load the linked
+  // customer's editable detail once meeting.customer_id is known. A no-
+  // customer-linked meeting (customer_id null/undefined) intentionally
+  // does nothing here — CustomerInfoSection's own `!customerId` branch
+  // renders the graceful empty-state card without ever needing this fetch
+  // to run. Failure is non-fatal (network hiccup, or the 403/404 edge case
+  // of a customer row this rep doesn't own — see GET /api/customers/:id's
+  // created_by check) — the section still degrades to name-only display
+  // via meeting.customer_name rather than blocking the rest of the page.
+  useEffect(() => {
+    const id = meeting?.customer_id;
+    if (!id) {
+      setCustomer(null);
+      return;
+    }
+    let cancelled = false;
+    getCustomer(id)
+      .then(c => { if (!cancelled) setCustomer(c); })
+      .catch(() => { if (!cancelled) setCustomer(null); });
+    return () => { cancelled = true; };
+  }, [meeting?.customer_id]);
 
   // ─── Smart auto-scroll: only scroll if user hasn't scrolled up ─────────────
 
@@ -1626,6 +1665,25 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
               </div>
 
               <div className="active-meeting-column-scroll">
+                {/* 2026-08-29 (aria_customer_info_editable_section): renders
+                    directly under the title+type row / duration row block
+                    above, ahead of everything else in the left column
+                    (BrowserCallControls, the Record button, etc.) — shared
+                    with UploadedRecordingPage.tsx via CustomerInfoSection so
+                    all three meeting types (in-person, phone, uploaded-
+                    recording) get the identical editable section instead of
+                    three hand-copied forms. */}
+                <CustomerInfoSection
+                  customerId={meeting.customer_id}
+                  name={customer?.name ?? meeting.customer_name}
+                  address={customer?.address}
+                  phone={customer?.phone}
+                  email={customer?.email}
+                  onSaved={updatedCustomer => {
+                    setCustomer(updatedCustomer);
+                    setMeeting(prev => (prev ? { ...prev, customer_name: updatedCustomer.name } : prev));
+                  }}
+                />
                 {meetingId && <BrowserCallControls meetingId={meetingId} />}
 
                 <div className="flex flex-col items-center py-2">
@@ -1702,12 +1760,21 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
                         {new Date(meeting.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </span>
                     </div>
-                    {meeting.customer_name && (
-                      <div className="flex justify-between gap-2">
-                        <span className="text-gray-500">Customer</span>
-                        <span className="text-gray-700 text-right">{meeting.customer_name}</span>
-                      </div>
-                    )}
+                    {/* 2026-08-29 (aria_customer_info_editable_section):
+                        removed the read-only "Customer" row that used to sit
+                        here — CustomerInfoSection now renders the same
+                        customer name (plus address/phone/email, and an edit
+                        affordance) directly above, higher up in this exact
+                        same left column/scroll container, while this active
+                        view is visible. Keeping both would have been
+                        confusing duplicate UI (two "customer" facts on
+                        screen at once, one read-only and one editable) for
+                        zero benefit — removed rather than left in place. See
+                        this task's report for the equivalent post-meeting
+                        "Details" card row further down, which is NOT
+                        duplicated with anything currently on screen there
+                        and was deliberately left alone.
+                    */}
                     {meeting.origin_client === 'mobile' && (
                       <div className="flex justify-between gap-2">
                         <span className="text-gray-500">Source</span>

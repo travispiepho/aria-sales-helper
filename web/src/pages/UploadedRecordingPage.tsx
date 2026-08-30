@@ -5,11 +5,14 @@ import CoachingPanel, { CoachingData } from '../components/CoachingPanel';
 import { EndMeetingButton, EndMeetingConfirmModal } from '../components/EndMeetingButton';
 import {
   createUploadedRecordingMeeting,
+  Customer,
+  getCustomer,
   getMeeting,
   getMeetingSegments,
   TranscriptSegment,
   updateMeeting,
 } from '../lib/api';
+import CustomerInfoSection from '../components/CustomerInfoSection';
 import {
   formatRecordingDuration,
   isMp4RecordingFile,
@@ -40,6 +43,18 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
   const [coaching, setCoaching] = useState<CoachingData | null>(null);
   const [speakerLabels, setSpeakerLabels] = useState<Record<string, string>>({});
   const [meetingId, setMeetingId] = useState<string | null>(null);
+  // 2026-08-29 (aria_customer_info_editable_section): mirrors MeetingPage's
+  // own customerId/customer state so the shared CustomerInfoSection can
+  // render here too. No caller of createUploadedRecordingMeeting() on this
+  // page currently passes a customer_id (verified live — handleStart()
+  // below calls it with only durationSeconds; there is no customer-
+  // selection step anywhere in this page's upload/analyze flow), so
+  // customerId is always null/undefined in practice today and the section
+  // renders its graceful "No customer linked" empty state — but the wiring
+  // is real (not stubbed) so it activates automatically if a future pass
+  // adds a customer-selection step to this flow, exactly like MeetingPage.
+  const [customerId, setCustomerId] = useState<string | null>(null);
+  const [customer, setCustomer] = useState<Customer | null>(null);
   // End Meeting confirmation state (parity with MeetingPage.tsx's in-person
   // End Meeting flow — see handleEndMeetingButtonClick() below).
   const [showEndMeetingConfirm, setShowEndMeetingConfirm] = useState(false);
@@ -65,6 +80,24 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
     const el = transcriptContainerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [segments, interimText]);
+
+  // 2026-08-29 (aria_customer_info_editable_section): mirrors MeetingPage's
+  // own customer-fetch effect — loads the linked customer's editable detail
+  // once customerId is known. See customerId's own comment above for why
+  // this is currently a no-op on this page (no caller of
+  // createUploadedRecordingMeeting() passes a customer_id yet) but wired
+  // for real rather than stubbed.
+  useEffect(() => {
+    if (!customerId) {
+      setCustomer(null);
+      return;
+    }
+    let cancelled = false;
+    getCustomer(customerId)
+      .then(c => { if (!cancelled) setCustomer(c); })
+      .catch(() => { if (!cancelled) setCustomer(null); });
+    return () => { cancelled = true; };
+  }, [customerId]);
 
   const cleanupResources = useCallback(async (sendEnd = true) => {
     if (sendEnd) transportRef.current?.end();
@@ -281,6 +314,7 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
       const meeting = await createUploadedRecordingMeeting(player.durationSeconds);
       setMeetingId(meeting.id);
       meetingIdRef.current = meeting.id;
+      setCustomerId(meeting.customer_id ?? null);
       if (onMeetingStarted) {
         onMeetingStarted(meeting.id);
         navigate(inRecordingPath(meeting.id), { replace: true });
@@ -439,6 +473,21 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             </div>
             <p className="text-white/80 text-sm leading-snug truncate">Active · local playback with live ARIA coaching</p>
           </div>
+
+          {/* 2026-08-29 (aria_customer_info_editable_section): renders
+              directly under the title+type row / duration row block above,
+              shared with MeetingPage.tsx via CustomerInfoSection so all
+              three meeting types get the identical editable section — see
+              customerId's own comment above for why this always renders the
+              graceful "No customer linked" empty state on this page today. */}
+          <CustomerInfoSection
+            customerId={customerId}
+            name={customer?.name}
+            address={customer?.address}
+            phone={customer?.phone}
+            email={customer?.email}
+            onSaved={updatedCustomer => setCustomer(updatedCustomer)}
+          />
 
           {/* 2026-08-29 (aria_uploaded_recording_hide_selector_after_pick):
               once analysis is active (a recording has been selected AND

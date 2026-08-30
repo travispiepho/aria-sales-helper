@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import MeetingRouteResolver from './MeetingRouteResolver';
@@ -10,6 +11,7 @@ import AppHeader, { AppNavigationVisibility } from '../components/AppHeader';
 
 const mocks = vi.hoisted(() => ({
   getMeeting: vi.fn(), getSegments: vi.fn(), getLatestCoaching: vi.fn(), updateMeeting: vi.fn(),
+  getCustomer: vi.fn(), updateCustomer: vi.fn(),
 }));
 const call = vi.hoisted(() => ({
   state: 'ended' as 'ended' | 'connected' | 'idle', meetingId: 'phone-1' as string | null, muted: false, error: '',
@@ -21,6 +23,8 @@ vi.mock('../lib/api', () => ({
   getMeetingSegments: mocks.getSegments,
   getLatestCoaching: mocks.getLatestCoaching,
   updateMeeting: mocks.updateMeeting,
+  getCustomer: mocks.getCustomer,
+  updateCustomer: mocks.updateCustomer,
   renameMeeting: vi.fn(),
   getCoachingReport: vi.fn(async () => { throw new Error('none'); }),
   getMeetingAnalytics: vi.fn(async () => { throw new Error('none'); }),
@@ -223,6 +227,81 @@ describe('canonical meeting routes', () => {
     } else {
       expect(durationRow.textContent).toMatch(/^Active · \d+:\d{2}$/);
     }
+  });
+
+  // 2026-08-29 (aria_customer_info_editable_section): the new editable
+  // Customer Info section must render directly under the title+type row /
+  // duration row block above (same left column), for every meeting type
+  // this page renders (in-person, phone). Also proves the no-customer-
+  // linked case degrades gracefully instead of a broken/empty form.
+  describe('Customer Info section placement and behavior', () => {
+    it.each([
+      ['in-person', { ...fixture('active', 'in_person'), customer_id: 'cust-1', customer_name: 'Jane Smith' }],
+      ['phone', { ...fixture('active', 'phone'), customer_id: 'cust-1', customer_name: 'Jane Smith', recording_status: 'in-progress' }],
+    ] as const)('renders under the title/duration rows for %s meetings', async (_name, meeting) => {
+      mocks.getMeeting.mockResolvedValue(meeting);
+      mocks.getCustomer.mockResolvedValue({
+        id: 'cust-1', name: 'Jane Smith', address: '123 Main St', phone: '6165551212', email: 'jane@example.com', created_at: new Date().toISOString(),
+      });
+      call.meetingId = 'other-browser-call';
+      render(<MemoryRouter initialEntries={[`/meetings/${meeting.id}/active`]}><Routes>
+        <Route path="/meetings/:id/active" element={<MeetingPage meetingId={meeting.id} pageMode="active" />} />
+      </Routes></MemoryRouter>);
+      await screen.findByRole('heading', { name: 'Live Transcript' });
+
+      const typeColumn = document.querySelector('[data-meeting-column="type"]')!;
+      const durationRow = typeColumn.querySelector('[data-meeting-status-location="left-column"]')!;
+      const section = await within(typeColumn as HTMLElement).findByText('123 Main St');
+      const sectionRoot = section.closest('[data-customer-info-section]')!;
+      expect(sectionRoot).toBeTruthy();
+      // The section must render AFTER (below) the title/duration block in
+      // DOM order, i.e. directly under it, not above or detached elsewhere.
+      expect(durationRow.compareDocumentPosition(sectionRoot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(within(sectionRoot as HTMLElement).getByText('Jane Smith')).toBeTruthy();
+      expect(within(sectionRoot as HTMLElement).getByText('6165551212')).toBeTruthy();
+      expect(within(sectionRoot as HTMLElement).getByText('jane@example.com')).toBeTruthy();
+    });
+
+    it('degrades gracefully (no crash, no broken empty section) when the meeting has no linked customer', async () => {
+      const meeting = { ...fixture('active', 'in_person'), customer_id: undefined, customer_name: undefined };
+      mocks.getMeeting.mockResolvedValue(meeting);
+      call.meetingId = 'other-browser-call';
+      render(<MemoryRouter initialEntries={[`/meetings/${meeting.id}/active`]}><Routes>
+        <Route path="/meetings/:id/active" element={<MeetingPage meetingId={meeting.id} pageMode="active" />} />
+      </Routes></MemoryRouter>);
+      await screen.findByRole('heading', { name: 'Live Transcript' });
+      expect(mocks.getCustomer).not.toHaveBeenCalled();
+      expect(document.querySelector('[data-customer-info-section="empty"]')).toBeTruthy();
+      expect(screen.getByText('No customer linked to this meeting yet.')).toBeTruthy();
+    });
+
+    it('editing and saving a customer field calls updateCustomer and reflects the update live without a reload', async () => {
+      const user = userEvent.setup();
+      const meeting = { ...fixture('active', 'in_person'), customer_id: 'cust-1', customer_name: 'Jane Smith' };
+      mocks.getMeeting.mockResolvedValue(meeting);
+      mocks.getCustomer.mockResolvedValue({
+        id: 'cust-1', name: 'Jane Smith', phone: '6165551212', created_at: new Date().toISOString(),
+      });
+      mocks.updateCustomer.mockResolvedValue({
+        id: 'cust-1', name: 'Jane Smith', phone: '6165559999', created_at: new Date().toISOString(),
+      });
+      call.meetingId = 'other-browser-call';
+      render(<MemoryRouter initialEntries={[`/meetings/${meeting.id}/active`]}><Routes>
+        <Route path="/meetings/:id/active" element={<MeetingPage meetingId={meeting.id} pageMode="active" />} />
+      </Routes></MemoryRouter>);
+      await screen.findByRole('heading', { name: 'Live Transcript' });
+      await screen.findByText('6165551212');
+
+      await user.click(screen.getByRole('button', { name: '✏️ Edit' }));
+      const phoneInput = screen.getByLabelText('Customer phone');
+      await user.clear(phoneInput);
+      await user.type(phoneInput, '6165559999');
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(mocks.updateCustomer).toHaveBeenCalledWith('cust-1', expect.objectContaining({ phone: '6165559999' })));
+      // Reflected live in the UI (no reload/refetch needed).
+      expect(await screen.findByText('6165559999')).toBeTruthy();
+    });
   });
 
   it('moves End Meeting to post only after the terminal PATCH response', async () => {

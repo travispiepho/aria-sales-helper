@@ -62,6 +62,7 @@ import { registerUploadedRecordingRoutes, UPLOADED_RECORDING_CHANNEL } from './u
 import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
 import { AiGenerationError, createAnthropicPrimaryTextGenerator } from './aiProvider.js';
 import { registerScheduledMeetingRoutes } from './scheduledMeetings.js';
+import { registerCustomerRoutes } from './customers.js';
 import {
   loadEnrolledVoicePrint,
   voiceFingerprintIdentificationPolicy,
@@ -3307,55 +3308,12 @@ fastify.post('/api/meetings/:id/export-to-docs', { preHandler: [requireAuth] }, 
 });
 
 // ─── Customer routes ──────────────────────────────────────────────────────────
-
-fastify.post('/api/customers', { preHandler: [requireAuth] }, async (request, reply) => {
-  const { name, address, phone, email, source } = request.body || {};
-
-  if (!name) {
-    return reply.code(400).send({ error: 'name is required' });
-  }
-
-  const result = await pool.query(
-    `INSERT INTO customers (name, address, phone, email, source, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING *`,
-    [name, address || null, phone || null, email || null, source || null, request.user.id]
-  );
-
-  return reply.code(201).send(result.rows[0]);
-});
-
-fastify.get('/api/customers', { preHandler: [requireAuth] }, async (request, reply) => {
-  const { role, id } = request.user;
-  let result;
-
-  if (hasAdminAccess(role)) {
-    result = await pool.query('SELECT * FROM customers ORDER BY created_at DESC');
-  } else {
-    result = await pool.query(
-      'SELECT * FROM customers WHERE created_by = $1 ORDER BY created_at DESC',
-      [id]
-    );
-  }
-
-  return result.rows;
-});
-
-fastify.get('/api/customers/:id', { preHandler: [requireAuth] }, async (request, reply) => {
-  const { id } = request.params;
-  const result = await pool.query('SELECT * FROM customers WHERE id = $1', [id]);
-
-  if (result.rows.length === 0) {
-    return reply.code(404).send({ error: 'Customer not found' });
-  }
-
-  const customer = result.rows[0];
-  if (!hasAdminAccess(request.user.role) && customer.created_by !== request.user.id) {
-    return reply.code(403).send({ error: 'Forbidden' });
-  }
-
-  return customer;
-});
+// Extracted to customers.js (2026-08-29, aria_customer_info_editable_
+// section) so the new PATCH /api/customers/:id route (and its POST/GET
+// siblings, unchanged in behavior) can be exercised with a real Fastify
+// app + a lightweight pool fixture in server/test/customers.test.mjs,
+// matching the existing registerScheduledMeetingRoutes() pattern.
+await registerCustomerRoutes(fastify, { pool, requireAuth, hasAdminAccess });
 
 // ─── Objections / Rebuttals library ──────────────────────────────────────────
 // Added 2026-08-18, Troy Hacker's request (business owner, end user —

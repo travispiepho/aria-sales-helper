@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   getMeeting: vi.fn(),
   getSegments: vi.fn(),
   updateMeeting: vi.fn(),
+  getCustomer: vi.fn(),
+  updateCustomer: vi.fn(),
   load: vi.fn(), play: vi.fn(), pause: vi.fn(), resume: vi.fn(), stop: vi.fn(),
   connect: vi.fn(), start: vi.fn(), sendPcm: vi.fn(), transportPause: vi.fn(), transportResume: vi.fn(), end: vi.fn(), waitForCompletion: vi.fn(), close: vi.fn(),
   scrollIntoView: vi.fn(),
@@ -22,6 +24,8 @@ vi.mock('../lib/api', () => ({
   getMeeting: mocks.getMeeting,
   getMeetingSegments: mocks.getSegments,
   updateMeeting: mocks.updateMeeting,
+  getCustomer: mocks.getCustomer,
+  updateCustomer: mocks.updateCustomer,
 }));
 vi.mock('../lib/uploadedRecording', async importOriginal => {
   const actual = await importOriginal<typeof import('../lib/uploadedRecording')>();
@@ -169,6 +173,58 @@ describe('UploadedRecordingPage', () => {
     // inside it.
     expect(statusLine.parentElement).toBe(statusBlock);
     expect(titleEl.parentElement).not.toBe(statusBlock);
+  });
+
+  // 2026-08-29 (aria_customer_info_editable_section): the new editable
+  // Customer Info section must render directly under the title/duration
+  // block above on THIS page too (uploaded-recording meeting type), and
+  // must degrade gracefully when no customer_id is present — which is
+  // always the case here today, since no caller of
+  // createUploadedRecordingMeeting() on this page passes one (verified
+  // live in handleStart()).
+  describe('Customer Info section placement and behavior', () => {
+    it('renders the graceful empty state directly under the title/duration block (no customer linked on this page today)', () => {
+      renderPage();
+      const statusBlock = document.querySelector('[data-meeting-status-location="left-column"]')!;
+      const typeColumn = document.querySelector('[data-meeting-column="type"]')!;
+      const section = typeColumn.querySelector('[data-customer-info-section="empty"]')!;
+      expect(section).toBeTruthy();
+      expect(mocks.getCustomer).not.toHaveBeenCalled();
+      expect(within(section as HTMLElement).getByText('No customer linked to this meeting yet.')).toBeTruthy();
+      // Directly below (DOM-order-following) the title/duration block.
+      expect(statusBlock.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('renders the editable section under the title/duration block and persists an edit via updateCustomer once a customer is linked', async () => {
+      const user = userEvent.setup();
+      mocks.createMeeting.mockResolvedValue({
+        id: 'meeting-upload-1',
+        upload_ws_path: '/meetings/meeting-upload-1/uploaded-recording',
+        customer_id: 'cust-1',
+      });
+      mocks.getCustomer.mockResolvedValue({
+        id: 'cust-1', name: 'Jane Smith', phone: '6165551212', created_at: new Date().toISOString(),
+      });
+      mocks.updateCustomer.mockResolvedValue({
+        id: 'cust-1', name: 'Jane Smith', phone: '6165559999', created_at: new Date().toISOString(),
+      });
+      await startAnalysis();
+
+      const statusBlock = document.querySelector('[data-meeting-status-location="left-column"]')!;
+      const section = await screen.findByText('6165551212');
+      const sectionRoot = section.closest('[data-customer-info-section="editable"]')!;
+      expect(sectionRoot).toBeTruthy();
+      expect(statusBlock.compareDocumentPosition(sectionRoot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+      await user.click(within(sectionRoot as HTMLElement).getByRole('button', { name: '✏️ Edit' }));
+      const phoneInput = screen.getByLabelText('Customer phone');
+      await user.clear(phoneInput);
+      await user.type(phoneInput, '6165559999');
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(mocks.updateCustomer).toHaveBeenCalledWith('cust-1', expect.objectContaining({ phone: '6165559999' })));
+      expect(await screen.findByText('6165559999')).toBeTruthy();
+    });
   });
 
   it('makes MP4 recordings selectable alongside existing audio formats', () => {

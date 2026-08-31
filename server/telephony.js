@@ -455,7 +455,7 @@ export async function findOrCreatePhoneMeeting(pool, { callSid, customerId, repI
  * handle that content-type). This was a real, flagged gap in the prior
  * scaffolding pass — fixed here, not deferred again.
  */
-export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController, createTranscriptionSession = createDeepgramSession } = {}) {
+export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController, createTranscriptionSession = createDeepgramSession, runCoachingAnalysis = async () => null } = {}) {
   const formbody = (await import('@fastify/formbody')).default;
   await fastify.register(formbody);
 
@@ -1184,6 +1184,35 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
     // isConfirmedProspectSegment below), same silence-over-wrong-prompt
     // preference as an unresolved slot.
     let phoneRepName = null;
+    // ── Live coaching auto-trigger (aria_browser_call_coaching_not_active_fix,
+    // 2026-08-30) ─────────────────────────────────────────────────────────
+    // Root cause: unlike the in-person /meetings/:id/audio WS handler
+    // (server.js) and the uploaded-recording WS handler (uploadedRecording.js),
+    // this handler persisted transcript_segments and broadcast `final` events
+    // but never invoked runCoachingAnalysis() at all — so coaching (DISC,
+    // stage/checklist, setup-call project-info, urgent alerts, nudges) never
+    // fired for ANY Twilio Media Stream call, phone OR browser-originated
+    // (both ride this exact same /telephony/stream path — see
+    // /telephony/browser-outgoing's <Start><Stream> TwiML above). Mirrors
+    // server.js's in-person trigger shape (segmentCount >= 3, then every
+    // subsequent final segment) with an in-flight guard so a slow LLM
+    // round-trip can never overlap for the same call, matching
+    // uploadedRecording.js's existing `coachingInFlight` convention.
+    let coachingSegmentCount = 0;
+    let coachingInFlight = false;
+
+    function maybeTriggerCoaching(dgMeetingId) {
+      if (!dgMeetingId) return;
+      coachingSegmentCount += 1;
+      if (coachingSegmentCount < 3 || coachingInFlight) return;
+      coachingInFlight = true;
+      Promise.resolve(runCoachingAnalysis(dgMeetingId))
+        .then((coaching) => {
+          if (coaching && broadcastToMeeting) broadcastToMeeting(dgMeetingId, { type: 'coaching', data: coaching });
+        })
+        .catch((err) => fastify.log.error(`Twilio stream auto-coaching error (meeting ${dgMeetingId}): ${err.message}`))
+        .finally(() => { coachingInFlight = false; });
+    }
 
     function closeDeepgramSessions() {
       for (const session of dgSessions.values()) session.close();
@@ -1250,6 +1279,7 @@ export async function registerTelephonyRoutes(fastify, { pool, registerMeetingSo
                 if (broadcastToMeeting) {
                   broadcastToMeeting(dgMeetingId, { type: 'final', id: insertResult.rows[0]?.id, text: result.text, speaker: speakerLabel });
                 }
+                maybeTriggerCoaching(dgMeetingId);
               }).catch((dbErr) => fastify.log.error(`Twilio stream transcript insert error: ${dbErr.message}`));
             }
           } else if (broadcastToMeeting) {

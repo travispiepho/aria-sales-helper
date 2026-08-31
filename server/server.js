@@ -1075,7 +1075,15 @@ await fastify.register(websocketPlugin);
 // before) can bridge its confirm/reject into the SAME
 // POST /api/meetings/:id/speaker-lock route the in-person path already
 // uses, with zero web-client changes required.
-await registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController });
+// runCoachingAnalysis is a hoisted function declaration (defined further
+// below in this file) — safe to reference here at top-level-await time,
+// same hoisting guarantee already relied on for registerUploadedRecordingRoutes()'s
+// identical dependency-injection call further down. Wires the
+// aria_browser_call_coaching_not_active_fix auto-coaching trigger into the
+// Twilio Media Stream path (telephony.js), which previously never invoked
+// it at all — see that file's registerTelephonyRoutes() for the root-cause
+// writeup.
+await registerTelephonyRoutes(fastify, { pool, registerMeetingSocket, unregisterMeetingSocket, broadcastToMeeting, registerSpeakerController, unregisterSpeakerController, runCoachingAnalysis });
 
 // ─── Auth middleware (decorator) ──────────────────────────────────────────────
 

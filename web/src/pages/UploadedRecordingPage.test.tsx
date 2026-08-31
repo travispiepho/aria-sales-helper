@@ -219,19 +219,15 @@ describe('UploadedRecordingPage', () => {
   // always the case here today, since no caller of
   // createUploadedRecordingMeeting() on this page passes one (verified
   // live in handleStart()).
+  //
+  // 2026-08-31 (aria_uploaded_recording_hide_customer_info_until_meeting_started):
+  // the empty-state placement/graceful-degradation assertion that used to
+  // live here as a standalone idle-state test is now superseded by the
+  // dedicated 'Customer Info visibility gated on analysis having started'
+  // describe block below — the section no longer renders in the idle state
+  // at all, so there is nothing to place/assert there anymore. This test
+  // (once analysis has started and a customer is linked) is unaffected.
   describe('Customer Info section placement and behavior', () => {
-    it('renders the graceful empty state directly under the title/duration block (no customer linked on this page today)', () => {
-      renderPage();
-      const statusBlock = document.querySelector('[data-meeting-status-location="left-column"]')!;
-      const typeColumn = document.querySelector('[data-meeting-column="type"]')!;
-      const section = typeColumn.querySelector('[data-customer-info-section="empty"]')!;
-      expect(section).toBeTruthy();
-      expect(mocks.getCustomer).not.toHaveBeenCalled();
-      expect(within(section as HTMLElement).getByText('No customer linked to this meeting yet.')).toBeTruthy();
-      // Directly below (DOM-order-following) the title/duration block.
-      expect(statusBlock.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    });
-
     it('renders the editable section under the title/duration block and persists an edit via updateCustomer once a customer is linked', async () => {
       const user = userEvent.setup();
       mocks.createMeeting.mockResolvedValue({
@@ -261,6 +257,71 @@ describe('UploadedRecordingPage', () => {
 
       await waitFor(() => expect(mocks.updateCustomer).toHaveBeenCalledWith('cust-1', expect.objectContaining({ phone: '6165559999' })));
       expect(await screen.findByText('6165559999')).toBeTruthy();
+    });
+  });
+
+  // 2026-08-31 (aria_uploaded_recording_hide_customer_info_until_meeting_started):
+  // the Customer Info section must NOT render at all before the rep has
+  // clicked Start Analysis (idle state — matches the pre-upload/pre-
+  // analysis state described in the task objective), must appear as soon
+  // as analysis starts (state leaves 'idle', reusing this page's existing
+  // PlaybackState signal rather than inventing a new one — see the inline
+  // comment on the CustomerInfoSection render site itself), and must
+  // remain visible through completion rather than disappearing again like
+  // the metadata/selector chrome correctly does.
+  describe('Customer Info visibility gated on analysis having started', () => {
+    it('does not render Customer Info in the idle state, before any file is selected or Start Analysis is clicked', () => {
+      renderPage();
+      expect(document.querySelector('[data-customer-info-section]')).toBeNull();
+      expect(screen.queryByText('No customer linked to this meeting yet.')).toBeNull();
+    });
+
+    it('still does not render Customer Info once a file is selected and a meeting type is picked, as long as Start Analysis has not been clicked (still idle)', async () => {
+      renderPage();
+      await selectAudio();
+      await userEvent.click(screen.getByRole('checkbox'));
+      // Still idle: Start Analysis has not been clicked yet.
+      expect(document.querySelector('[data-customer-info-section]')).toBeNull();
+    });
+
+    it('renders Customer Info as soon as analysis starts (state leaves idle), and it stays visible once the file-selection chrome is hidden', async () => {
+      await startAnalysis();
+      const section = document.querySelector('[data-customer-info-section="empty"]');
+      expect(section).toBeTruthy();
+      expect(within(section as HTMLElement).getByText('No customer linked to this meeting yet.')).toBeTruthy();
+    });
+
+    it('keeps Customer Info visible once analysis reaches the complete state', async () => {
+      let playbackCallbacks: { onEnded: () => void } | undefined;
+      mocks.play.mockImplementation(async (callbacks: { onEnded: () => void }) => { playbackCallbacks = callbacks; });
+      mocks.waitForCompletion.mockImplementation(() => new Promise(() => {})); // never resolves — stays in 'stopping', which is post-idle
+      renderPage();
+      await selectAudio();
+      await userEvent.click(screen.getByRole('checkbox'));
+      await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+      await waitFor(() => expect(playbackCallbacks).toBeTruthy());
+      expect(document.querySelector('[data-customer-info-section]')).toBeTruthy();
+      playbackCallbacks!.onEnded();
+      await waitFor(() => expect(screen.getByText('Finalizing…')).toBeTruthy());
+      // Still 'stopping' (post-idle, pre-complete) — Customer Info remains.
+      expect(document.querySelector('[data-customer-info-section]')).toBeTruthy();
+    });
+
+    it('does not resurface Customer Info on a fresh mount back in the idle state (a genuinely new, unstarted session)', async () => {
+      const { unmount } = await (async () => {
+        const result = renderPage();
+        await selectAudio();
+        await userEvent.click(screen.getByRole('checkbox'));
+        await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+        await screen.findByRole('heading', { name: 'Live transcript' });
+        return result;
+      })();
+      expect(document.querySelector('[data-customer-info-section]')).toBeTruthy();
+      unmount();
+      renderPage();
+      // Fresh mount is idle again — hidden once more, exactly like the
+      // Choose a recording chooser's own established fresh-mount precedent.
+      expect(document.querySelector('[data-customer-info-section]')).toBeNull();
     });
   });
 

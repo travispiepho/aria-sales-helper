@@ -539,15 +539,32 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
               shared with MeetingPage.tsx via CustomerInfoSection so all
               three meeting types get the identical editable section — see
               customerId's own comment above for why this always renders the
-              graceful "No customer linked" empty state on this page today. */}
-          <CustomerInfoSection
-            customerId={customerId}
-            name={customer?.name}
-            address={customer?.address}
-            phone={customer?.phone}
-            email={customer?.email}
-            onSaved={updatedCustomer => setCustomer(updatedCustomer)}
-          />
+              graceful "No customer linked" empty state on this page today.
+
+              2026-08-31 (aria_uploaded_recording_hide_customer_info_until_meeting_started):
+              gated on `state !== 'idle'` — this page's PlaybackState starts
+              at 'idle' and only ever leaves it inside handleStart(), which
+              calls setState('preparing') synchronously as its very first
+              state update before any async work; nothing in this file ever
+              sets state back to 'idle' after that (completion navigates
+              away to the post-recording route entirely, unmounting this
+              page), so this is the same monotonic "the rep has actually
+              clicked Start Analysis" signal this page already derives
+              `active` from (active === preparing/playing/paused/stopping)
+              — just inclusive of 'complete' too, since Customer Info should
+              stay visible through completion rather than disappear again
+              like the metadata/selector blocks below correctly do. No new
+              state was introduced; this reuses the existing `state` value. */}
+          {state !== 'idle' && (
+            <CustomerInfoSection
+              customerId={customerId}
+              name={customer?.name}
+              address={customer?.address}
+              phone={customer?.phone}
+              email={customer?.email}
+              onSaved={updatedCustomer => setCustomer(updatedCustomer)}
+            />
+          )}
 
           {/* 2026-08-29 (aria_uploaded_recording_hide_selector_after_pick):
               once analysis is active (a recording has been selected AND

@@ -131,13 +131,24 @@ describe('canonical meeting routes', () => {
     const feedback = screen.getByRole('region', { name: 'ARIA Feedback' });
     const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
     expect(feedback.contains(panel)).toBe(true);
-    expect(Array.from(panel.querySelectorAll('[data-coaching-waiting]')).map(node => node.textContent)).toEqual([
-      'Waiting on data...',
-      'Waiting on data...',
-      'Waiting on data...',
-      'Waiting on data...',
-      'Waiting on data...',
-    ]);
+    // aria_setup_call_coaching_differentiation (2026-08-30): a Twilio phone
+    // meeting (channel === 'phone' && !!call_sid, per this fixture) is now a
+    // setup-call-mode coaching payload once seeded by MeetingPage's plumbing
+    // (`isTwilioPhoneCall` — known immediately from `meeting`, no live
+    // coaching pass needed) — Stage/Checklist don't render for this meeting
+    // type at all, replaced by a single Project Info "Waiting on data..."
+    // placeholder (disc/urgent/project-info/nudges = 4), vs. the unchanged
+    // 5-placeholder (disc/urgent/stage/checklist/nudges) in-person case.
+    expect(Array.from(panel.querySelectorAll('[data-coaching-waiting]')).map(node => node.textContent)).toEqual(
+      channel === 'phone'
+        ? ['Waiting on data...', 'Waiting on data...', 'Waiting on data...', 'Waiting on data...']
+        : ['Waiting on data...', 'Waiting on data...', 'Waiting on data...', 'Waiting on data...', 'Waiting on data...']
+    );
+    if (channel === 'phone') {
+      expect(panel.querySelector('[data-coaching-section="project-info"]')).toBeTruthy();
+      expect(panel.querySelector('[data-coaching-section="stage"]')).toBeNull();
+      expect(panel.querySelector('[data-coaching-section="checklist"]')).toBeNull();
+    }
     const typeColumn = screen.getByRole('region', { name: label });
     if (channel === 'phone') {
       const browserControls = typeColumn.querySelector('[data-browser-call-controls]');

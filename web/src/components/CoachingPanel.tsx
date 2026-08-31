@@ -32,12 +32,58 @@ export interface CoachingChecklistItem {
   done: boolean;
 }
 
+// ─── aria_setup_call_coaching_differentiation (2026-08-30) ────────────────
+//
+// Over-the-phone/browser "Setup Call" meetings (server.js's
+// isSetupCallPhoneMeeting() — `channel === 'phone' && !!call_sid`) get a
+// dedicated coaching mode: server/coachingAnalysis.js's
+// analyzeSetupCallCoaching() returns `{ mode: 'setup_call', disc, nudges,
+// urgent, project_info }` — deliberately OMITTING `stage`/`checklist`
+// entirely (not null, just absent from the object), since the 11-stage
+// walkthrough machinery those drive doesn't apply to a short phone
+// scheduling call. This `mode` field is present on every coaching payload
+// this component receives for a setup-call meeting regardless of delivery
+// path (the initial GET /api/meetings/:id/coaching/latest fetch, the live
+// `coaching` WS push, and the observer socket's `sync_snapshot` catch-up
+// all persist/forward this same object verbatim from the
+// `coaching_snapshots` table — see server.js's runSetupCallCoachingAnalysis()),
+// so gating on `coaching.mode === 'setup_call'` here is reliable even as
+// the panel's `coaching` prop gets wholesale-replaced by each new live push.
+//
+// `project_info` fields mirror server/coachingAnalysis.js's
+// mergeProjectInfo()/SETUP_CALL_SYSTEM_PROMPT exactly: every field is
+// explicitly nullable (the model is instructed to use null rather than
+// guess at anything not yet mentioned in the call) except `appointment_set`,
+// which is a real boolean (sticky-true once an in-person visit has been
+// booked, per mergeProjectInfo()'s doc comment — never resets to false).
+export type CoachingMode = 'setup_call';
+
+export interface CoachingProjectInfo {
+  customer_name: string | null;
+  customer_address: string | null;
+  project_type: string | null;
+  scope_notes: string | null;
+  approx_size_sqft: number | null;
+  timeline_urgency: string | null;
+  budget_signal: string | null;
+  appointment_set: boolean;
+  appointment_date_time: string | null;
+  notes: string | null;
+}
+
 export interface CoachingData {
   disc?: CoachingDisc | null;
   stage?: CoachingStage | null;
   checklist?: CoachingChecklistItem[] | null;
   nudges?: string[] | null;
   urgent?: string | null;
+  // Present (== 'setup_call') only for a setup-call-mode coaching payload —
+  // see the block comment above. Absent/undefined for every ordinary
+  // in-person/uploaded-recording coaching payload, matching this repo's
+  // existing "field simply isn't there" convention for mode-specific data
+  // rather than a sentinel like `false`.
+  mode?: CoachingMode;
+  project_info?: CoachingProjectInfo | null;
 }
 
 interface CoachingPanelProps {
@@ -153,6 +199,23 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
   );
   const hasStage = !!stage && !!(stage.label?.trim() || stage.current?.trim());
 
+  // aria_setup_call_coaching_differentiation (2026-08-30): setup-call-mode
+  // meetings replace the Stage/Checklist sections with a Project Info card
+  // instead — see the CoachingData/CoachingProjectInfo block comment above
+  // for why `coaching.mode === 'setup_call'` (not a `stage`/`checklist`
+  // absence check) is the reliable gate here.
+  const isSetupCallMode = coaching?.mode === 'setup_call';
+  const projectInfo = coaching?.project_info ?? null;
+  const hasProjectInfo = !!projectInfo && (
+    Object.entries(projectInfo).some(([key, value]) => {
+      // `appointment_set`'s default/no-data value is `false`, not null/empty
+      // — only an explicit `true` counts as "has data" for this field.
+      if (key === 'appointment_set') return value === true;
+      if (value === null || value === undefined) return false;
+      return !(typeof value === 'string' && value.trim() === '');
+    })
+  );
+
   // Troy's ask (aria_coaching_left_panel_space_between_layout): once the
   // panel has ANY real coaching data, its sections switch from a fixed
   // vertical gap to a top/bottom-anchored, evenly-distributed layout
@@ -163,7 +226,7 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
   // showing their own "Waiting on data..." placeholder) still counts as
   // "has data" here and gets the new layout — only the all-empty case is
   // carved out.
-  const hasAnyCoachingData = hasDisc || hasStage || checklist.length > 0 || allNudges.length > 0 || !!urgent;
+  const hasAnyCoachingData = hasDisc || hasStage || checklist.length > 0 || allNudges.length > 0 || !!urgent || hasProjectInfo;
 
   // Clamp index so it's never out of bounds even mid-render
   const safeIndex = allNudges.length > 0 ? nudgeIndex % allNudges.length : 0;
@@ -291,18 +354,73 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
             )}
           </div>
 
-          {/* ── Sales stage ── */}
-          <div data-coaching-section="stage">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Stage</span>
-              {hasStage && <span className="text-xs text-gray-500">{stageProgress}%</span>}
+          {/* ── Sales stage ── (not applicable in setup-call mode — see
+              CoachingData's `mode` doc comment above; a phone Setup Call
+              doesn't map onto the 11-stage in-person walkthrough) */}
+          {!isSetupCallMode && (
+            <div data-coaching-section="stage">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Stage</span>
+                {hasStage && <span className="text-xs text-gray-500">{stageProgress}%</span>}
+              </div>
+              {hasStage && stage ? (
+                <div className="text-sm font-medium text-gray-800 mb-1.5">{stage.label || stage.current}</div>
+              ) : (
+                <p data-coaching-waiting="stage" className="text-sm text-gray-400">Waiting on data...</p>
+              )}
             </div>
-            {hasStage && stage ? (
-              <div className="text-sm font-medium text-gray-800 mb-1.5">{stage.label || stage.current}</div>
-            ) : (
-              <p data-coaching-waiting="stage" className="text-sm text-gray-400">Waiting on data...</p>
-            )}
-          </div>
+          )}
+
+          {/* ── Project Info (setup-call mode only) ──
+              aria_setup_call_coaching_differentiation (2026-08-30): replaces
+              the Stage/Checklist sections for a phone/browser Setup Call
+              meeting (coaching.mode === 'setup_call') with the project facts
+              extracted so far — server/coachingAnalysis.js's
+              analyzeSetupCallCoaching()/mergeProjectInfo(). Follows this
+              component's existing per-field "Waiting on data..." convention
+              rather than an all-or-nothing empty state, since fields fill in
+              independently as the call progresses. */}
+          {isSetupCallMode && (
+            <div data-coaching-section="project-info" className="bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-3">
+              <div className="text-xs font-semibold text-indigo-500 uppercase tracking-wide mb-2">Project Info</div>
+              {hasProjectInfo ? (
+                <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+                  {[
+                    { label: 'Customer', value: projectInfo?.customer_name },
+                    { label: 'Address', value: projectInfo?.customer_address },
+                    { label: 'Project Type', value: projectInfo?.project_type },
+                    { label: 'Scope', value: projectInfo?.scope_notes },
+                    {
+                      label: 'Approx. Size',
+                      value: typeof projectInfo?.approx_size_sqft === 'number'
+                        ? `${projectInfo.approx_size_sqft.toLocaleString()} sq ft`
+                        : null,
+                    },
+                    { label: 'Timeline', value: projectInfo?.timeline_urgency },
+                    { label: 'Budget Signal', value: projectInfo?.budget_signal },
+                    {
+                      label: 'In-Person Appt',
+                      value: projectInfo?.appointment_set
+                        ? (projectInfo?.appointment_date_time || 'Booked')
+                        : null,
+                    },
+                    { label: 'Notes', value: projectInfo?.notes },
+                  ].map(({ label, value }) => (
+                    <div key={label} data-coaching-project-info-field={label} className="min-w-0">
+                      <dt className="text-xs font-semibold text-indigo-400 uppercase tracking-wide">{label}</dt>
+                      {value ? (
+                        <dd className="text-sm text-indigo-900 break-words">{value}</dd>
+                      ) : (
+                        <dd data-coaching-waiting={`project-info-${label}`} className="text-sm text-indigo-400 italic">Not yet mentioned</dd>
+                      )}
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <p data-coaching-waiting="project-info" className="text-sm text-indigo-500">Waiting on data...</p>
+              )}
+            </div>
+          )}
 
           {/* ── Nudges ── (cycling, one at a time) */}
           <div data-coaching-section="nudges">
@@ -357,8 +475,8 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
             )}
           </div>
 
-          {/* ── Stage progress bar ── */}
-          {hasStage && (
+          {/* ── Stage progress bar ── (not applicable in setup-call mode, same as the Stage section above) */}
+          {!isSetupCallMode && hasStage && (
             <div data-coaching-section="progress">
               <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
                 <div
@@ -369,36 +487,41 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
             </div>
           )}
 
-          {/* ── Checklist ── */}
-          <div data-coaching-section="checklist">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">1st Go Around</span>
-              {checklist.length > 0 && <span className="text-xs text-gray-500">{doneCount}/{checklist.length}</span>}
+          {/* ── Checklist ── (not applicable in setup-call mode — the 1st Go
+              Around checklist is part of the in-person 11-stage walkthrough
+              this meeting type doesn't go through; Project Info renders in
+              its place above instead) */}
+          {!isSetupCallMode && (
+            <div data-coaching-section="checklist">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">1st Go Around</span>
+                {checklist.length > 0 && <span className="text-xs text-gray-500">{doneCount}/{checklist.length}</span>}
+              </div>
+              <div
+                data-coaching-checklist
+                className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+              >
+                {checklist.length > 0 ? checklist.map(item => (
+                  <div
+                    key={item.id}
+                    data-coaching-checklist-item={item.id}
+                    className={`min-w-0 flex items-start gap-2 text-sm rounded-lg px-3 py-2 ${
+                      item.done ? 'text-green-700' : 'text-gray-500'
+                    }`}
+                  >
+                    <span className="flex-shrink-0 text-base leading-none mt-0.5">
+                      {item.done ? '✅' : '🔲'}
+                    </span>
+                    <span className={`min-w-0 break-words leading-snug ${item.done ? 'line-through opacity-70' : ''}`}>
+                      {item.label}
+                    </span>
+                  </div>
+                )) : (
+                  <p data-coaching-waiting="checklist" className="text-sm text-gray-400">Waiting on data...</p>
+                )}
+              </div>
             </div>
-            <div
-              data-coaching-checklist
-              className="grid grid-cols-1 sm:grid-cols-2 gap-2"
-            >
-              {checklist.length > 0 ? checklist.map(item => (
-                <div
-                  key={item.id}
-                  data-coaching-checklist-item={item.id}
-                  className={`min-w-0 flex items-start gap-2 text-sm rounded-lg px-3 py-2 ${
-                    item.done ? 'text-green-700' : 'text-gray-500'
-                  }`}
-                >
-                  <span className="flex-shrink-0 text-base leading-none mt-0.5">
-                    {item.done ? '✅' : '🔲'}
-                  </span>
-                  <span className={`min-w-0 break-words leading-snug ${item.done ? 'line-through opacity-70' : ''}`}>
-                    {item.label}
-                  </span>
-                </div>
-              )) : (
-                <p data-coaching-waiting="checklist" className="text-sm text-gray-400">Waiting on data...</p>
-              )}
-            </div>
-          </div>
+          )}
       </div>
     </div>
   );

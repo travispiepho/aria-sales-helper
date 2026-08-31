@@ -1853,9 +1853,32 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
                   onDismiss={dismissLibraryRebuttalPrompt}
                 />
                 <CoachingPanel
-                  coaching={coachingData ? {
+                  coaching={coachingData || isTwilioPhoneCall ? {
                     ...coachingData,
-                    checklist: coachingData.checklist?.map(item => ({
+                    // aria_setup_call_coaching_differentiation (2026-08-30):
+                    // `isTwilioPhoneCall` is this page's own long-standing
+                    // client-side mirror of the exact same `channel ===
+                    // 'phone' && !!call_sid` check server.js's
+                    // isSetupCallPhoneMeeting() uses, so it's known the
+                    // instant `meeting` loads — before the first coaching
+                    // pass (which needs >=3 transcript segments) has run.
+                    // Forcing `mode`/seeding `project_info` here (rather
+                    // than waiting on a live coaching push to supply
+                    // `mode`) means CoachingPanel shows its Project Info
+                    // placeholder immediately for a setup call instead of
+                    // briefly showing Stage/Checklist placeholders first.
+                    // `meeting.setup_call_project_info` is the same
+                    // GET /api/meetings/:id-attached persisted extraction
+                    // as a fallback for a page load with no coaching
+                    // snapshot fetched yet; a live/latest coaching payload
+                    // (which always carries the freshest merged
+                    // project_info once any pass has run) takes priority
+                    // once available.
+                    ...(isTwilioPhoneCall ? {
+                      mode: 'setup_call' as const,
+                      project_info: coachingData?.project_info ?? meeting.setup_call_project_info ?? null,
+                    } : {}),
+                    checklist: coachingData?.checklist?.map(item => ({
                       ...item,
                       done: item.done || lockedChecked.has(item.id),
                     })) ?? [],

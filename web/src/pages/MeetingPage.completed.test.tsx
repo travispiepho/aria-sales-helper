@@ -144,3 +144,74 @@ describe('MeetingPage active left column layout', () => {
     expect(typeColumn.className).toContain('active-meeting-type-column');
   });
 });
+
+// aria_setup_call_coaching_frontend (2026-08-30): a Twilio-bridged phone
+// meeting (channel === 'phone' && !!call_sid, mirroring server.js's
+// isSetupCallPhoneMeeting()) must feed CoachingPanel a setup-call-mode
+// coaching object (mode: 'setup_call' + project_info) so its Project Info
+// section renders instead of Stage/Checklist — this is the page-level data
+// plumbing this task added on top of CoachingPanel's own conditional
+// rendering (see CoachingPanel.test.tsx for that component-level coverage).
+describe('MeetingPage setup-call coaching data plumbing', () => {
+  it('seeds CoachingPanel with setup-call mode + persisted project_info for a Twilio phone meeting even before any live coaching pass', async () => {
+    mocks.getMeeting.mockResolvedValue({
+      id: 'meeting-phone-1',
+      rep_id: 'rep-1',
+      status: 'active',
+      channel: 'phone',
+      call_sid: 'CA1234567890',
+      origin_client: 'web',
+      is_owner_session: true,
+      started_at: '2026-08-30T20:00:00.000Z',
+      speaker_labels: {},
+      is_setup_call_mode: true,
+      setup_call_project_info: {
+        customer_name: 'Jane Doe',
+        customer_address: null,
+        project_type: 'exterior repaint',
+        scope_notes: null,
+        approx_size_sqft: null,
+        timeline_urgency: null,
+        budget_signal: null,
+        appointment_set: false,
+        appointment_date_time: null,
+        notes: null,
+      },
+    });
+    // No coaching snapshot has run yet — the persisted setup_call_project_info
+    // on the meeting record itself is the only source of project facts.
+    mocks.getLatestCoaching.mockResolvedValue({ coaching: null });
+
+    renderMode = 'active';
+    renderMeeting();
+
+    const panel = await screen.findByRole('region', { name: 'ARIA Coaching' });
+    expect(panel.querySelector('[data-coaching-section="project-info"]')).toBeTruthy();
+    expect(panel.querySelector('[data-coaching-section="stage"]')).toBeNull();
+    expect(panel.querySelector('[data-coaching-section="checklist"]')).toBeNull();
+    expect(screen.getByText('Jane Doe')).toBeTruthy();
+    expect(screen.getByText('exterior repaint')).toBeTruthy();
+  });
+
+  it('does not force setup-call mode for a non-Twilio (in-person) active meeting', async () => {
+    mocks.getMeeting.mockResolvedValue({
+      id: 'meeting-inperson-1',
+      rep_id: 'rep-1',
+      status: 'active',
+      channel: 'in_person',
+      origin_client: 'web',
+      is_owner_session: true,
+      started_at: '2026-08-30T20:00:00.000Z',
+      speaker_labels: {},
+    });
+    mocks.getLatestCoaching.mockResolvedValue({ coaching: null });
+
+    renderMode = 'active';
+    renderMeeting();
+
+    const panel = await screen.findByRole('region', { name: 'ARIA Coaching' });
+    expect(panel.querySelector('[data-coaching-section="project-info"]')).toBeNull();
+    expect(panel.querySelector('[data-coaching-section="stage"]')).toBeTruthy();
+    expect(panel.querySelector('[data-coaching-section="checklist"]')).toBeTruthy();
+  });
+});

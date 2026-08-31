@@ -227,6 +227,27 @@ export async function updateCustomer(
 
 // Meetings
 
+// 2026-08-30 (aria_setup_call_coaching_differentiation): the setup-call
+// coaching mode's extracted project facts, as persisted server-side in the
+// `setup_call_project_info` table and returned verbatim by
+// coachingAnalysis.js's mergeProjectInfo() (see that function for the exact
+// merge/stickiness rules — e.g. `appointment_set` only ever flips true→
+// stays true, never resets). Every field is explicitly nullable — the
+// backend's SETUP_CALL_SYSTEM_PROMPT instructs the model to use `null` for
+// anything not yet mentioned in the call, rather than guessing.
+export interface SetupCallProjectInfo {
+  customer_name: string | null;
+  customer_address: string | null;
+  project_type: string | null;
+  scope_notes: string | null;
+  approx_size_sqft: number | null;
+  timeline_urgency: string | null;
+  budget_signal: string | null;
+  appointment_set: boolean;
+  appointment_date_time: string | null;
+  notes: string | null;
+}
+
 export interface Meeting {
   id: string;
   customer_id?: string;
@@ -299,6 +320,18 @@ export interface Meeting {
   scheduled_customer_address?: string | null;
   scheduled_started_at?: string | null;
   scheduled_call_sid?: string | null;
+  // 2026-08-30 (aria_setup_call_coaching_differentiation): server-computed
+  // — mirrors the EXACT `channel === 'phone' && !!call_sid` check this
+  // page already does itself as `isTwilioPhoneCall` (see server.js's
+  // isSetupCallPhoneMeeting() doc comment for why the backend duplicates
+  // rather than trusts a client-sent flag here). Only present on
+  // GET /api/meetings/:id today (server.js's shapeMeetingForClient() call
+  // site for the list/create routes does not attach it) — treat as
+  // possibly-undefined everywhere.
+  is_setup_call_mode?: boolean;
+  // Only populated (non-null) when is_setup_call_mode is true. null if no
+  // setup-call coaching pass has produced anything yet for this meeting.
+  setup_call_project_info?: SetupCallProjectInfo | null;
 }
 
 export type ScheduledMeetingType = 'phone' | 'in_person';

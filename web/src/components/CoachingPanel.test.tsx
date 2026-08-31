@@ -108,6 +108,90 @@ describe('CoachingPanel empty and live states', () => {
   });
 });
 
+describe('CoachingPanel setup-call mode (aria_setup_call_coaching_differentiation)', () => {
+  const setupCallCoaching: CoachingData = {
+    disc: { detected: 'S', confidence: 'medium', emoji: '🐌', label: 'Steady', tip: 'Slow down, build trust.' },
+    urgent: null,
+    nudges: ['Confirm the visit day/time'],
+    mode: 'setup_call',
+    project_info: {
+      customer_name: 'Jane Doe',
+      customer_address: null,
+      project_type: 'exterior repaint',
+      scope_notes: null,
+      approx_size_sqft: null,
+      timeline_urgency: 'before winter',
+      budget_signal: null,
+      appointment_set: true,
+      appointment_date_time: 'Thursday at 2pm',
+      notes: null,
+    },
+  };
+
+  it('renders the Project Info section instead of Stage/Checklist when mode is setup_call', () => {
+    const { container } = render(<CoachingPanel coaching={setupCallCoaching} />);
+    const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
+
+    // Stage and Checklist sections (and the stage progress bar) must not render at all.
+    expect(panel.querySelector('[data-coaching-section="stage"]')).toBeNull();
+    expect(panel.querySelector('[data-coaching-section="checklist"]')).toBeNull();
+    expect(panel.querySelector('[data-coaching-section="progress"]')).toBeNull();
+
+    // The new Project Info section renders in their place.
+    const projectInfo = panel.querySelector('[data-coaching-section="project-info"]');
+    expect(projectInfo).toBeTruthy();
+    expect(within(projectInfo as HTMLElement).getByText('Jane Doe')).toBeTruthy();
+    expect(within(projectInfo as HTMLElement).getByText('exterior repaint')).toBeTruthy();
+    expect(within(projectInfo as HTMLElement).getByText('before winter')).toBeTruthy();
+    expect(within(projectInfo as HTMLElement).getByText('Thursday at 2pm')).toBeTruthy();
+
+    // Fields not yet mentioned use the "Not yet mentioned" placeholder, not blank/undefined.
+    expect(within(projectInfo as HTMLElement).getAllByText('Not yet mentioned').length).toBeGreaterThan(0);
+
+    // DISC and nudges (urgent-alert-capable sections) still render normally.
+    expect(panel.querySelector('[data-coaching-section="disc"]')).toBeTruthy();
+    expect(within(panel).getByText('Steady')).toBeTruthy();
+    expect(panel.querySelector('[data-coaching-section="urgent"]')).toBeTruthy();
+    expect(panel.querySelector('[data-coaching-section="nudges"]')).toBeTruthy();
+    expect(within(panel).getByText('Confirm the visit day/time')).toBeTruthy();
+
+    void container;
+  });
+
+  it('shows the section-level "Waiting on data..." placeholder when project_info has no captured facts yet', () => {
+    render(<CoachingPanel coaching={{ mode: 'setup_call', disc: null, nudges: [], urgent: null, project_info: null }} />);
+    const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
+    const projectInfo = panel.querySelector('[data-coaching-section="project-info"]');
+    expect(projectInfo).toBeTruthy();
+    expect(projectInfo!.querySelector('[data-coaching-waiting="project-info"]')?.textContent).toBe('Waiting on data...');
+  });
+
+  it('does not treat appointment_set: false alone as having project info data', () => {
+    render(<CoachingPanel coaching={{
+      mode: 'setup_call',
+      project_info: {
+        customer_name: null, customer_address: null, project_type: null, scope_notes: null,
+        approx_size_sqft: null, timeline_urgency: null, budget_signal: null,
+        appointment_set: false, appointment_date_time: null, notes: null,
+      },
+    }} />);
+    const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
+    const projectInfo = panel.querySelector('[data-coaching-section="project-info"]');
+    expect(projectInfo!.querySelector('[data-coaching-waiting="project-info"]')?.textContent).toBe('Waiting on data...');
+  });
+
+  it('regression: normal (non-setup-call) coaching still renders Stage/Checklist and no Project Info section when mode is absent', () => {
+    const { container } = render(<CoachingPanel coaching={coaching} />);
+    const panel = screen.getByRole('region', { name: 'ARIA Coaching' });
+
+    expect(panel.querySelector('[data-coaching-section="stage"]')).toBeTruthy();
+    expect(panel.querySelector('[data-coaching-section="checklist"]')).toBeTruthy();
+    expect(panel.querySelector('[data-coaching-section="project-info"]')).toBeNull();
+    expect(within(panel).getByText('First Go Around')).toBeTruthy();
+    expect(container.querySelectorAll('[data-coaching-checklist-item]')).toHaveLength(11);
+  });
+});
+
 describe('CoachingPanel checklist layout', () => {
   it('renders all 11 items in a responsive multi-column grid with count and completion state intact', () => {
     const { container } = render(<CoachingPanel coaching={coaching} />);

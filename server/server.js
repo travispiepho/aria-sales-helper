@@ -27,7 +27,10 @@ import * as pyannote from './voicePrint.js';
 import { registerTelephonyRoutes, isConfigured as isTwilioConfigured, configStatus as twilioConfigStatus, normalizePhoneNumber } from './telephony.js';
 // ARIA Priority 1 roadmap (2026-08-05): BANT/closing-certainty, insider-
 // language flagger, question-listening gaps. See coachingAnalysis.js.
-import { analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebuttal } from './coachingAnalysis.js';
+import {
+  analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebuttal,
+  isSetupCallPhoneMeeting, analyzeSetupCallCoaching,
+} from './coachingAnalysis.js';
 // Item 5 (live rebuttal teleprompter) — STUB detection half. See
 // objectionDetection.js module docstring for real-vs-stubbed breakdown.
 import { detectObjection } from './objectionDetection.js';
@@ -889,6 +892,24 @@ async function ensureSessionsTable() {
       ON CONFLICT (key) DO NOTHING
     `);
   }
+
+  // Setup-call project info (added 2026-08-30,
+  // aria_setup_call_coaching_differentiation — see
+  // migrations/2026-08-30-setup-call-project-info.sql for the full schema
+  // rationale). One row per phone-channel Setup Call meeting, upserted as
+  // the setup-call coaching mode extracts project facts during the call so
+  // they can be referenced later (e.g. by the rep doing the in-person
+  // walkthrough). Mirrored here per this repo's ensureSessionsTable()
+  // convention (this function IS the de-facto migration runner) so a plain
+  // deploy-from-main brings the schema in sync automatically.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS setup_call_project_info (
+      meeting_id UUID PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+      project_info JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
 }
 
 async function createSession(userId) {
@@ -2148,7 +2169,37 @@ fastify.get('/api/meetings/:id', { preHandler: [requireAuth] }, async (request, 
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
-  return shapeMeetingForClient(meeting, request.cookies?.session_id || null);
+  const shaped = shapeMeetingForClient(meeting, request.cookies?.session_id || null);
+
+  // aria_setup_call_coaching_differentiation (2026-08-30): a setup-call
+  // phone meeting's extracted project info (see setup_call_project_info /
+  // runSetupCallCoachingAnalysis()) needs to be readable AFTER the call too
+  // — "referenced later" per the brief, e.g. by the rep pulling this
+  // meeting up again ahead of the in-person walkthrough. Attached here
+  // (rather than a separate endpoint) so the existing single meeting-detail
+  // fetch the frontend already calls on page load picks this up for free.
+  // `is_setup_call_mode` mirrors the same isSetupCallPhoneMeeting() check
+  // runCoachingAnalysis() uses, so the frontend can key its render branch
+  // off ONE server-computed boolean instead of re-deriving the channel/
+  // call_sid compound check itself a third time (backend coaching engine,
+  // frontend MeetingPage.tsx's isTwilioPhoneCall, and now this flag all
+  // agree by construction — see coachingAnalysis.js's isSetupCallPhoneMeeting
+  // doc comment).
+  shaped.is_setup_call_mode = isSetupCallPhoneMeeting(meeting);
+  if (shaped.is_setup_call_mode) {
+    try {
+      const projectInfoResult = await pool.query(
+        `SELECT project_info, updated_at FROM setup_call_project_info WHERE meeting_id = $1`,
+        [id]
+      );
+      shaped.setup_call_project_info = projectInfoResult.rows[0]?.project_info || null;
+    } catch (err) {
+      fastify.log.error(`GET /api/meetings/:id setup_call_project_info fetch failed for ${id}: ${err.message}`);
+      shaped.setup_call_project_info = null;
+    }
+  }
+
+  return shaped;
 });
 
 // Statuses that FINALIZE a meeting (stop it from being live/editable in the
@@ -2394,9 +2445,107 @@ FIELD GUIDANCE:
 
 Return the exact JSON shape specified.`;
 
+// ─── Setup-call coaching mode (aria_setup_call_coaching_differentiation, 2026-08-30) ──
+// A phone-channel meeting with a Twilio call_sid (see coachingAnalysis.js's
+// isSetupCallPhoneMeeting() doc comment for the full meeting-type-detection
+// reasoning, including why this also covers browser-originated calls) is
+// functionally just STAGE 1 of the 11-stage sales process — a short call
+// to collect basic project info and book the in-person visit. This helper
+// runs the DEDICATED setup-call prompt (DISC + nudges + urgent kept alive,
+// per this task's brief, but NO stage/checklist — the 11-step walkthrough
+// machinery does not apply here), merges the freshly-extracted
+// project_info on top of whatever was already persisted for this meeting
+// (so a later transcript window never silently erases an earlier-confirmed
+// fact), and upserts the result into setup_call_project_info so it survives
+// for the rep to reference at the actual in-person walkthrough.
+async function runSetupCallCoachingAnalysis(meetingId, segments) {
+  let existingProjectInfo = {};
+  try {
+    const existingResult = await pool.query(
+      `SELECT project_info FROM setup_call_project_info WHERE meeting_id = $1`,
+      [meetingId]
+    );
+    if (existingResult.rows.length > 0) existingProjectInfo = existingResult.rows[0].project_info || {};
+  } catch (err) {
+    console.error('setup-call coaching: DB error fetching existing project_info:', err.message);
+  }
+
+  const coaching = await analyzeSetupCallCoaching(OPENROUTER_API_KEY, meetingId, segments, existingProjectInfo);
+  if (!coaching) return null;
+
+  try {
+    await pool.query(
+      `INSERT INTO setup_call_project_info (meeting_id, project_info, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (meeting_id) DO UPDATE SET project_info = $2, updated_at = NOW()`,
+      [meetingId, JSON.stringify(coaching.project_info)]
+    );
+  } catch (dbErr) {
+    console.error('setup-call coaching: failed to persist project_info:', dbErr.message);
+  }
+
+  // Persist a coaching_snapshots row too, same as the in-person path below —
+  // this keeps the existing GET /api/meetings/:id/coaching/latest,
+  // /api/meetings/:id/coaching-report, and /api/meetings/:id/analytics read
+  // paths working unchanged for a setup-call meeting (they all already
+  // default missing `.stage`/`.checklist` to null/[] via optional-chaining/
+  // `|| []`, per this task's investigation, so a snapshot with no stage/
+  // checklist keys degrades gracefully rather than throwing — coverage/
+  // sequencing simply read as 0%/empty for this meeting type, which is
+  // correct since that machinery doesn't apply here).
+  try {
+    await pool.query(
+      `INSERT INTO coaching_snapshots (meeting_id, snapshot) VALUES ($1, $2)`,
+      [meetingId, JSON.stringify(coaching)]
+    );
+  } catch (dbErr) {
+    console.error('setup-call coaching: failed to save snapshot:', dbErr.message);
+  }
+
+  return coaching;
+}
+
 async function runCoachingAnalysis(meetingId) {
   if (!OPENROUTER_API_KEY) {
     return null;
+  }
+
+  // Meeting-type detection (aria_setup_call_coaching_differentiation) —
+  // fetch channel/call_sid up front so this whole function can branch
+  // before doing any of the in-person-specific work below. A lookup
+  // failure (meeting deleted mid-flight, transient DB error) falls through
+  // to the existing in-person path rather than throwing, matching this
+  // function's existing null-on-failure/never-throw convention.
+  let meetingRow = null;
+  try {
+    const meetingResult = await pool.query(
+      `SELECT channel, call_sid FROM meetings WHERE id = $1`,
+      [meetingId]
+    );
+    meetingRow = meetingResult.rows[0] || null;
+  } catch (err) {
+    console.error('coaching: DB error fetching meeting for type detection:', err.message);
+  }
+
+  if (isSetupCallPhoneMeeting(meetingRow)) {
+    // Fetch full transcript so far (not just the last 20 segments) — a
+    // setup call is short (often well under 20 segments total for its
+    // whole duration), and project-info extraction benefits from the full
+    // context rather than a rolling window, unlike the in-person path's
+    // deliberately-bounded "last 20" window (that one exists to bound
+    // prompt size across a much longer walkthrough call).
+    let setupCallSegments;
+    try {
+      const segResult = await pool.query(
+        `SELECT speaker, text FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
+        [meetingId]
+      );
+      setupCallSegments = segResult.rows;
+    } catch (err) {
+      console.error('setup-call coaching: DB error fetching segments:', err.message);
+      return null;
+    }
+    return runSetupCallCoachingAnalysis(meetingId, setupCallSegments);
   }
 
   // Fetch last 20 final transcript segments

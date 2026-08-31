@@ -307,4 +307,213 @@ Return ONLY the JSON object described in the system prompt.`;
   }
 }
 
-export { analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebuttal, parseJsonLoose };
+// ─── aria_setup_call_coaching_differentiation (2026-08-30) ─────────────────
+//
+// Background: every over-the-phone call on ARIA is functionally just
+// STAGE 1 of the CertaPro 10+1 sales process — a short "Setup Call" where
+// the rep collects basic project info and books the in-person walkthrough
+// (see server.js's COACHING_SYSTEM_PROMPT / knowledge/certapro-10plus1-
+// sales-process.md STAGE 1 for the in-person-framework's own definition of
+// this same stage). The 11-stage stage/checklist/progress-bar coaching
+// machinery (coaching_stages table, see migrations/2026-08-30-coaching-
+// stages.sql) describes an IN-PERSON WALKTHROUGH's flow end-to-end and
+// does not make sense to run against a 5-minute phone scheduling call.
+//
+// isSetupCallPhoneMeeting() is the meeting-type discriminator, deliberately
+// mirroring the EXACT compound check the web frontend already uses for the
+// identical purpose (web/src/pages/MeetingPage.tsx's `isTwilioPhoneCall` /
+// `isTwilioPhoneMeeting`, both `meeting.channel === 'phone' && !!meeting.
+// call_sid`) so backend and frontend agree on what counts as a real
+// Twilio-bridged phone call. See that file's own extensive comment for WHY
+// `channel === 'phone'` alone is insufficient (mobile's local-mic phone-
+// channel meetings have no call_sid and must NOT be treated as setup-call
+// mode — they still get full in-person-shaped coaching).
+//
+// BROWSER CALLS: a browser-originated call (telephony.js's
+// /telephony/browser-outgoing route) also goes through the SAME
+// findOrCreatePhoneMeeting() helper as an inbound/outbound plain phone
+// call, writing the identical channel='phone' + call_sid columns onto the
+// same `meetings` row shape — there is no separate schema/column for
+// "browser call" vs "phone call" anywhere in this codebase. This compound
+// check therefore ALSO matches browser calls, by construction, with zero
+// extra branching needed — which is the correct behavior here: a browser
+// call is still just a setup call, and Gabe's framing ("every over-the-
+// phone call... is just a Setup_call") applies to it exactly the same way
+// it applies to a landline-bridged Twilio call. This is a SEPARATE concern
+// from the queued `aria_browser_call_coaching_not_active_fix` task, which
+// (per investigation during this task) appears to be about
+// runCoachingAnalysis() never being INVOKED at all on the Twilio Media
+// Stream path (telephony.js's per-track onTranscript handler inserts
+// transcript_segments and broadcasts `final`, but — unlike the in-person
+// audio WS handler and uploadedRecording.js's WS handler — never calls
+// runCoachingAnalysis() itself). That auto-trigger gap is out of scope for
+// THIS task (write-scope explicitly excludes telephony.js) and is left for
+// that queued task to fix; this module's job is only to make sure
+// runCoachingAnalysis() does the RIGHT THING once/whenever it IS invoked
+// for a phone-channel meeting (manual POST /api/meetings/:id/coaching
+// today, and automatically once that separate bug is fixed).
+function isSetupCallPhoneMeeting(meeting) {
+  return !!meeting && meeting.channel === 'phone' && !!meeting.call_sid;
+}
+
+const SETUP_CALL_SYSTEM_PROMPT = `You are ARIA, a real-time sales coaching assistant for CertaPro Painters field reps.
+
+This transcript is from an OVER-THE-PHONE "Setup Call" — a short call (often just a few minutes) where the rep's job is to:
+1. Build quick rapport and confirm how the prospect heard about CertaPro
+2. Collect basic information about the painting project (what it is, rough scope/size, timeline, any budget signals)
+3. Book a specific date/time for an in-person walkthrough visit
+
+This is NOT a full in-person walkthrough — do NOT try to walk the rep through color selection, the Certainty Pledge, a detailed carpentry/repairs review, or any other stage of the full sales process. Those all happen later, in person. Your ONLY jobs here are: (a) read the prospect's DISC style from how they talk, (b) nudge the rep toward finishing the two things this call exists for (get the project basics, lock the in-person appointment), and (c) extract the concrete project facts mentioned so far so they can be handed to the rep before the in-person visit.
+
+Detect:
+- The prospect's DISC style from their speech patterns, pace, word choices, and intonation descriptions
+- Concrete facts about the project mentioned in the call
+- Whether a specific in-person appointment date/time has been agreed to
+
+FIELD GUIDANCE:
+- disc.tip: Static one-liner on how to sell to this style (under 15 words). Example: "Lead with ROI, skip the story."
+- nudges: 1-4 short action items for what the rep should do next ON THIS CALL (under 10 words each) — e.g. confirming the visit time, asking about timeline, or getting a rough project scope. Never suggest an in-person-only action (colors, Certainty Pledge, carpentry review, etc.).
+- urgent: DISC-based situational coaching for THIS call — if the rep made a misstep, missed a read on the prospect's style, or is drifting toward in-person-only territory that doesn't belong on a setup call, write a brief recovery tip here. The rep reads this mid-call while actively talking to the customer, so it must be glanceable in under two seconds: ONE short sentence, 12 words or fewer, imperative and actionable. Set to null if the call is on track.
+- project_info: extract ONLY facts explicitly stated in the transcript (do not guess or infer beyond what was said). Use null for anything not mentioned. Fields:
+  - customer_name: prospect's name if given and not already on file
+  - customer_address: the project address if given
+  - project_type: e.g. "exterior repaint", "interior painting", "deck staining", "cabinet refinish"
+  - scope_notes: free-text notes on rooms/areas/surfaces mentioned
+  - approx_size_sqft: a number if a rough size was mentioned (square footage, number of rooms translated to a rough estimate, etc.), else null
+  - timeline_urgency: e.g. "ASAP", "before winter", "no rush", "within 2 weeks"
+  - budget_signal: any budget/price-range language the prospect volunteered
+  - appointment_set: true ONLY if a specific in-person visit date/time was explicitly agreed to in this transcript, else false
+  - appointment_date_time: the agreed date/time as stated (natural language is fine, e.g. "Thursday at 2pm"), else null
+  - notes: anything else worth a rep knowing before the in-person visit
+
+Return ONLY raw JSON, no prose, no markdown, in this exact shape:
+{
+  "disc": { "detected": "D", "confidence": "medium", "emoji": "🦅", "label": "Dominant (Eagle)", "tip": "Be direct, lead with outcomes" },
+  "nudges": ["Confirm the visit day/time"],
+  "urgent": null,
+  "project_info": {
+    "customer_name": null,
+    "customer_address": null,
+    "project_type": null,
+    "scope_notes": null,
+    "approx_size_sqft": null,
+    "timeline_urgency": null,
+    "budget_signal": null,
+    "appointment_set": false,
+    "appointment_date_time": null,
+    "notes": null
+  }
+}`;
+
+function normalizeSetupCallDisc(disc) {
+  return {
+    detected: typeof disc?.detected === 'string' ? disc.detected : null,
+    confidence: typeof disc?.confidence === 'string' ? disc.confidence : null,
+    emoji: typeof disc?.emoji === 'string' ? disc.emoji : '',
+    label: typeof disc?.label === 'string' ? disc.label : '',
+    tip: typeof disc?.tip === 'string' ? disc.tip : '',
+  };
+}
+
+// Merge a freshly-extracted project_info reading on top of what was already
+// persisted for this meeting (from earlier in the same call). Later reads
+// only ever ADD/REFINE information, never silently erase an earlier fact
+// the model happened not to re-mention this pass — same "once observed,
+// stays observed" convention this repo already uses for checklist items
+// (see server.js's GET /api/meetings/:id/coaching/latest merge logic).
+// `appointment_set` is explicitly sticky-true for the same reason: once an
+// in-person visit has been booked earlier in the call, a later transcript
+// window that doesn't happen to re-mention it must not flip this back to
+// false and hide the fact a visit was already scheduled.
+function mergeProjectInfo(existing, extracted) {
+  const prev = existing && typeof existing === 'object' ? existing : {};
+  const next = extracted && typeof extracted === 'object' ? extracted : {};
+  const pick = (key) => {
+    const v = next[key];
+    if (v === null || v === undefined) return prev[key] ?? null;
+    if (typeof v === 'string' && v.trim() === '') return prev[key] ?? null;
+    return v;
+  };
+  return {
+    customer_name: pick('customer_name'),
+    customer_address: pick('customer_address'),
+    project_type: pick('project_type'),
+    scope_notes: pick('scope_notes'),
+    approx_size_sqft: typeof next.approx_size_sqft === 'number' && Number.isFinite(next.approx_size_sqft)
+      ? next.approx_size_sqft
+      : (prev.approx_size_sqft ?? null),
+    timeline_urgency: pick('timeline_urgency'),
+    budget_signal: pick('budget_signal'),
+    appointment_set: next.appointment_set === true ? true : (prev.appointment_set === true),
+    appointment_date_time: pick('appointment_date_time'),
+    notes: pick('notes'),
+  };
+}
+
+/**
+ * analyzeSetupCallCoaching(apiKey, meetingId, segments, existingProjectInfo)
+ *
+ * Setup-call coaching mode: ONE combined LLM call (same design as
+ * server.js's runCoachingAnalysis() in-person prompt — a single round trip
+ * producing everything the live UI needs) that returns DISC + nudges +
+ * urgent (kept alive for phone calls, per this task's brief — "a rep can
+ * still get DISC-style read and urgent nudges on a phone call") PLUS the
+ * new `project_info` extraction, and explicitly OMITS stage/checklist
+ * (the 11-step walkthrough machinery that does not apply to this meeting
+ * type).
+ *
+ * `existingProjectInfo` is whatever is already persisted in
+ * setup_call_project_info for this meeting (or {} if none yet) — passed
+ * back to the model as known-context so it doesn't need to re-derive
+ * already-confirmed facts, and so the merge in mergeProjectInfo() has
+ * something to merge on top of.
+ *
+ * Returns { mode: 'setup_call', disc, nudges, urgent, project_info } or
+ * null on failure/missing key/insufficient transcript, matching every
+ * other function in this module's null-on-failure convention.
+ */
+async function analyzeSetupCallCoaching(apiKey, meetingId, segments, existingProjectInfo = {}) {
+  if (!apiKey) return null;
+  if (!segments || segments.length < 3) return null;
+
+  const transcriptText = segments.map(s => `${s.speaker}: ${s.text}`).join('\n');
+  const knownContext = JSON.stringify(existingProjectInfo && typeof existingProjectInfo === 'object' ? existingProjectInfo : {});
+  const userPrompt = `Already known about this project from earlier in the call (JSON, may be all-null if nothing confirmed yet):\n${knownContext}\n\nMeeting transcript so far:\n\n${transcriptText}\n\nReturn ONLY the JSON object described in the system prompt.`;
+
+  try {
+    const parsed = await callClaude(apiKey, SETUP_CALL_SYSTEM_PROMPT, userPrompt, 700);
+    if (!parsed) return null;
+
+    let urgent = parsed.urgent ?? null;
+    if (urgent && typeof urgent === 'object') {
+      urgent = urgent.message || urgent.flag || JSON.stringify(urgent);
+    }
+    if (typeof urgent !== 'string') urgent = null;
+
+    const nudges = Array.isArray(parsed.nudges)
+      ? parsed.nudges.filter((n) => typeof n === 'string' && n.trim()).map((n) => n.trim())
+      : [];
+
+    return {
+      mode: 'setup_call',
+      disc: normalizeSetupCallDisc(parsed.disc),
+      nudges,
+      urgent,
+      project_info: mergeProjectInfo(existingProjectInfo, parsed.project_info),
+    };
+  } catch (err) {
+    console.error(`coachingAnalysis.analyzeSetupCallCoaching error (meeting ${meetingId}):`, err.message);
+    return null;
+  }
+}
+
+export {
+  analyzeBant,
+  analyzeInsiderLanguage,
+  analyzeQuestionGaps,
+  generateRebuttal,
+  parseJsonLoose,
+  isSetupCallPhoneMeeting,
+  analyzeSetupCallCoaching,
+  mergeProjectInfo,
+};

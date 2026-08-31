@@ -375,6 +375,47 @@ function isSetupCallPhoneMeeting(meeting) {
   return !!meeting && meeting.channel === 'phone' && !!meeting.call_sid;
 }
 
+// ─── aria_recording_analysis_meeting_type_choice (2026-08-31) ──────────────
+//
+// isSetupCallPhoneMeeting() above detects setup-call mode for a LIVE
+// phone/browser call via `channel === 'phone' && !!call_sid` — a signal
+// that genuinely cannot exist for an uploaded/pre-recorded meeting
+// (channel is always 'uploaded_recording', and there is no Twilio/browser
+// call behind it to have a call_sid at all). For that meeting type, the
+// REP explicitly picks "Setup Call" or "Walkthrough" up front (see
+// UploadedRecordingPage.tsx's meeting-type radio group and
+// POST /api/uploaded-recordings' new `meetingType` field,
+// uploadedRecording.js), persisted as the `meetings.setup_call_choice`
+// boolean column (migrations/2026-08-31-uploaded-recording-setup-call-
+// choice.sql) — an explicit, rep-asserted fact, never auto-detected/
+// inferred for this channel.
+//
+// isSetupCallMeeting() is the single discriminator every coaching-mode
+// branch point (runCoachingAnalysis(), GET /api/meetings/:id's
+// is_setup_call_mode) should call from here on, in place of
+// isSetupCallPhoneMeeting() directly — it dispatches to the correct
+// signal per channel:
+//   - channel === 'uploaded_recording' -> the EXPLICIT persisted rep
+//     choice (`setup_call_choice === true`), never the phone auto-
+//     detector (which can never be true for this channel anyway, but the
+//     explicit branch keeps the intent unambiguous and future-proof).
+//   - every other channel (phone, in_person)  -> UNCHANGED,
+//     isSetupCallPhoneMeeting()'s existing auto-detection. In particular
+//     a real Twilio/browser call's behavior is byte-for-byte identical to
+//     before this task — this function is a strict superset, not a
+//     replacement, of the live-call logic.
+// isSetupCallPhoneMeeting() itself is UNCHANGED and remains exported/used
+// directly by the one call site that is intentionally phone-only
+// (server.js's POST /api/meetings/:id/extract-appointment-details, a
+// post-call appointment-details re-extraction button scoped to Setup Call
+// PHONE meetings specifically, per aria_setup_call_extract_appointment_button
+// — out of this task's write-scope to broaden to uploaded recordings).
+function isSetupCallMeeting(meeting) {
+  if (!meeting) return false;
+  if (meeting.channel === 'uploaded_recording') return meeting.setup_call_choice === true;
+  return isSetupCallPhoneMeeting(meeting);
+}
+
 const SETUP_CALL_SYSTEM_PROMPT = `You are ARIA, a real-time sales coaching assistant for CertaPro Painters field reps.
 
 This transcript is from an OVER-THE-PHONE "Setup Call" — a short call (often just a few minutes) where the rep's job is to:
@@ -647,6 +688,7 @@ export {
   generateRebuttal,
   parseJsonLoose,
   isSetupCallPhoneMeeting,
+  isSetupCallMeeting,
   analyzeSetupCallCoaching,
   extractAppointmentDetails,
   mergeProjectInfo,

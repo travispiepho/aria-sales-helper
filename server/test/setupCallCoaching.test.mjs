@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   isSetupCallPhoneMeeting,
+  isSetupCallMeeting,
   analyzeSetupCallCoaching,
   mergeProjectInfo,
 } from '../coachingAnalysis.js';
@@ -19,6 +20,33 @@ test('isSetupCallPhoneMeeting: true only for channel=phone with a call_sid', () 
   assert.equal(isSetupCallPhoneMeeting({ channel: 'uploaded_recording', call_sid: 'CA123' }), false);
   assert.equal(isSetupCallPhoneMeeting(null), false);
   assert.equal(isSetupCallPhoneMeeting(undefined), false);
+});
+
+// ─── isSetupCallMeeting: unified discriminator (aria_recording_analysis_meeting_type_choice) ───
+// Widened superset of isSetupCallPhoneMeeting(): live phone/browser calls
+// are UNCHANGED (auto-detected via channel+call_sid); uploaded recordings
+// use the EXPLICIT persisted rep choice (setup_call_choice) instead, since
+// they have no channel/call_sid signal to auto-detect from.
+
+test('isSetupCallMeeting: phone/browser calls are unaffected — identical to isSetupCallPhoneMeeting', () => {
+  assert.equal(isSetupCallMeeting({ channel: 'phone', call_sid: 'CA123' }), true);
+  assert.equal(isSetupCallMeeting({ channel: 'phone', call_sid: null }), false);
+  assert.equal(isSetupCallMeeting({ channel: 'phone' }), false);
+  assert.equal(isSetupCallMeeting({ channel: 'in_person', call_sid: 'CA123' }), false);
+  assert.equal(isSetupCallMeeting(null), false);
+  assert.equal(isSetupCallMeeting(undefined), false);
+});
+
+test('isSetupCallMeeting: uploaded recordings use the explicit setup_call_choice column, never channel/call_sid', () => {
+  assert.equal(isSetupCallMeeting({ channel: 'uploaded_recording', setup_call_choice: true }), true);
+  assert.equal(isSetupCallMeeting({ channel: 'uploaded_recording', setup_call_choice: false }), false);
+  // NULL (not-yet-chosen / pre-migration row) must never be treated as true.
+  assert.equal(isSetupCallMeeting({ channel: 'uploaded_recording', setup_call_choice: null }), false);
+  assert.equal(isSetupCallMeeting({ channel: 'uploaded_recording' }), false);
+  // An uploaded recording can never have a call_sid in practice, but even if
+  // one were present it must NOT leak into a setup-call determination for
+  // this channel — only setup_call_choice governs uploaded recordings.
+  assert.equal(isSetupCallMeeting({ channel: 'uploaded_recording', call_sid: 'CA999', setup_call_choice: false }), false);
 });
 
 // ─── mergeProjectInfo: sticky-merge semantics ──────────────────────────────

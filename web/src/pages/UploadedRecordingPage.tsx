@@ -11,6 +11,7 @@ import {
   getMeetingSegments,
   TranscriptSegment,
   updateMeeting,
+  UploadedRecordingMeetingType,
 } from '../lib/api';
 import CustomerInfoSection from '../components/CustomerInfoSection';
 import {
@@ -35,6 +36,18 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
   const [duration, setDuration] = useState(0);
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [consent, setConsent] = useState(false);
+  // 2026-08-31 (aria_recording_analysis_meeting_type_choice): the rep must
+  // EXPLICITLY pick which coaching mode this uploaded recording gets —
+  // "Setup Call (phone)" (project-info-collection coaching, matching a
+  // live phone Setup Call — see CoachingPanel.tsx's `mode: 'setup_call'`)
+  // or "Walkthrough (in-person)" (the normal full 11-stage checklist).
+  // There is no channel/call_sid signal to auto-detect this from for an
+  // uploaded file the way isTwilioPhoneCall does for a live call, so this
+  // is a real, required rep decision — null (nothing chosen yet) blocks
+  // Start Analysis below, the safer option per this task's brief over
+  // silently defaulting a Setup Call transcript into the full walkthrough
+  // checklist or vice versa.
+  const [meetingType, setMeetingType] = useState<UploadedRecordingMeetingType | null>(null);
   const [state, setState] = useState<PlaybackState>('idle');
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
@@ -323,6 +336,12 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
     if (validationError) { setError(validationError); return; }
     if (!consent) { setError('Acknowledge that you have authority and permission to analyze this recording.'); return; }
     if (!duration || metadataLoading) { setError('Wait for ARIA to read the recording details, then retry.'); return; }
+    // 2026-08-31 (aria_recording_analysis_meeting_type_choice): block
+    // starting analysis until the rep has explicitly picked a meeting type
+    // — the safer option per this task's brief over silently defaulting
+    // (see meetingType's own comment above for why there is no sensible
+    // auto-detected default for this channel).
+    if (!meetingType) { setError('Choose a meeting type (Setup Call or Walkthrough) before starting analysis.'); return; }
 
     setError(null);
     setSegments([]);
@@ -348,7 +367,7 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
       playerRef.current = player;
       await player.load(file!);
 
-      const meeting = await createUploadedRecordingMeeting(player.durationSeconds);
+      const meeting = await createUploadedRecordingMeeting(player.durationSeconds, meetingType);
       setMeetingId(meeting.id);
       meetingIdRef.current = meeting.id;
       setCustomerId(meeting.customer_id ?? null);
@@ -393,7 +412,7 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
     }
   }
 
-  const canStart = !!file && duration > 0 && consent && !metadataLoading && !active;
+  const canStart = !!file && duration > 0 && consent && !metadataLoading && !active && !!meetingType;
   const uniqueSpeakers = Array.from(new Set(segments.map(segment => segment.speaker).filter(Boolean)));
 
   function getDisplayLabel(rawSpeaker: string): string {
@@ -544,6 +563,44 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             <div role="group" aria-labelledby="recording-selection-heading" className="space-y-4">
               <div>
                 <h1 id="recording-selection-heading" className="font-semibold text-gray-900">Choose a recording</h1>
+              </div>
+
+              {/* 2026-08-31 (aria_recording_analysis_meeting_type_choice):
+                  explicit rep choice of coaching mode for this recording —
+                  required before Start Analysis is enabled (see canStart
+                  above). Toggle-button pattern matches this app's existing
+                  role-picker convention (AdminUsersPage.tsx's invite-role
+                  radiogroup) rather than inventing a new visual style. */}
+              <div>
+                <span className="block text-sm font-medium text-gray-700 mb-2">Meeting type</span>
+                <div className="flex gap-2" role="radiogroup" aria-label="Meeting type">
+                  {([
+                    { value: 'setup_call' as const, label: 'Setup Call (phone)' },
+                    { value: 'walkthrough' as const, label: 'Walkthrough (in-person)' },
+                  ]).map(({ value, label }) => {
+                    const selected = meetingType === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        disabled={active}
+                        onClick={() => { setMeetingType(value); setError(null); }}
+                        className={`flex-1 text-sm font-semibold py-2 rounded-xl border transition-colors ${
+                          selected
+                            ? 'bg-brand-100 text-brand-900 border-brand-500 ring-1 ring-brand-500'
+                            : 'bg-white text-gray-600 border-gray-200 hover:border-brand-300'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Setup Call collects project info; Walkthrough runs the full 11-stage checklist.
+                </p>
               </div>
 
               <label className="block">

@@ -51,6 +51,13 @@ function makePool() {
         const row = {
           id: MEETING_ID, customer_id: params[0], rep_id: params[1], status: 'active',
           owner_session_id: params[2], origin_client: 'web', channel: params[3], summary: null,
+          // aria_recording_analysis_meeting_type_choice (2026-08-31): the
+          // INSERT now carries a 5th param (setup_call_choice) only on the
+          // uploaded-recording creation route; every other INSERT INTO
+          // meetings statement in this codebase has fewer params, so
+          // params[4] is simply undefined for those and this line is a
+          // no-op for them.
+          setup_call_choice: params[4] === undefined ? null : params[4],
           started_at: new Date(), speaker_labels: {}, speaker_label_evidence: {}, customer_name: null,
           media_time_ms: 0, first30_speaker_repair: {},
         };
@@ -197,11 +204,18 @@ async function buildApp({
   return { app, pool, state };
 }
 
-async function createMeeting(app, durationSeconds = 2) {
+// aria_recording_analysis_meeting_type_choice (2026-08-31): meetingType is
+// now a required field on this route (see uploadedRecording.js's doc
+// comment on the route for why it is required rather than defaulted).
+// Every pre-existing caller of this test helper is a regression test for
+// behavior unrelated to meeting-type choice, so it defaults to
+// 'walkthrough' (the pre-this-task behavior every one of those tests
+// implicitly assumed) unless a test explicitly overrides it.
+async function createMeeting(app, durationSeconds = 2, meetingType = 'walkthrough') {
   const response = await app.inject({
     method: 'POST', url: '/api/uploaded-recordings',
     headers: { cookie: `session_id=${SESSION_ID}` },
-    payload: { durationSeconds },
+    payload: { durationSeconds, meetingType },
   });
   return response;
 }
@@ -299,6 +313,47 @@ test('creation is authenticated and emits explicit uploaded_recording type witho
   assert.deepEqual(Object.keys(built.pool.meetings[0]).filter((key) => /audio|file|blob|path|url/i.test(key)), []);
   assert.equal(Object.hasOwn(response.json(), 'owner_session_id'), false);
   await built.app.close();
+});
+
+// aria_recording_analysis_meeting_type_choice (2026-08-31): the rep MUST
+// explicitly pick a meeting type before analysis can start; there is no
+// sensible auto-detected default for an uploaded recording (no channel/
+// call_sid signal exists), so omitting/mis-sending meetingType blocks
+// creation with a 400 rather than silently guessing a coaching mode.
+test('creation requires an explicit meetingType and persists the rep\'s choice as setup_call_choice', async () => {
+  const { app, pool } = await buildApp();
+
+  const missing = await app.inject({
+    method: 'POST', url: '/api/uploaded-recordings',
+    headers: { cookie: `session_id=${SESSION_ID}` },
+    payload: { durationSeconds: 4 },
+  });
+  assert.equal(missing.statusCode, 400);
+  assert.match(missing.json().error, /meetingType/);
+  assert.equal(pool.meetings.length, 0);
+
+  const invalid = await app.inject({
+    method: 'POST', url: '/api/uploaded-recordings',
+    headers: { cookie: `session_id=${SESSION_ID}` },
+    payload: { durationSeconds: 4, meetingType: 'bogus' },
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(pool.meetings.length, 0);
+
+  const setupCallResponse = await createMeeting(app, 4, 'setup_call');
+  assert.equal(setupCallResponse.statusCode, 201, setupCallResponse.body);
+  assert.equal(setupCallResponse.json().setup_call_choice, true);
+  assert.equal(setupCallResponse.json().is_setup_call_mode, true);
+  assert.equal(pool.meetings.at(-1).setup_call_choice, true);
+
+  pool.meetings.length = 0;
+  const walkthroughResponse = await createMeeting(app, 4, 'walkthrough');
+  assert.equal(walkthroughResponse.statusCode, 201, walkthroughResponse.body);
+  assert.equal(walkthroughResponse.json().setup_call_choice, false);
+  assert.equal(walkthroughResponse.json().is_setup_call_mode, false);
+  assert.equal(pool.meetings.at(-1).setup_call_choice, false);
+
+  await app.close();
 });
 
 test('WebSocket is owner-bound by rep and exact creating session', async () => {

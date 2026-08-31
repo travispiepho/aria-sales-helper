@@ -177,21 +177,43 @@ export async function registerUploadedRecordingRoutes(fastify, {
     throw new Error('uploaded recording routes require pool, auth, and finalization dependencies');
   }
 
+  // aria_recording_analysis_meeting_type_choice (2026-08-31): the rep must
+  // EXPLICITLY choose the meeting type for this uploaded/pre-recorded
+  // analysis before it starts — "Setup Call (phone)" or "Walkthrough
+  // (in-person)" — because there is no channel/call_sid signal to
+  // auto-detect it from the way a live Twilio/browser call has (see
+  // coachingAnalysis.js's isSetupCallMeeting() doc comment). `meetingType`
+  // is REQUIRED (not defaulted) on this route: this task's brief calls for
+  // picking the safer of "block" vs. "default sensibly", and silently
+  // defaulting a Setup Call transcript into the full 11-stage walkthrough
+  // checklist (or vice versa) would run the WRONG coaching mode with no
+  // rep awareness that a choice was even skipped — a 400 surfaces that
+  // immediately and unambiguously instead. Accepted values mirror
+  // CoachingData's existing `mode: 'setup_call'` naming (CoachingPanel.tsx)
+  // so the wire value already matches the frontend's own vocabulary for
+  // this concept; 'walkthrough' is this route's explicit name for the
+  // non-setup-call case (persisted as `setup_call_choice = false`, not
+  // NULL — NULL is reserved for meetings that never went through this
+  // explicit-choice gate, e.g. rows created before this migration).
   fastify.post('/api/uploaded-recordings', { preHandler: [requireAuth] }, async (request, reply) => {
     if (!apiKey) return reply.code(503).send({ error: 'Transcription is not configured' });
-    const { customer_id = null, durationSeconds } = request.body || {};
+    const { customer_id = null, durationSeconds, meetingType } = request.body || {};
     const duration = Number(durationSeconds);
     if (!Number.isFinite(duration) || duration <= 0 || duration > UPLOADED_RECORDING_PROTOCOL.maxDurationSeconds) {
       return reply.code(400).send({ error: `durationSeconds must be between 0 and ${UPLOADED_RECORDING_PROTOCOL.maxDurationSeconds}` });
     }
+    if (meetingType !== 'setup_call' && meetingType !== 'walkthrough') {
+      return reply.code(400).send({ error: `meetingType must be 'setup_call' or 'walkthrough'` });
+    }
+    const setupCallChoice = meetingType === 'setup_call';
     const ownerSessionId = request.cookies?.session_id || null;
     if (!ownerSessionId) return reply.code(401).send({ error: 'Unauthorized' });
 
     const result = await pool.query(
-      `INSERT INTO meetings (customer_id, rep_id, status, owner_session_id, origin_client, channel)
-       VALUES ($1, $2, 'active', $3, 'web', $4)
+      `INSERT INTO meetings (customer_id, rep_id, status, owner_session_id, origin_client, channel, setup_call_choice)
+       VALUES ($1, $2, 'active', $3, 'web', $4, $5)
        RETURNING *`,
-      [customer_id, request.user.id, ownerSessionId, UPLOADED_RECORDING_CHANNEL],
+      [customer_id, request.user.id, ownerSessionId, UPLOADED_RECORDING_CHANNEL, setupCallChoice],
     );
     const meeting = result.rows[0];
     return reply.code(201).send({
@@ -203,6 +225,8 @@ export async function registerUploadedRecordingRoutes(fastify, {
       origin_client: meeting.origin_client,
       channel: UPLOADED_RECORDING_CHANNEL,
       meeting_type: UPLOADED_RECORDING_CHANNEL,
+      setup_call_choice: meeting.setup_call_choice,
+      is_setup_call_mode: meeting.setup_call_choice === true,
       upload_ws_path: `/meetings/${meeting.id}/uploaded-recording`,
       upload_protocol: {
         encoding: 'pcm_s16le', sampleRate: 16_000, channels: 1, playbackRate: 1,

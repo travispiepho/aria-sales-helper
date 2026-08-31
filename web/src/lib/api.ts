@@ -369,9 +369,23 @@ export async function createMeeting(customerId?: string): Promise<Meeting> {
   return request('POST', '/api/meetings', { customer_id: customerId });
 }
 
+// 2026-08-31 (aria_recording_analysis_meeting_type_choice): the rep's
+// explicit choice of meeting type for an uploaded/pre-recorded analysis —
+// mirrors server/uploadedRecording.js's POST /api/uploaded-recordings
+// `meetingType` field exactly (see that route's doc comment for why this
+// is required rather than defaulted, and why 'setup_call'/'walkthrough'
+// are the two accepted wire values). There is no auto-detected default for
+// this channel: unlike a live phone/browser call (channel === 'phone' &&
+// !!call_sid, coachingAnalysis.js's isSetupCallPhoneMeeting()), an uploaded
+// recording has no channel/call_sid signal to infer this from — the rep
+// must pick.
+export type UploadedRecordingMeetingType = 'setup_call' | 'walkthrough';
+
 export interface UploadedRecordingMeeting extends Meeting {
   channel: 'uploaded_recording';
   meeting_type: 'uploaded_recording';
+  setup_call_choice: boolean;
+  is_setup_call_mode: boolean;
   upload_ws_path: string;
   upload_protocol: {
     encoding: 'pcm_s16le';
@@ -383,9 +397,14 @@ export interface UploadedRecordingMeeting extends Meeting {
 }
 
 /** Creates an owner/session-bound meeting for a browser-local recording. */
-export async function createUploadedRecordingMeeting(durationSeconds: number, customerId?: string): Promise<UploadedRecordingMeeting> {
+export async function createUploadedRecordingMeeting(
+  durationSeconds: number,
+  meetingType: UploadedRecordingMeetingType,
+  customerId?: string,
+): Promise<UploadedRecordingMeeting> {
   return request('POST', '/api/uploaded-recordings', {
     durationSeconds,
+    meetingType,
     customer_id: customerId,
   });
 }

@@ -29,7 +29,7 @@ import { registerTelephonyRoutes, isConfigured as isTwilioConfigured, configStat
 // language flagger, question-listening gaps. See coachingAnalysis.js.
 import {
   analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebuttal,
-  isSetupCallPhoneMeeting, analyzeSetupCallCoaching, extractAppointmentDetails,
+  isSetupCallPhoneMeeting, isSetupCallMeeting, analyzeSetupCallCoaching, extractAppointmentDetails,
   BANT_SYSTEM_PROMPT, INSIDER_LANGUAGE_SYSTEM_PROMPT, QUESTION_GAPS_SYSTEM_PROMPT,
   REBUTTAL_SYSTEM_PROMPT, SETUP_CALL_SYSTEM_PROMPT,
 } from './coachingAnalysis.js';
@@ -674,6 +674,13 @@ async function ensureSessionsTable() {
   await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_customer_address TEXT`);
   await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_started_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS scheduled_call_sid TEXT`);
+  // Explicit rep-chosen meeting type for the uploaded-recording flow
+  // (aria_recording_analysis_meeting_type_choice, 2026-08-31) — see
+  // migrations/2026-08-31-uploaded-recording-setup-call-choice.sql for the
+  // full rationale (why a new column, tri-state NULL semantics, and how it
+  // composes with the existing live-call channel/call_sid auto-detector
+  // via coachingAnalysis.js's isSetupCallMeeting()).
+  await pool.query(`ALTER TABLE meetings ADD COLUMN IF NOT EXISTS setup_call_choice BOOLEAN`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_meetings_upcoming_by_rep
     ON meetings (rep_id, scheduled_for ASC)
@@ -2256,14 +2263,18 @@ fastify.get('/api/meetings/:id', { preHandler: [requireAuth] }, async (request, 
   // meeting up again ahead of the in-person walkthrough. Attached here
   // (rather than a separate endpoint) so the existing single meeting-detail
   // fetch the frontend already calls on page load picks this up for free.
-  // `is_setup_call_mode` mirrors the same isSetupCallPhoneMeeting() check
+  // `is_setup_call_mode` mirrors the same isSetupCallMeeting() check
   // runCoachingAnalysis() uses, so the frontend can key its render branch
   // off ONE server-computed boolean instead of re-deriving the channel/
-  // call_sid compound check itself a third time (backend coaching engine,
-  // frontend MeetingPage.tsx's isTwilioPhoneCall, and now this flag all
-  // agree by construction — see coachingAnalysis.js's isSetupCallPhoneMeeting
-  // doc comment).
-  shaped.is_setup_call_mode = isSetupCallPhoneMeeting(meeting);
+  // call_sid/setup_call_choice logic itself a third time (backend coaching
+  // engine, frontend CoachingPanel/MeetingPage/UploadedRecordingPage, and
+  // now this flag all agree by construction — see coachingAnalysis.js's
+  // isSetupCallMeeting() doc comment). Widened 2026-08-31
+  // (aria_recording_analysis_meeting_type_choice) to also cover uploaded-
+  // recording meetings via their EXPLICIT persisted rep choice
+  // (`setup_call_choice`) — live phone/browser-call auto-detection
+  // (channel === 'phone' && !!call_sid) is completely unchanged.
+  shaped.is_setup_call_mode = isSetupCallMeeting(meeting);
   if (shaped.is_setup_call_mode) {
     try {
       const projectInfoResult = await pool.query(
@@ -2589,16 +2600,18 @@ async function runCoachingAnalysis(meetingId) {
     return null;
   }
 
-  // Meeting-type detection (aria_setup_call_coaching_differentiation) —
-  // fetch channel/call_sid up front so this whole function can branch
-  // before doing any of the in-person-specific work below. A lookup
-  // failure (meeting deleted mid-flight, transient DB error) falls through
-  // to the existing in-person path rather than throwing, matching this
-  // function's existing null-on-failure/never-throw convention.
+  // Meeting-type detection (aria_setup_call_coaching_differentiation,
+  // widened by aria_recording_analysis_meeting_type_choice 2026-08-31 to
+  // also read `setup_call_choice` — the explicit rep choice persisted for
+  // uploaded-recording meetings, since those have no channel/call_sid
+  // signal to auto-detect from). A lookup failure (meeting deleted
+  // mid-flight, transient DB error) falls through to the existing
+  // in-person path rather than throwing, matching this function's
+  // existing null-on-failure/never-throw convention.
   let meetingRow = null;
   try {
     const meetingResult = await pool.query(
-      `SELECT channel, call_sid FROM meetings WHERE id = $1`,
+      `SELECT channel, call_sid, setup_call_choice FROM meetings WHERE id = $1`,
       [meetingId]
     );
     meetingRow = meetingResult.rows[0] || null;
@@ -2606,7 +2619,7 @@ async function runCoachingAnalysis(meetingId) {
     console.error('coaching: DB error fetching meeting for type detection:', err.message);
   }
 
-  if (isSetupCallPhoneMeeting(meetingRow)) {
+  if (isSetupCallMeeting(meetingRow)) {
     // Fetch full transcript so far (not just the last 20 segments) — a
     // setup call is short (often well under 20 segments total for its
     // whole duration), and project-info extraction benefits from the full

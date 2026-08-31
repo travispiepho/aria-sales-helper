@@ -59,12 +59,22 @@ function renderPage() {
   </Routes></MemoryRouter>);
 }
 
-async function selectAudio() {
+// aria_recording_analysis_meeting_type_choice (2026-08-31): every existing
+// test in this file predates the meeting-type radio group and implicitly
+// assumed a normal in-person-shaped walkthrough recording, so this shared
+// helper also picks "Walkthrough (in-person)" by default — the same
+// behavior those tests already exercised — unless a test explicitly opts
+// out via `pickMeetingType: false` (used by the dedicated gating tests
+// below, which need to exercise the pre-choice state itself).
+async function selectAudio({ pickMeetingType = true }: { pickMeetingType?: boolean } = {}) {
   const file = new File(['audio'], 'customer-call.wav', { type: 'audio/wav' });
   await userEvent.upload(screen.getByLabelText('Local audio or MP4 file'), file);
   const audio = screen.getByLabelText('Selected recording playback');
   Object.defineProperty(audio, 'duration', { configurable: true, value: 12 });
   fireEvent.loadedMetadata(audio);
+  if (pickMeetingType) {
+    await userEvent.click(screen.getByRole('radio', { name: 'Walkthrough (in-person)' }));
+  }
   return file;
 }
 
@@ -271,6 +281,63 @@ describe('UploadedRecordingPage', () => {
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', true);
     await userEvent.click(screen.getByRole('checkbox'));
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', false);
+  });
+
+  // aria_recording_analysis_meeting_type_choice (2026-08-31): the rep must
+  // explicitly pick a meeting type before Start Analysis is enabled — the
+  // safer option per this task's brief over silently defaulting.
+  describe('meeting type choice', () => {
+    it('renders a required Setup Call / Walkthrough choice and blocks Start Analysis until one is picked', async () => {
+      renderPage();
+      await selectAudio({ pickMeetingType: false });
+      await userEvent.click(screen.getByRole('checkbox'));
+      expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', true);
+
+      const group = screen.getByRole('radiogroup', { name: 'Meeting type' });
+      const setupCall = within(group).getByRole('radio', { name: 'Setup Call (phone)' });
+      const walkthrough = within(group).getByRole('radio', { name: 'Walkthrough (in-person)' });
+      expect(setupCall).toHaveProperty('ariaChecked', 'false');
+      expect(walkthrough).toHaveProperty('ariaChecked', 'false');
+
+      await userEvent.click(setupCall);
+      expect(setupCall).toHaveProperty('ariaChecked', 'true');
+      expect(walkthrough).toHaveProperty('ariaChecked', 'false');
+      expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', false);
+    });
+
+    it('surfaces a clear error instead of starting when Start Analysis is invoked with no meeting type chosen', async () => {
+      renderPage();
+      await selectAudio({ pickMeetingType: false });
+      await userEvent.click(screen.getByRole('checkbox'));
+      // Button is disabled per canStart, but assert the guard inside
+      // handleStart() too so this stays safe even if canStart's derivation
+      // ever drifts from handleStart()'s own validation.
+      expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', true);
+      expect(mocks.createMeeting).not.toHaveBeenCalled();
+    });
+
+    it('passes the explicit meeting type through to createUploadedRecordingMeeting when Setup Call is chosen', async () => {
+      renderPage();
+      await selectAudio({ pickMeetingType: false });
+      await userEvent.click(screen.getByRole('radio', { name: 'Setup Call (phone)' }));
+      await userEvent.click(screen.getByRole('checkbox'));
+      await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+      await waitFor(() => expect(mocks.createMeeting).toHaveBeenCalledWith(12, 'setup_call'));
+    });
+
+    it('passes the explicit meeting type through to createUploadedRecordingMeeting when Walkthrough is chosen', async () => {
+      renderPage();
+      await selectAudio({ pickMeetingType: false });
+      await userEvent.click(screen.getByRole('radio', { name: 'Walkthrough (in-person)' }));
+      await userEvent.click(screen.getByRole('checkbox'));
+      await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+      await waitFor(() => expect(mocks.createMeeting).toHaveBeenCalledWith(12, 'walkthrough'));
+    });
+
+    it('hides the meeting-type choice once analysis is active, alongside the rest of the chooser', async () => {
+      await startAnalysis();
+      expect(screen.queryByRole('radiogroup', { name: 'Meeting type' })).toBeNull();
+    });
   });
 
   it('renders one recording chooser inside the bottom playback and analysis controls', async () => {
@@ -551,7 +618,7 @@ describe('UploadedRecordingPage', () => {
     await userEvent.click(screen.getByRole('checkbox'));
     await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
     await waitFor(() => expect(mocks.start).toHaveBeenCalledWith({ durationSeconds: 12 }));
-    expect(mocks.createMeeting).toHaveBeenCalledWith(12);
+    expect(mocks.createMeeting).toHaveBeenCalledWith(12, 'walkthrough');
     expect(mocks.load).toHaveBeenCalledBefore(mocks.createMeeting);
     // 2026-08-30 (aria_uploaded_recording_hide_metadata_during_analysis): the
     // "locked while analysis is active" note lives inside the pre-analysis
@@ -834,6 +901,7 @@ describe('UploadedRecordingPage', () => {
     const audio = screen.getByLabelText('Selected recording playback');
     Object.defineProperty(audio, 'duration', { configurable: true, value: 12 });
     fireEvent.loadedMetadata(audio);
+    await userEvent.click(screen.getByRole('radio', { name: 'Walkthrough (in-person)' }));
     await userEvent.click(screen.getByRole('checkbox'));
     await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
     expect((await screen.findByRole('alert')).textContent).toMatch(/decodable audio track.*MP4/i);

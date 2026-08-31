@@ -10,8 +10,6 @@ import type { Meeting } from '../lib/api';
 const mocks = vi.hoisted(() => ({
   listMeetings: vi.fn(),
   deleteMeeting: vi.fn(),
-  getMeeting: vi.fn(),
-  getMeetingSegments: vi.fn(),
 }));
 
 vi.mock('../lib/auth', () => ({
@@ -58,12 +56,8 @@ beforeEach(() => {
   Object.values(mocks).forEach(mock => mock.mockReset());
   mocks.listMeetings.mockResolvedValue(page([todayMeeting, previousMeeting], true));
   mocks.deleteMeeting.mockResolvedValue(undefined);
-  mocks.getMeeting.mockResolvedValue({ ...todayMeeting, summary: 'Useful summary', speaker_labels: { speaker_0: 'Customer' } });
-  mocks.getMeetingSegments.mockResolvedValue({ segments: [{ speaker: 'speaker_0', text: 'Hello', ts: today.toISOString() }] });
   vi.stubGlobal('confirm', vi.fn(() => true));
   vi.stubGlobal('alert', vi.fn());
-  URL.createObjectURL = vi.fn(() => 'blob:transcript');
-  URL.revokeObjectURL = vi.fn();
 });
 
 describe('MeetingsPage', () => {
@@ -130,22 +124,12 @@ describe('MeetingsPage', () => {
     await waitFor(() => expect(screen.queryByText('Exterior Estimate')).toBeNull());
   });
 
-  it('downloads the supported transcript export and reports download failures', async () => {
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  it('does not render a download control in the recordings list', async () => {
     renderPage();
     await screen.findByText('Exterior Estimate');
-
-    await userEvent.click(screen.getByRole('button', { name: 'Download transcript for Exterior Estimate' }));
-    expect(mocks.getMeeting).toHaveBeenCalledWith('today-1');
-    expect(mocks.getMeetingSegments).toHaveBeenCalledWith('today-1');
-    expect(URL.createObjectURL).toHaveBeenCalled();
-    expect(click).toHaveBeenCalled();
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:transcript');
-
-    mocks.getMeeting.mockRejectedValueOnce(new Error('download failed'));
-    await userEvent.click(screen.getByRole('button', { name: 'Download transcript for Exterior Estimate' }));
-    expect(alert).toHaveBeenCalledWith('Failed to download transcript');
-    click.mockRestore();
+    expect(screen.queryByRole('button', { name: /Download transcript/i })).toBeNull();
+    expect(screen.queryByText('⬇️')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Delete Exterior Estimate' })).toBeTruthy();
   });
 
   it('distinguishes loading, initial failure with retry, empty, and no-today states', async () => {

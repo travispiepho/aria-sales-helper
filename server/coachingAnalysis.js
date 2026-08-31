@@ -531,6 +531,115 @@ async function analyzeSetupCallCoaching(apiKey, meetingId, segments, existingPro
   }
 }
 
+// ─── aria_setup_call_extract_appointment_button (2026-08-30) ───────────────
+//
+// Background: analyzeSetupCallCoaching() above already runs DURING a setup
+// call, on the full transcript captured so far, and already extracts
+// project_info (including appointment_set/appointment_date_time) — see
+// runCoachingAnalysis()'s setup-call branch in server.js, which fetches
+// ALL transcript_segments for the meeting (not a windowed subset) on every
+// tick. So the live pipeline is not blind to the whole conversation.
+//
+// The real gap this task closes: the live pass only runs when something
+// (a periodic tick, a manual "Refresh Coaching") actually INVOKES it while
+// the call is still active. If the appointment gets confirmed in the
+// closing seconds of the call — right before the rep hangs up — there may
+// never be another live coaching tick after that moment to pick it up.
+// This function is the POST-MEETING, rep-triggered re-analysis pass: it
+// runs once, after the call has fully ended, against the definitively
+// COMPLETE transcript, specifically to catch anything only said at the
+// very end.
+//
+// Deliberately NOT a parallel extraction pipeline: this reuses the exact
+// same `project_info` field contract and the exact same mergeProjectInfo()
+// sticky-merge semantics as the live setup-call coaching mode (see that
+// function's own header for the full stickiness rationale), so its output
+// slots directly into the same setup_call_project_info row/UI with zero
+// new shape to teach the frontend. The prompt itself is a natural,
+// narrower variant of SETUP_CALL_SYSTEM_PROMPT above: same project_info
+// field list and field guidance verbatim, minus the live-call-only
+// DISC/nudges/urgent coaching fields (those are meaningless once the call
+// has already ended — nothing left to coach in real time), plus an
+// explicit "this is the whole finished call, look everywhere" framing
+// instead of "so far".
+const APPOINTMENT_EXTRACTION_SYSTEM_PROMPT = `You are ARIA, doing a POST-CALL extraction pass over the COMPLETE, FINISHED transcript of an over-the-phone CertaPro Painters "Setup Call" (a short call where a rep collects basic project info and books an in-person walkthrough).
+
+The call is over — you have the entire conversation below, not a partial window. Read all of it carefully for any project fact or in-person appointment detail mentioned ANYWHERE, including things confirmed only near the very end of the call (e.g. a date/time agreed to right before hanging up). Extract ONLY facts explicitly stated in the transcript — do not guess or infer beyond what was said. Use null for anything not mentioned.
+
+Fields:
+  - customer_name: prospect's name if given
+  - customer_address: the project address if given
+  - project_type: e.g. "exterior repaint", "interior painting", "deck staining", "cabinet refinish"
+  - scope_notes: free-text notes on rooms/areas/surfaces mentioned
+  - approx_size_sqft: a number if a rough size was mentioned (square footage, number of rooms translated to a rough estimate, etc.), else null
+  - timeline_urgency: e.g. "ASAP", "before winter", "no rush", "within 2 weeks"
+  - budget_signal: any budget/price-range language the prospect volunteered
+  - appointment_set: true ONLY if a specific in-person visit date/time was explicitly agreed to anywhere in this transcript, else false
+  - appointment_date_time: the agreed date/time as stated (natural language is fine, e.g. "Thursday at 2pm"), else null
+  - notes: anything else worth a rep knowing before the in-person visit
+
+Return ONLY raw JSON, no prose, no markdown, in this exact shape:
+{
+  "project_info": {
+    "customer_name": null,
+    "customer_address": null,
+    "project_type": null,
+    "scope_notes": null,
+    "approx_size_sqft": null,
+    "timeline_urgency": null,
+    "budget_signal": null,
+    "appointment_set": false,
+    "appointment_date_time": null,
+    "notes": null
+  }
+}`;
+
+/**
+ * extractAppointmentDetails(apiKey, meetingId, segments, existingProjectInfo, systemPrompt)
+ *
+ * The post-meeting, full-transcript counterpart to analyzeSetupCallCoaching()
+ * — see the comment block above for why this exists as a distinct function
+ * rather than just re-calling analyzeSetupCallCoaching() (that function
+ * also generates DISC/nudges/urgent, which have no meaning post-call, and
+ * its >=3-segment minimum is a live-call safety net that doesn't apply
+ * here — a short-but-complete call with even 1-2 segments should still be
+ * extractable post-hoc).
+ *
+ * `segments` is expected to be the FULL, final transcript_segments for the
+ * meeting (server.js's route handler is responsible for fetching all of
+ * them, unfiltered/unwindowed).
+ *
+ * `existingProjectInfo` is merged the same way analyzeSetupCallCoaching()
+ * merges it (mergeProjectInfo(), sticky/non-destructive) so a rep who runs
+ * this after live coaching already captured some facts never loses them —
+ * this pass can only add to or corroborate what's already there.
+ *
+ * Returns { mode: 'appointment_extraction', project_info } or null on
+ * failure/missing key/empty transcript, matching this module's existing
+ * null-on-failure convention.
+ */
+async function extractAppointmentDetails(apiKey, meetingId, segments, existingProjectInfo = {}, systemPrompt = APPOINTMENT_EXTRACTION_SYSTEM_PROMPT) {
+  if (!apiKey) return null;
+  if (!segments || segments.length === 0) return null;
+
+  const transcriptText = segments.map(s => `${s.speaker}: ${s.text}`).join('\n');
+  const knownContext = JSON.stringify(existingProjectInfo && typeof existingProjectInfo === 'object' ? existingProjectInfo : {});
+  const userPrompt = `Already known about this project from live coaching during the call (JSON, may be all-null if nothing was captured live):\n${knownContext}\n\nFull, complete transcript of the finished call:\n\n${transcriptText}\n\nReturn ONLY the JSON object described in the system prompt.`;
+
+  try {
+    const parsed = await callClaude(apiKey, systemPrompt, userPrompt, 500);
+    if (!parsed || !parsed.project_info) return null;
+
+    return {
+      mode: 'appointment_extraction',
+      project_info: mergeProjectInfo(existingProjectInfo, parsed.project_info),
+    };
+  } catch (err) {
+    console.error(`coachingAnalysis.extractAppointmentDetails error (meeting ${meetingId}):`, err.message);
+    return null;
+  }
+}
+
 export {
   analyzeBant,
   analyzeInsiderLanguage,
@@ -539,6 +648,7 @@ export {
   parseJsonLoose,
   isSetupCallPhoneMeeting,
   analyzeSetupCallCoaching,
+  extractAppointmentDetails,
   mergeProjectInfo,
   // Hardcoded prompt constants, exported (2026-08-30,
   // aria_coaching_settings_prompt_editor_backend) as documented SEED/
@@ -551,4 +661,5 @@ export {
   QUESTION_GAPS_SYSTEM_PROMPT,
   REBUTTAL_SYSTEM_PROMPT,
   SETUP_CALL_SYSTEM_PROMPT,
+  APPOINTMENT_EXTRACTION_SYSTEM_PROMPT,
 };

@@ -29,7 +29,7 @@ import { registerTelephonyRoutes, isConfigured as isTwilioConfigured, configStat
 // language flagger, question-listening gaps. See coachingAnalysis.js.
 import {
   analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebuttal,
-  isSetupCallPhoneMeeting, analyzeSetupCallCoaching,
+  isSetupCallPhoneMeeting, analyzeSetupCallCoaching, extractAppointmentDetails,
   BANT_SYSTEM_PROMPT, INSIDER_LANGUAGE_SYSTEM_PROMPT, QUESTION_GAPS_SYSTEM_PROMPT,
   REBUTTAL_SYSTEM_PROMPT, SETUP_CALL_SYSTEM_PROMPT,
 } from './coachingAnalysis.js';
@@ -2808,6 +2808,110 @@ fastify.post('/api/meetings/:id/coaching', { preHandler: [requireAuth] }, async 
   }
 
   return coaching;
+});
+
+// POST /api/meetings/:id/extract-appointment-details
+//
+// aria_setup_call_extract_appointment_button (2026-08-30). Rep-triggered,
+// post-meeting-only re-analysis pass for a completed Setup Call (phone
+// meeting) — reads the FULL, final transcript_segments for the meeting
+// (unlike the live coaching pipeline's per-tick calls, which only need
+// "so far", this always has the whole call available since the meeting
+// has ended) and runs coachingAnalysis.js's extractAppointmentDetails(),
+// a narrower variant of the live setup-call prompt scoped to exactly
+// project/appointment facts (no DISC/nudges/urgent — meaningless post-call).
+//
+// GATING: `isSetupCallPhoneMeeting(meeting)` (channel === 'phone' &&
+// !!call_sid) — the SAME meeting-type check this task's brief flagged as
+// needing verification for reliability post-meeting. Confirmed reliable:
+// `channel` and `call_sid` are plain persisted columns on the `meetings`
+// row (not derived/session-scoped state), so this check is exactly as
+// valid after the call has ended as it is during the live call — nothing
+// about it depends on the call still being active. (`is_setup_call_mode`,
+// the boolean GET /api/meetings/:id attaches for the frontend, is ITSELF
+// just `isSetupCallPhoneMeeting(meeting)` computed server-side — the two
+// are identical by construction; this route recomputes it directly from
+// the freshly-fetched row rather than trusting a client-sent flag, same
+// posture as every other write route in this file.)
+//
+// STORAGE DECISION (overwrite vs separate field): this route UPSERTS into
+// the SAME `setup_call_project_info` row the live call already wrote to —
+// there is no separate `post_meeting_appointment_details` column. This is
+// safe/non-destructive by construction: extractAppointmentDetails() (like
+// analyzeSetupCallCoaching() before it) always merges its fresh extraction
+// on top of the existing row via mergeProjectInfo(), which is a strictly
+// additive/sticky merge (a field already confirmed live can only be kept
+// or corroborated by this pass, never nulled/reset — see mergeProjectInfo()
+// and its test coverage). A genuinely separate column would only be
+// justified if this needed to preserve "what the live pass thought" as
+// distinct from "what the post-call pass thinks" for comparison/audit
+// purposes, which is not part of this task's brief (the brief asks for a
+// rep-facing display of the found details, not a diff view) — reusing the
+// existing table/shape keeps GET /api/meetings/:id, the live CoachingPanel,
+// and this button's own result display all reading from one source of
+// truth with no risk of them disagreeing about "the current project info".
+fastify.post('/api/meetings/:id/extract-appointment-details', { preHandler: [requireAuth] }, async (request, reply) => {
+  const { id } = request.params;
+
+  const existing = await pool.query('SELECT * FROM meetings WHERE id = $1', [id]);
+  if (existing.rows.length === 0) {
+    return reply.code(404).send({ error: 'Meeting not found' });
+  }
+  const meeting = existing.rows[0];
+  if (!hasAdminAccess(request.user.role) && meeting.rep_id !== request.user.id) {
+    return reply.code(403).send({ error: 'Forbidden' });
+  }
+  if (!isSetupCallPhoneMeeting(meeting)) {
+    return reply.code(400).send({ error: 'Appointment-detail extraction is only available for Setup Call (phone) meetings.' });
+  }
+  if (!OPENROUTER_API_KEY) {
+    return reply.code(503).send({ error: 'Appointment extraction requires OPENROUTER_API_KEY.' });
+  }
+
+  let segments;
+  try {
+    const segResult = await pool.query(
+      `SELECT speaker, text FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
+      [id]
+    );
+    segments = segResult.rows;
+  } catch (err) {
+    fastify.log.error(`extract-appointment-details: DB error fetching segments for ${id}: ${err.message}`);
+    return reply.code(502).send({ error: 'Failed to load transcript.' });
+  }
+  if (segments.length === 0) {
+    return reply.code(503).send({ error: 'No transcript available to extract from.' });
+  }
+
+  let existingProjectInfo = {};
+  try {
+    const existingResult = await pool.query(
+      `SELECT project_info FROM setup_call_project_info WHERE meeting_id = $1`,
+      [id]
+    );
+    if (existingResult.rows.length > 0) existingProjectInfo = existingResult.rows[0].project_info || {};
+  } catch (err) {
+    fastify.log.error(`extract-appointment-details: DB error fetching existing project_info for ${id}: ${err.message}`);
+  }
+
+  const extraction = await extractAppointmentDetails(OPENROUTER_API_KEY, id, segments, existingProjectInfo);
+  if (!extraction) {
+    return reply.code(503).send({ error: 'Appointment-detail extraction unavailable — LLM error or empty transcript.' });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO setup_call_project_info (meeting_id, project_info, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (meeting_id) DO UPDATE SET project_info = $2, updated_at = NOW()`,
+      [id, JSON.stringify(extraction.project_info)]
+    );
+  } catch (dbErr) {
+    fastify.log.error(`extract-appointment-details: failed to persist project_info for ${id}: ${dbErr.message}`);
+    return reply.code(502).send({ error: 'Appointment details extracted but failed to persist: ' + dbErr.message });
+  }
+
+  return { mode: extraction.mode, project_info: extraction.project_info };
 });
 
 // ─── Post-meeting analytics: WPM, checklist sequencing/timing, Meeting Score ──

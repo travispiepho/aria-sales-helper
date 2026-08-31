@@ -422,6 +422,18 @@ export async function getLatestCoaching(id: string): Promise<{ coaching: unknown
   return request('GET', `/api/meetings/${id}/coaching/latest`);
 }
 
+// 2026-08-30 (aria_setup_call_extract_appointment_button): post-meeting,
+// full-transcript re-analysis pass for a completed Setup Call (phone)
+// meeting — see server.js's POST /api/meetings/:id/extract-appointment-details
+// for the full gating/storage rationale. Returns the same
+// SetupCallProjectInfo shape as `meeting.setup_call_project_info`, merged
+// on top of whatever the live call already captured (never destructive).
+export async function extractAppointmentDetails(
+  id: string
+): Promise<{ mode: 'appointment_extraction'; project_info: SetupCallProjectInfo }> {
+  return request('POST', `/api/meetings/${id}/extract-appointment-details`);
+}
+
 export async function deleteMeeting(id: string): Promise<void> {
   return request('DELETE', `/api/meetings/${id}`);
 }

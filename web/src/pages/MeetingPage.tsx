@@ -8,9 +8,11 @@ import {
   getLatestCoaching,
   getCoachingReport,
   getCustomer,
+  extractAppointmentDetails,
   Meeting,
   CoachingReport,
   Customer,
+  SetupCallProjectInfo,
   apiFetch,
 } from '../lib/api';
 import CustomerInfoSection from '../components/CustomerInfoSection';
@@ -195,6 +197,18 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
   const [summaryDownloadLoading, setSummaryDownloadLoading] = useState(false);
+  // aria_setup_call_extract_appointment_button (2026-08-30): post-meeting,
+  // rep-triggered full-transcript re-analysis pass for a completed Setup
+  // Call (phone) meeting — see handleExtractAppointmentDetails() below and
+  // server.js's POST /api/meetings/:id/extract-appointment-details for the
+  // full design. `apptResult` is intentionally NOT seeded from
+  // `meeting.setup_call_project_info` on page load — it only reflects a
+  // result this rep explicitly triggered THIS pass to produce, so the
+  // panel's presence always means "this button was pressed", not "the live
+  // call happened to capture something already".
+  const [apptExtractLoading, setApptExtractLoading] = useState(false);
+  const [apptExtractError, setApptExtractError] = useState<string | null>(null);
+  const [apptResult, setApptResult] = useState<SetupCallProjectInfo | null>(null);
   const [voiceToast, setVoiceToast] = useState<string | null>(null);
   // ARIA Priority 1 roadmap, item 5: Live rebuttal teleprompter. Handles the
   // "suggested_rebuttal" WS message pushed by server.js's STUB objection
@@ -1408,6 +1422,29 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
     }
   }
 
+  // aria_setup_call_extract_appointment_button (2026-08-30): triggers the
+  // post-meeting full-transcript appointment-details extraction pass (see
+  // server.js's POST /api/meetings/:id/extract-appointment-details). On
+  // success, also refreshes `meeting.setup_call_project_info` so the rest
+  // of the page (and a future reload) reflects the merged result — the
+  // route persists to the same setup_call_project_info row the live call
+  // already wrote to, sticky-merged, never destructive (see that route's
+  // header comment for the full storage rationale).
+  async function handleExtractAppointmentDetails() {
+    if (!meetingId) return;
+    setApptExtractLoading(true);
+    setApptExtractError(null);
+    try {
+      const { project_info } = await extractAppointmentDetails(meetingId);
+      setApptResult(project_info);
+      setMeeting(prev => (prev ? { ...prev, setup_call_project_info: project_info } : prev));
+    } catch (err) {
+      setApptExtractError(err instanceof Error ? err.message : 'Failed to extract appointment details');
+    } finally {
+      setApptExtractLoading(false);
+    }
+  }
+
   // ─── Speaker label helpers ────────────────────────────────────────────────
 
   function getDisplayLabel(rawSpeaker: string): string {
@@ -2154,6 +2191,116 @@ export default function MeetingPage({ meetingId, pageMode }: { meetingId: string
             )}
           </div>
         </div>}
+
+        {/* aria_setup_call_extract_appointment_button (2026-08-30) — Gabe,
+            verbatim: "Create a button to extract in-person meeting times
+            and details from the transcript of all setup-calls (phone
+            calls). This button should be just above the back to home
+            button on ONLY the post meeting page for setup-calls (phone
+            calls)." Rendered as the LAST item in this scrollable main
+            column, immediately preceding the fixed bottom "← Back to
+            Home" action bar below (same visual area/column — this is the
+            bottom of the scroll content, directly above where that fixed
+            bar sits) — see the render order below for why nothing else
+            renders after this block.
+
+            Gating: `pageMode === 'post'` (only the post-meeting/completed
+            page, never the live in-call view — the live view already has
+            its own real-time project-info display via CoachingPanel) AND
+            `isTwilioPhoneCall` (this page's own long-standing
+            `channel === 'phone' && !!call_sid` mirror of server.js's
+            isSetupCallPhoneMeeting() — confirmed reliable post-meeting
+            too, since channel/call_sid are plain persisted `meetings`
+            columns, not live-call-only state; see
+            POST /api/meetings/:id/extract-appointment-details's own
+            gating comment in server.js for the full reasoning on why this
+            check — not `meeting.is_setup_call_mode` — is what's used here,
+            though the two are identical by construction). This deliberately
+            excludes: in-person meetings (not a setup call), uploaded
+            recordings (not a phone call at all), and mobile's own
+            local-mic 'phone'-channel meetings which have no call_sid and
+            are NOT real Twilio setup calls (same distinction
+            isTwilioPhoneCall's own header comment documents at length). */}
+        {pageMode === 'post' && isTwilioPhoneCall && (
+          <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                In-Person Appointment Details
+              </h3>
+              <button
+                onClick={handleExtractAppointmentDetails}
+                disabled={apptExtractLoading || segments.length === 0}
+                className="text-xs font-semibold px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 hover:bg-blue-100 disabled:opacity-50 transition-colors"
+              >
+                {apptExtractLoading ? 'Extracting…' : apptResult ? '↻ Re-extract' : '📅 Extract Appointment Details'}
+              </button>
+            </div>
+
+            {apptExtractError && (
+              <p className="text-xs text-red-600 bg-red-50 rounded-lg p-2 mb-3">{apptExtractError}</p>
+            )}
+
+            {segments.length === 0 && !apptExtractLoading && !apptResult && (
+              <p className="text-sm text-gray-400">No transcript to extract from.</p>
+            )}
+
+            {!apptResult && segments.length > 0 && !apptExtractLoading && !apptExtractError && (
+              <p className="text-sm text-gray-400">
+                Run a full-transcript scan for any in-person appointment time/date and other project details mentioned on this call.
+              </p>
+            )}
+
+            {apptResult && (
+              <div data-appointment-extraction-result className="space-y-2">
+                <div className={`rounded-xl p-3 ${apptResult.appointment_set ? 'bg-green-50 border border-green-200' : 'bg-amber-50 border border-amber-200'}`}>
+                  <p className={`text-sm font-semibold ${apptResult.appointment_set ? 'text-green-800' : 'text-amber-800'}`}>
+                    {apptResult.appointment_set
+                      ? `📅 Appointment: ${apptResult.appointment_date_time || 'Date/time confirmed but not clearly stated'}`
+                      : 'No in-person appointment found in the transcript.'}
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  {apptResult.customer_address && (
+                    <div className="bg-gray-50 rounded-lg p-2.5 col-span-2">
+                      <p className="text-xs text-gray-400">Address</p>
+                      <p className="text-gray-800">{apptResult.customer_address}</p>
+                    </div>
+                  )}
+                  {apptResult.project_type && (
+                    <div className="bg-gray-50 rounded-lg p-2.5">
+                      <p className="text-xs text-gray-400">Project Type</p>
+                      <p className="text-gray-800">{apptResult.project_type}</p>
+                    </div>
+                  )}
+                  {apptResult.timeline_urgency && (
+                    <div className="bg-gray-50 rounded-lg p-2.5">
+                      <p className="text-xs text-gray-400">Timeline</p>
+                      <p className="text-gray-800">{apptResult.timeline_urgency}</p>
+                    </div>
+                  )}
+                  {apptResult.scope_notes && (
+                    <div className="bg-gray-50 rounded-lg p-2.5 col-span-2">
+                      <p className="text-xs text-gray-400">Scope Notes</p>
+                      <p className="text-gray-800">{apptResult.scope_notes}</p>
+                    </div>
+                  )}
+                  {apptResult.budget_signal && (
+                    <div className="bg-gray-50 rounded-lg p-2.5 col-span-2">
+                      <p className="text-xs text-gray-400">Budget Signal</p>
+                      <p className="text-gray-800">{apptResult.budget_signal}</p>
+                    </div>
+                  )}
+                  {apptResult.notes && (
+                    <div className="bg-gray-50 rounded-lg p-2.5 col-span-2">
+                      <p className="text-xs text-gray-400">Notes</p>
+                      <p className="text-gray-800">{apptResult.notes}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </main>
 
       {/* Bottom action */}

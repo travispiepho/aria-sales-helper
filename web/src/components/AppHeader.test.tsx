@@ -44,11 +44,14 @@ describe('AppHeader', () => {
     expect(screen.getByRole('link', { name: 'Recorded' }).getAttribute('href')).toBe('/meetings');
     expect(screen.getByRole('link', { name: 'Settings' }).getAttribute('href')).toBe('/settings');
     expect(Array.from(navigation.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
-      'Meet', 'Recorded', 'Objections', 'Settings', 'Profile',
+      'Meet', 'Recorded', 'Objections', 'Coaching', 'Settings', 'Profile',
     ]);
     const objections = screen.getByRole('link', { name: 'Objections' });
     expect(objections.querySelector('svg[data-nav-icon="objections"]')).toBeTruthy();
     expect(objections.textContent).not.toContain('💬');
+    const coaching = screen.getByRole('link', { name: 'Coaching' });
+    expect(coaching.getAttribute('href')).toBe('/coaching');
+    expect(coaching.querySelector('svg[data-nav-icon="coaching"]')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Profile' }).textContent).toBe('G');
   });
 
@@ -61,6 +64,9 @@ describe('AppHeader', () => {
     expect(screen.getByRole('link', { name: 'Settings' }).getAttribute('aria-current')).toBe('page');
     await userEvent.click(screen.getByRole('link', { name: 'Objections' }));
     expect(screen.getByLabelText('current path').textContent).toBe('/objections');
+    await userEvent.click(screen.getByRole('link', { name: 'Coaching' }));
+    expect(screen.getByLabelText('current path').textContent).toBe('/coaching');
+    expect(screen.getByRole('link', { name: 'Coaching' }).getAttribute('aria-current')).toBe('page');
     unmount();
 
     renderHeader('/profile');
@@ -92,13 +98,14 @@ describe('AppHeader', () => {
       screen.getByRole('link', { name: 'Recorded' }),
       screen.getByRole('link', { name: 'Settings' }),
       screen.getByRole('link', { name: 'Objections' }),
+      screen.getByRole('link', { name: 'Coaching' }),
       screen.getByRole('link', { name: 'Profile' }),
     ];
 
     expect(nav.className).toContain('max-[480px]:w-full');
     expect(nav.className).not.toMatch(/\b(?:absolute|fixed|sticky)\b/);
     expect(Array.from(nav.querySelectorAll('a')).map(link => link.getAttribute('aria-label'))).toEqual([
-      'Meet', 'Recorded', 'Objections', 'Settings', 'Profile',
+      'Meet', 'Recorded', 'Objections', 'Coaching', 'Settings', 'Profile',
     ]);
     expect(screen.queryByRole('link', { name: 'Back to Schedule' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Back to Schedule' })).toBeNull();

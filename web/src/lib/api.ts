@@ -735,3 +735,44 @@ export async function deleteRebuttal(id: string): Promise<void> {
 export async function dismissLibraryRebuttal(meetingId: string, objectionId: string): Promise<void> {
   return request('POST', `/api/meetings/${meetingId}/dismiss-rebuttal`, { objectionId });
 }
+
+// ─── Coaching stages (2026-08-30, aria_coaching_stages_admin_tab) ─────────
+// The sales-process "Stage" list CoachingPanel.tsx tracks call progress
+// through (Setup Call → Follow Up), now DB-backed instead of a hardcoded
+// STAGE_ORDER array. GET is open to any authenticated user (visible to all
+// reps, same spirit as the Objections tab); POST/DELETE are admin-only
+// server-side (see server.js's coachingStages.js route-block comment for
+// why this differs from the shared-for-everyone objections/rebuttals auth
+// model — stage order is load-bearing for every rep's progress-percentage
+// math, so only admins/owners may change membership).
+
+export interface CoachingStageRecord {
+  id: string;
+  key: string;
+  label: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listCoachingStages(): Promise<{ stages: CoachingStageRecord[] }> {
+  return request('GET', '/api/coaching-stages');
+}
+
+export async function createCoachingStage(key: string, label: string): Promise<CoachingStageRecord> {
+  return request('POST', '/api/coaching-stages', { key, label });
+}
+
+export interface DeleteCoachingStageResult {
+  ok: boolean;
+  // Count of historical meetings whose coaching_snapshots still reference
+  // this stage's key — a soft warning surfaced by the UI, not a hard
+  // blocker (see server.js's DELETE /api/coaching-stages/:key comment for
+  // why deleting is still safe: historical snapshots store their own
+  // stage label/key copy, independent of this table).
+  historical_usage_count: number;
+}
+
+export async function deleteCoachingStage(key: string): Promise<DeleteCoachingStageResult> {
+  return request('DELETE', `/api/coaching-stages/${encodeURIComponent(key)}`);
+}

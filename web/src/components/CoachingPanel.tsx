@@ -9,6 +9,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { listCoachingStages } from '../lib/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -45,7 +46,18 @@ interface CoachingPanelProps {
 
 // ─── Stage progress order ─────────────────────────────────────────────────────
 
-const STAGE_ORDER = [
+// 2026-08-30 (aria_coaching_stages_admin_tab): this list used to be a
+// hardcoded array here. It's now sourced from GET /api/coaching-stages
+// (backed by the new coaching_stages table, admin-editable on the new
+// /coaching page) so an admin's add/remove changes actually take effect
+// for stageIndex/progress-percentage math below, not just cosmetically on
+// the admin page. FALLBACK_STAGE_ORDER is the exact same 11 keys/order
+// this component always used, kept as a same-render safety net for the
+// brief window before the one-time fetch below resolves (or if it ever
+// fails) -- so a rep never sees stage progress silently break/flash 0%
+// just because this fetch hasn't landed yet.
+
+const FALLBACK_STAGE_ORDER = [
   'setup_call',
   'arrival',
   'upfront_4',
@@ -59,6 +71,50 @@ const STAGE_ORDER = [
   'follow_up',
 ];
 
+// Fetch-once, cache-forever module-level singleton (this list only ever
+// changes via an admin explicitly editing it on /coaching -- a full page
+// reload is an acceptable/expected way to pick up that rare change,
+// matching how other mostly-static reference data in this app is treated).
+// Never throws: a failed fetch resolves to FALLBACK_STAGE_ORDER rather than
+// rejecting, so callers don't need their own try/catch.
+let stageOrderPromise: Promise<string[]> | null = null;
+function getStageOrder(): Promise<string[]> {
+  if (!stageOrderPromise) {
+    // Wrapped in Promise.resolve().then(...) rather than calling
+    // listCoachingStages() directly: some pre-existing test suites mock
+    // '../lib/api' wholesale (without spreading importOriginal), so in
+    // that environment listCoachingStages can be undefined and calling it
+    // throws SYNCHRONOUSLY, before any Promise/.catch exists to swallow
+    // it. Deferring the call into a microtask means a missing/throwing
+    // mock rejects the promise instead of throwing outside of it, so the
+    // existing .catch(() => FALLBACK_STAGE_ORDER) below still catches it
+    // and this component never crashes a host page/test over stage-list
+    // fetch failures.
+    stageOrderPromise = Promise.resolve()
+      .then(() => listCoachingStages())
+      .then(({ stages }) => {
+        const keys = stages.map((s) => s.key);
+        return keys.length > 0 ? keys : FALLBACK_STAGE_ORDER;
+      })
+      .catch(() => FALLBACK_STAGE_ORDER);
+  }
+  return stageOrderPromise;
+}
+
+// Hook: starts with FALLBACK_STAGE_ORDER (so first render's progress math
+// is never blank/zero) and swaps in the fetched list once it resolves.
+function useStageOrder(): string[] {
+  const [order, setOrder] = useState<string[]>(FALLBACK_STAGE_ORDER);
+  useEffect(() => {
+    let cancelled = false;
+    getStageOrder().then((keys) => {
+      if (!cancelled) setOrder(keys);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  return order;
+}
+
 // ─── Confidence colors ────────────────────────────────────────────────────────
 
 const CONFIDENCE_STYLES: Record<string, string> = {
@@ -70,6 +126,7 @@ const CONFIDENCE_STYLES: Record<string, string> = {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function CoachingPanel({ coaching }: CoachingPanelProps) {
+  const stageOrder = useStageOrder();
   const [nudgeIndex, setNudgeIndex] = useState(0);
   const [paused, setPaused] = useState(false);
   const [visible, setVisible] = useState(true);
@@ -150,8 +207,8 @@ export default function CoachingPanel({ coaching }: CoachingPanelProps) {
     pauseTimerRef.current = setTimeout(() => setPaused(false), 20000);
   }
 
-  const stageIndex = stage?.current ? STAGE_ORDER.indexOf(stage.current) : -1;
-  const stageProgress = stageIndex >= 0 ? Math.round(((stageIndex + 1) / STAGE_ORDER.length) * 100) : 0;
+  const stageIndex = stage?.current ? stageOrder.indexOf(stage.current) : -1;
+  const stageProgress = stageIndex >= 0 ? Math.round(((stageIndex + 1) / stageOrder.length) * 100) : 0;
 
   const doneCount = checklist.filter(item => item.done).length;
 

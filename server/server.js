@@ -63,6 +63,7 @@ import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitl
 import { AiGenerationError, createAnthropicPrimaryTextGenerator } from './aiProvider.js';
 import { registerScheduledMeetingRoutes } from './scheduledMeetings.js';
 import { registerCustomerRoutes } from './customers.js';
+import { registerCoachingStageRoutes } from './coachingStages.js';
 import {
   loadEnrolledVoicePrint,
   voiceFingerprintIdentificationPolicy,
@@ -838,6 +839,56 @@ async function ensureSessionsTable() {
     CREATE INDEX IF NOT EXISTS rebuttals_objection_id_created_at_idx
     ON rebuttals (objection_id, created_at ASC)
   `);
+
+  // Coaching stages (added 2026-08-30, aria_coaching_stages_admin_tab —
+  // see migrations/2026-08-30-coaching-stages.sql for the full schema
+  // rationale). Refactors the sales-process "Stage" list from a hardcoded
+  // STAGE_ORDER array in CoachingPanel.tsx into DB-backed, admin-editable
+  // rows. Mirrored here (same as objections/rebuttals just above) so a
+  // normal deploy-from-main brings the schema + seed data in sync on boot,
+  // without depending on the migration file being run by hand first.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS coaching_stages (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      key TEXT NOT NULL UNIQUE CHECK (key ~ '^[a-z][a-z0-9_]*$'),
+      label TEXT NOT NULL,
+      sort_order INTEGER NOT NULL,
+      created_by UUID REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS coaching_stages_sort_order_idx
+    ON coaching_stages (sort_order)
+  `);
+  // Seed the current 11 hardcoded stages in their current order — but
+  // ONLY if the table is currently empty. This must NOT be an unconditional
+  // ON-CONFLICT-DO-NOTHING insert that runs on every boot: once an admin
+  // deletes a stage, its `key` becomes free again, and an unconditional
+  // seed insert would silently resurrect it on the next deploy/restart.
+  // Gating on "table is empty" makes this a true one-time seed (fresh or
+  // pre-existing-but-still-untouched DBs get the initial 11; a DB an admin
+  // has already edited is left alone), matching the migration file's own
+  // stated intent ("seed once, don't reset").
+  const stageCountResult = await pool.query('SELECT COUNT(*)::int AS count FROM coaching_stages');
+  if (stageCountResult.rows[0].count === 0) {
+    await pool.query(`
+      INSERT INTO coaching_stages (key, label, sort_order) VALUES
+        ('setup_call', 'Setup Call', 10),
+        ('arrival', 'Arrival', 20),
+        ('upfront_4', 'Upfront 4', 30),
+        ('first_go_around', '1st Go Around', 40),
+        ('client_manual', 'Client Manual', 50),
+        ('second_go_around', '2nd Go Around', 60),
+        ('rough_estimate', 'Rough Estimate', 70),
+        ('prepare_proposal', 'Prepare Proposal', 80),
+        ('proposal_presentation', 'Proposal Presentation', 90),
+        ('ask_for_order', 'Ask for the Order', 100),
+        ('follow_up', 'Follow Up', 110)
+      ON CONFLICT (key) DO NOTHING
+    `);
+  }
 }
 
 async function createSession(userId) {
@@ -3484,6 +3535,18 @@ fastify.delete('/api/rebuttals/:id', { preHandler: [requireAuth] }, async (reque
 
   return { ok: true };
 });
+
+// ─── Coaching stages (admin-editable) ─────────────────────────────────────────
+// Added 2026-08-30 (aria_coaching_stages_admin_tab). Extracted into
+// coachingStages.js (matching the customers.js / scheduledMeetings.js
+// extraction pattern) so its admin-gated POST/DELETE routes can be
+// exercised with a real Fastify app + a lightweight pool fixture in
+// server/test/coachingStages.test.mjs. See that module's header comment
+// for the full auth-model rationale (GET open to any authenticated user,
+// POST/DELETE admin-only — unlike the shared-library objections/rebuttals
+// routes just above, since stage list membership/order is load-bearing for
+// every rep's live coaching-progress math).
+await registerCoachingStageRoutes(fastify, { pool, requireAuth, hasAdminAccess });
 
 // ─── Phase 2: WebSocket audio endpoint ───────────────────────────────────────
 // GET /meetings/:id/audio → upgraded to WebSocket

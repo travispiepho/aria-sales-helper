@@ -13,6 +13,7 @@ import ScheduleCallPage from './pages/ScheduleCallPage';
 import ScheduleVisitPage from './pages/ScheduleVisitPage';
 import EditScheduledMeetingPage from './pages/EditScheduledMeetingPage';
 import ObjectionsPage from './pages/ObjectionsPage';
+import CoachingStagesPage from './pages/CoachingStagesPage';
 import SignupClaimPage from './pages/SignupClaimPage';
 import InRecordingPage from './pages/InRecordingPage';
 import PostRecordingPage from './pages/PostRecordingPage';
@@ -241,6 +242,22 @@ export default function App() {
             element={
               <RequireAuth>
                 <ObjectionsPage />
+              </RequireAuth>
+            }
+          />
+          {/* Coaching tab (2026-08-30, aria_coaching_stages_admin_tab) —
+              lists the sales-process stages the live coaching engine
+              tracks. Open to all logged-in users (server enforces only
+              requireAuth on GET /api/coaching-stages); the page itself
+              gates add/remove controls on hasAdminAccess(), and the server
+              separately 403s POST/DELETE for non-admins — see
+              coachingStages.js's route-block comment for the full auth
+              model. */}
+          <Route
+            path="/coaching"
+            element={
+              <RequireAuth>
+                <CoachingStagesPage />
               </RequireAuth>
             }
           />

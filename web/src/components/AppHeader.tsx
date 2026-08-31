@@ -41,7 +41,7 @@ export default function AppHeader({
   const { pathname } = useLocation();
   const navigationVisible = React.useContext(AppNavigationVisibilityContext);
   const current = (path: string) =>
-    path === '/objections' || path === '/meetings'
+    path === '/objections' || path === '/meetings' || path === '/coaching'
       ? pathname === path || pathname.startsWith(`${path}/`)
       : pathname === path;
 
@@ -108,6 +108,34 @@ export default function AppHeader({
             >
               <path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.6V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4z" />
               <path d="M8 8h8M8 12h5" />
+            </svg>
+          </Link>
+          {/* Coaching tab (2026-08-30, aria_coaching_stages_admin_tab) —
+              links to the new /coaching page listing the sales-process
+              stages ARIA's live coaching engine tracks. Visible to every
+              logged-in user (reps can view, admins can also add/remove
+              stages on that page — see CoachingStagesPage.tsx). Placed
+              directly after Objections, mirroring that tab's icon-only nav
+              button style (no text label at this width). */}
+          <Link
+            to="/coaching"
+            aria-label="Coaching"
+            aria-current={current('/coaching') ? 'page' : undefined}
+            className={`${navItemClass} ${current('/coaching') ? 'ring-2 ring-white' : ''}`}
+          >
+            <svg
+              data-nav-icon="coaching"
+              aria-hidden="true"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="w-5 h-5"
+            >
+              <polygon points="3 11 22 2 13 21 11 13 3 11" />
             </svg>
           </Link>
           <Link

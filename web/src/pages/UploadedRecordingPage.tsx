@@ -675,23 +675,6 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
                 </div>
               )}
 
-              {/* 2026-08-30 (aria_rep_auto_naming_transcript_labels): ARIA
-                  auto-labels the rep in an uploaded recording's transcript
-                  the same way it does for live in-person meetings (self-
-                  introduction detection / enrolled voiceprint match against
-                  the rep's account name) — but for an already-recorded file
-                  that introduction had to happen ON THE ORIGINAL RECORDING.
-                  This is pre-recording guidance for next time, not something
-                  ARIA can enforce retroactively on a file already selected
-                  here, so it's placed as a note near the consent checkbox
-                  rather than a live in-meeting nudge. */}
-              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                <span className="font-semibold">Tip for next time:</span> ARIA labels the rep
-                automatically by name when the rep introduces themselves near the start of the
-                recording (e.g. "Hi, I'm {'{'}your name{'}'}"). If this file doesn't include that,
-                you may need to label speakers manually below.
-              </div>
-
               <label className="flex items-start gap-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-950">
                 <input
                   type="checkbox"

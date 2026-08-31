@@ -164,18 +164,19 @@ describe('UploadedRecordingPage', () => {
     expect(screen.queryByText(/Stop Analysis/)).toBeNull();
   });
 
-  // aria_rep_auto_naming_transcript_labels (2026-08-30): the introduce-
-  // yourself guidance is pre-recording instructions for NEXT time (this file
-  // is already recorded), so it must render near the consent checkbox while
-  // choosing a file, and must NOT persist once analysis is active.
-  it('shows introduce-yourself guidance near the consent checkbox before analysis starts, not once active', async () => {
+  // aria_uploaded_recording_remove_tip_for_next_time (2026-08-31): the
+  // "Tip for next time" introduce-yourself guidance block was removed
+  // entirely per objective, so it must not render in any state.
+  it('does not show the removed Tip for next time / introduce-yourself guidance in any state', async () => {
     renderPage();
     await selectAudio();
-    expect(screen.getByText(/ARIA labels the rep\s+automatically by name/i)).toBeTruthy();
+    expect(screen.queryByText(/Tip for next time/i)).toBeNull();
+    expect(screen.queryByText(/ARIA labels the rep\s+automatically by name/i)).toBeNull();
 
     await userEvent.click(screen.getByRole('checkbox'));
     await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
     await screen.findByRole('heading', { name: 'Live transcript' });
+    expect(screen.queryByText(/Tip for next time/i)).toBeNull();
     expect(screen.queryByText(/ARIA labels the rep\s+automatically by name/i)).toBeNull();
   });
 

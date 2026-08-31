@@ -2354,6 +2354,19 @@ function ConsentModal({
             and follow-up. Is that okay with you?"
           </p>
         </div>
+        {/* 2026-08-30 (aria_rep_auto_naming_transcript_labels): ARIA labels
+            the rep automatically from context (self-introduction phrasing
+            or an enrolled voiceprint), but it needs the rep to actually say
+            their name out loud near the start of the meeting for the
+            introduction detector to have anything to latch onto — this
+            reminder surfaces that requirement right where the rep is about
+            to start recording, additive to the existing consent copy. */}
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
+          <p className="text-sm text-amber-800 text-center">
+            👋 <span className="font-semibold">Introduce yourself by name</span> right after you hit
+            Record (e.g. "Hi, I'm {'{'}your name{'}'}") so ARIA can label you correctly in the transcript.
+          </p>
+        </div>
         <p className="text-xs text-gray-400 text-center mb-4">
           Tap Confirm only after informing your customer. This confirmation will be logged.
         </p>

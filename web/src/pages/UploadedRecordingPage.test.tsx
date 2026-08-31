@@ -154,6 +154,21 @@ describe('UploadedRecordingPage', () => {
     expect(screen.queryByText(/Stop Analysis/)).toBeNull();
   });
 
+  // aria_rep_auto_naming_transcript_labels (2026-08-30): the introduce-
+  // yourself guidance is pre-recording instructions for NEXT time (this file
+  // is already recorded), so it must render near the consent checkbox while
+  // choosing a file, and must NOT persist once analysis is active.
+  it('shows introduce-yourself guidance near the consent checkbox before analysis starts, not once active', async () => {
+    renderPage();
+    await selectAudio();
+    expect(screen.getByText(/ARIA labels the rep\s+automatically by name/i)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await screen.findByRole('heading', { name: 'Live transcript' });
+    expect(screen.queryByText(/ARIA labels the rep\s+automatically by name/i)).toBeNull();
+  });
+
   // aria_coaching_left_panel_space_between_layout (2026-08-30): the left
   // "type" column's own top-to-bottom children (title/status block,
   // CustomerInfoSection + upload/playback content, End Meeting control)

@@ -30,7 +30,15 @@ import { registerTelephonyRoutes, isConfigured as isTwilioConfigured, configStat
 import {
   analyzeBant, analyzeInsiderLanguage, analyzeQuestionGaps, generateRebuttal,
   isSetupCallPhoneMeeting, analyzeSetupCallCoaching,
+  BANT_SYSTEM_PROMPT, INSIDER_LANGUAGE_SYSTEM_PROMPT, QUESTION_GAPS_SYSTEM_PROMPT,
+  REBUTTAL_SYSTEM_PROMPT, SETUP_CALL_SYSTEM_PROMPT,
 } from './coachingAnalysis.js';
+// DB-backed, admin-editable coaching prompts (2026-08-30,
+// aria_coaching_settings_prompt_editor_backend) — see coachingPrompts.js
+// header comment for the full design (generic key/label/prompt_text
+// schema, GET-open/PUT-admin-gated auth mirroring coachingStages.js,
+// per-pool in-memory cache with invalidate-on-write).
+import { getPromptText, registerCoachingPromptRoutes } from './coachingPrompts.js';
 // Item 5 (live rebuttal teleprompter) — STUB detection half. See
 // objectionDetection.js module docstring for real-vs-stubbed breakdown.
 import { detectObjection } from './objectionDetection.js';
@@ -910,6 +918,68 @@ async function ensureSessionsTable() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+  // Coaching prompts (added 2026-08-30,
+  // aria_coaching_settings_prompt_editor_backend — see
+  // migrations/2026-08-30-coaching-prompts.sql for the full schema
+  // rationale). Makes the LLM system prompts driving the coaching engine
+  // admin-editable and DB-backed instead of hardcoded string constants.
+  // Mirrored here (same as coaching_stages just above) so a normal
+  // deploy-from-main brings the schema + seed data in sync on boot.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS coaching_prompts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      key TEXT NOT NULL UNIQUE CHECK (key ~ '^[a-z][a-z0-9_]*$'),
+      label TEXT NOT NULL,
+      prompt_text TEXT NOT NULL CHECK (length(trim(prompt_text)) > 0),
+      updated_by UUID REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  // Seed the 6 prompts currently hardcoded in server.js/coachingAnalysis.js
+  // with their EXACT current text, ONLY if the table is currently empty —
+  // same "seed once, don't reset" gating as coaching_stages above (once an
+  // admin edits a prompt, a later deploy/restart must not silently revert
+  // it back to the hardcoded default). Parameterized INSERT (one per row,
+  // via a loop) rather than a single multi-VALUES literal — avoids any
+  // risk of prompt text containing characters that would need SQL-string
+  // escaping if inlined directly.
+  //
+  // NOTE: seed values reference the actual hardcoded constants (imported
+  // from coachingAnalysis.js, or COACHING_SYSTEM_PROMPT declared further
+  // down in this same file) rather than re-embedding a second copy of the
+  // prompt text as inline string literals here. Two independent copies of
+  // the same multi-hundred-word prompt would be a drift hazard (a future
+  // edit to one copy silently not reaching the other) and, in practice,
+  // broke an existing regex-based test
+  // (coachingUrgentPromptConcision.test.mjs) that scans server.js's source
+  // for the FIRST occurrence of a "- urgent:" field-guidance bullet — a
+  // duplicated inline copy earlier in the file (this function is defined
+  // above COACHING_SYSTEM_PROMPT) shadowed the real one. Referencing the
+  // constants by name is both safer and simpler: this function isn't
+  // INVOKED until ensureSessionsTable() is awaited at server startup,
+  // long after every top-level const in this module (including
+  // COACHING_SYSTEM_PROMPT, declared later in the file) has already been
+  // initialized — JS module evaluation order, not declaration order
+  // within the function body, is what matters for a closure like this.
+  const promptCountResult = await pool.query('SELECT COUNT(*)::int AS count FROM coaching_prompts');
+  if (promptCountResult.rows[0].count === 0) {
+    const seedPrompts = [
+      { key: 'coaching_realtime', label: 'Real-Time Coaching (In-Person)', get promptText() { return COACHING_SYSTEM_PROMPT; } },
+      { key: 'coaching_setup_call', label: 'Real-Time Coaching (Setup Call / Phone)', get promptText() { return SETUP_CALL_SYSTEM_PROMPT; } },
+      { key: 'bant', label: 'BANT + Closing Certainty Analysis', get promptText() { return BANT_SYSTEM_PROMPT; } },
+      { key: 'insider_language', label: 'Insider-Language Flagger', get promptText() { return INSIDER_LANGUAGE_SYSTEM_PROMPT; } },
+      { key: 'question_gaps', label: 'Question-Listening Gaps Detector', get promptText() { return QUESTION_GAPS_SYSTEM_PROMPT; } },
+      { key: 'rebuttal', label: 'Live Rebuttal Suggestion', get promptText() { return REBUTTAL_SYSTEM_PROMPT; } },
+    ];
+    for (const p of seedPrompts) {
+      await pool.query(
+        `INSERT INTO coaching_prompts (key, label, prompt_text) VALUES ($1, $2, $3) ON CONFLICT (key) DO NOTHING`,
+        [p.key, p.label, p.promptText]
+      );
+    }
+  }
 }
 
 async function createSession(userId) {
@@ -2470,7 +2540,8 @@ async function runSetupCallCoachingAnalysis(meetingId, segments) {
     console.error('setup-call coaching: DB error fetching existing project_info:', err.message);
   }
 
-  const coaching = await analyzeSetupCallCoaching(OPENROUTER_API_KEY, meetingId, segments, existingProjectInfo);
+  const setupCallPromptText = await getPromptText(pool, 'coaching_setup_call', SETUP_CALL_SYSTEM_PROMPT);
+  const coaching = await analyzeSetupCallCoaching(OPENROUTER_API_KEY, meetingId, segments, existingProjectInfo, setupCallPromptText);
   if (!coaching) return null;
 
   try {
@@ -2565,7 +2636,14 @@ async function runCoachingAnalysis(meetingId) {
 
   const transcriptText = segments.map(s => `${s.speaker}: ${s.text}`).join('\n');
 
-  const systemWithKB = `${COACHING_SYSTEM_PROMPT}\n\n=== DISC FRAMEWORK ===\n${kbDiscFramework}\n\n=== 10+1 SALES PROCESS ===\n${kb10Plus1Process}\n\n=== 1ST GO AROUND CHECKLIST ===\n${kbFirstGoAround}`;
+  // 2026-08-30 (aria_coaching_settings_prompt_editor_backend): source the
+  // base system prompt from the DB-backed coaching_prompts table (cached,
+  // invalidated on admin write) instead of the hardcoded
+  // COACHING_SYSTEM_PROMPT constant directly — that constant remains as
+  // the documented seed/fallback default, passed in as getPromptText()'s
+  // third arg for use if the DB row is ever missing/unreachable.
+  const coachingRealtimePromptText = await getPromptText(pool, 'coaching_realtime', COACHING_SYSTEM_PROMPT);
+  const systemWithKB = `${coachingRealtimePromptText}\n\n=== DISC FRAMEWORK ===\n${kbDiscFramework}\n\n=== 10+1 SALES PROCESS ===\n${kb10Plus1Process}\n\n=== 1ST GO AROUND CHECKLIST ===\n${kbFirstGoAround}`;
 
   const userPrompt = `Meeting transcript (last ${segments.length} segments):\n\n${transcriptText}\n\nReturn ONLY raw JSON with this exact shape:\n{
   "disc": {
@@ -2952,7 +3030,8 @@ fastify.post('/api/meetings/:id/bant', { preHandler: [requireAuth] }, async (req
     `SELECT speaker, text, ts FROM transcript_segments WHERE meeting_id = $1 ORDER BY ts ASC`,
     [id]
   );
-  const bant = await analyzeBant(OPENROUTER_API_KEY, id, segResult.rows);
+  const bantPromptText = await getPromptText(pool, 'bant', BANT_SYSTEM_PROMPT);
+  const bant = await analyzeBant(OPENROUTER_API_KEY, id, segResult.rows, bantPromptText);
   if (!bant) {
     return reply.code(503).send({ error: 'BANT analysis unavailable — not enough transcript or LLM error' });
   }
@@ -3019,7 +3098,8 @@ fastify.post('/api/meetings/:id/insider-language', { preHandler: [requireAuth] }
     [id]
   );
   const segments = segResult.rows;
-  const flags = await analyzeInsiderLanguage(OPENROUTER_API_KEY, id, segments);
+  const insiderLanguagePromptText = await getPromptText(pool, 'insider_language', INSIDER_LANGUAGE_SYSTEM_PROMPT);
+  const flags = await analyzeInsiderLanguage(OPENROUTER_API_KEY, id, segments, insiderLanguagePromptText);
   if (flags === null) {
     return reply.code(503).send({ error: 'Insider-language analysis failed (LLM error)' });
   }
@@ -3080,7 +3160,8 @@ fastify.post('/api/meetings/:id/question-gaps', { preHandler: [requireAuth] }, a
     [id]
   );
   const segments = segResult.rows;
-  const gaps = await analyzeQuestionGaps(OPENROUTER_API_KEY, id, segments);
+  const questionGapsPromptText = await getPromptText(pool, 'question_gaps', QUESTION_GAPS_SYSTEM_PROMPT);
+  const gaps = await analyzeQuestionGaps(OPENROUTER_API_KEY, id, segments, questionGapsPromptText);
   if (gaps === null) {
     return reply.code(503).send({ error: 'Question-gap analysis failed (LLM error)' });
   }
@@ -3696,6 +3777,18 @@ fastify.delete('/api/rebuttals/:id', { preHandler: [requireAuth] }, async (reque
 // routes just above, since stage list membership/order is load-bearing for
 // every rep's live coaching-progress math).
 await registerCoachingStageRoutes(fastify, { pool, requireAuth, hasAdminAccess });
+
+// ─── Coaching prompts (admin-editable) ──────────────────────────────────────────────────────────────
+// Added 2026-08-30 (aria_coaching_settings_prompt_editor_backend).
+// Extracted into coachingPrompts.js (matching the coachingStages.js
+// extraction pattern immediately above) so its admin-gated PUT route can
+// be exercised with a real Fastify app + a lightweight pool fixture in
+// server/test/coachingPrompts.test.mjs. See that module's header comment
+// for the full auth-model rationale (GET open to any authenticated user,
+// PUT admin-only — mirrors the coaching-stages precedent exactly) and its
+// per-pool in-memory caching strategy (short TTL + invalidate-on-write) so
+// this doesn't add a DB round-trip to every single coaching tick.
+await registerCoachingPromptRoutes(fastify, { pool, requireAuth, hasAdminAccess });
 
 // ─── Phase 2: WebSocket audio endpoint ───────────────────────────────────────
 // GET /meetings/:id/audio → upgraded to WebSocket
@@ -4942,7 +5035,14 @@ fastify.get('/meetings/:meetingId/audio', { websocket: true }, async (socket, re
                 // handler — the LLM round-trip must not block processing of the
                 // next transcript chunk. Push to the client as soon as it
                 // resolves, same broadcast pattern as the existing coaching push.
-                generateRebuttal(OPENROUTER_API_KEY, meetingId, objection.category, groupText, contextSnapshot)
+                // 2026-08-30 (aria_coaching_settings_prompt_editor_backend):
+                // resolve the current admin-editable prompt text first (this
+                // is a cached lookup after the first call, so it adds
+                // essentially zero latency here), THEN generate the
+                // rebuttal — still fully fire-and-forget relative to the hot
+                // Deepgram-message handler above.
+                getPromptText(pool, 'rebuttal', REBUTTAL_SYSTEM_PROMPT)
+                  .then(rebuttalPromptText => generateRebuttal(OPENROUTER_API_KEY, meetingId, objection.category, groupText, contextSnapshot, rebuttalPromptText))
                   .then(rebuttalText => {
                     if (!rebuttalText) return;
                     // 2026-08-05 live-sync fix: broadcastToMeeting(), not

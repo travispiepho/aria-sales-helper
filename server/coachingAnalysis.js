@@ -124,8 +124,16 @@ Return ONLY raw JSON, no prose, no markdown, in this exact shape:
 /**
  * Returns { budget, authority, need, timeline, closing_certainty_pct, overall_rationale }
  * or null on failure / insufficient transcript / missing key.
+ *
+ * `systemPrompt` (added 2026-08-30, aria_coaching_settings_prompt_editor_backend):
+ * optional override, defaulting to the hardcoded BANT_SYSTEM_PROMPT above.
+ * server.js's route handler fetches the current admin-editable prompt text
+ * via coachingPrompts.js's getPromptText('bant', BANT_SYSTEM_PROMPT) and
+ * passes it in here — BANT_SYSTEM_PROMPT itself remains as the documented
+ * seed/fallback default (used by the migration's seed data and as the
+ * safety-net value if the DB row is ever missing/unreachable), not deleted.
  */
-async function analyzeBant(apiKey, meetingId, segments) {
+async function analyzeBant(apiKey, meetingId, segments, systemPrompt = BANT_SYSTEM_PROMPT) {
   if (!apiKey) return null;
   if (!segments || segments.length < 3) return null;
 
@@ -133,7 +141,7 @@ async function analyzeBant(apiKey, meetingId, segments) {
   const userPrompt = `Meeting transcript:\n\n${transcriptText}\n\nReturn ONLY the JSON object described in the system prompt.`;
 
   try {
-    const parsed = await callClaude(apiKey, BANT_SYSTEM_PROMPT, userPrompt, 700);
+    const parsed = await callClaude(apiKey, systemPrompt, userPrompt, 700);
     if (!parsed) return null;
 
     const clamp = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
@@ -177,8 +185,12 @@ If there are no flags, return { "flags": [] }.`;
 /**
  * Returns an array of { segment_index, phrase, explanation } (index refers
  * to position in the `segments` array passed in), or null on failure.
+ *
+ * `systemPrompt`: optional override (see analyzeBant()'s comment above for
+ * the full rationale), defaulting to the hardcoded
+ * INSIDER_LANGUAGE_SYSTEM_PROMPT seed/fallback.
  */
-async function analyzeInsiderLanguage(apiKey, meetingId, segments) {
+async function analyzeInsiderLanguage(apiKey, meetingId, segments, systemPrompt = INSIDER_LANGUAGE_SYSTEM_PROMPT) {
   if (!apiKey) return null;
   if (!segments || segments.length < 1) return [];
 
@@ -189,7 +201,7 @@ async function analyzeInsiderLanguage(apiKey, meetingId, segments) {
   const userPrompt = `Meeting transcript (each line prefixed with its segment index in brackets):\n\n${indexedTranscript}\n\nReturn ONLY the JSON object described in the system prompt.`;
 
   try {
-    const parsed = await callClaude(apiKey, INSIDER_LANGUAGE_SYSTEM_PROMPT, userPrompt, 1024);
+    const parsed = await callClaude(apiKey, systemPrompt, userPrompt, 1024);
     if (!parsed || !Array.isArray(parsed.flags)) return [];
 
     return parsed.flags
@@ -227,8 +239,12 @@ If there are no gaps, return { "gaps": [] }.`;
 /**
  * Returns an array of { question_segment_index, question_text,
  * rep_response_excerpt, explanation }, or null on failure.
+ *
+ * `systemPrompt`: optional override (see analyzeBant()'s comment above for
+ * the full rationale), defaulting to the hardcoded
+ * QUESTION_GAPS_SYSTEM_PROMPT seed/fallback.
  */
-async function analyzeQuestionGaps(apiKey, meetingId, segments) {
+async function analyzeQuestionGaps(apiKey, meetingId, segments, systemPrompt = QUESTION_GAPS_SYSTEM_PROMPT) {
   if (!apiKey) return null;
   if (!segments || segments.length < 2) return [];
 
@@ -236,7 +252,7 @@ async function analyzeQuestionGaps(apiKey, meetingId, segments) {
   const userPrompt = `Meeting transcript (each line prefixed with its segment index in brackets):\n\n${indexedTranscript}\n\nReturn ONLY the JSON object described in the system prompt.`;
 
   try {
-    const parsed = await callClaude(apiKey, QUESTION_GAPS_SYSTEM_PROMPT, userPrompt, 1200);
+    const parsed = await callClaude(apiKey, systemPrompt, userPrompt, 1200);
     if (!parsed || !Array.isArray(parsed.gaps)) return [];
 
     return parsed.gaps
@@ -274,13 +290,16 @@ Return ONLY raw JSON, no prose, no markdown, in this exact shape:
 { "rebuttal": "..." }`;
 
 /**
- * generateRebuttal(apiKey, meetingId, objectionCategory, objectionText, recentSegments)
+ * generateRebuttal(apiKey, meetingId, objectionCategory, objectionText, recentSegments, systemPrompt)
  * recentSegments: last few { speaker, text } entries for context (keep this
  * SHORT — a handful of segments, not the full transcript — to minimize
  * latency).
+ * `systemPrompt`: optional override (see analyzeBant()'s comment above for
+ * the full rationale), defaulting to the hardcoded REBUTTAL_SYSTEM_PROMPT
+ * seed/fallback.
  * Returns a string rebuttal, or null on failure/missing key.
  */
-async function generateRebuttal(apiKey, meetingId, objectionCategory, objectionText, recentSegments) {
+async function generateRebuttal(apiKey, meetingId, objectionCategory, objectionText, recentSegments, systemPrompt = REBUTTAL_SYSTEM_PROMPT) {
   if (!apiKey) return null;
   if (!objectionText) return null;
 
@@ -298,7 +317,7 @@ ${contextText}
 Return ONLY the JSON object described in the system prompt.`;
 
   try {
-    const parsed = await callClaude(apiKey, REBUTTAL_SYSTEM_PROMPT, userPrompt, 150);
+    const parsed = await callClaude(apiKey, systemPrompt, userPrompt, 150);
     if (!parsed || typeof parsed.rebuttal !== 'string' || !parsed.rebuttal.trim()) return null;
     return parsed.rebuttal.trim();
   } catch (err) {
@@ -471,8 +490,13 @@ function mergeProjectInfo(existing, extracted) {
  * Returns { mode: 'setup_call', disc, nudges, urgent, project_info } or
  * null on failure/missing key/insufficient transcript, matching every
  * other function in this module's null-on-failure convention.
+ *
+ * `systemPrompt` (added 2026-08-30, aria_coaching_settings_prompt_editor_backend):
+ * optional override, defaulting to the hardcoded SETUP_CALL_SYSTEM_PROMPT
+ * seed/fallback (see analyzeBant()'s comment above for the full
+ * rationale).
  */
-async function analyzeSetupCallCoaching(apiKey, meetingId, segments, existingProjectInfo = {}) {
+async function analyzeSetupCallCoaching(apiKey, meetingId, segments, existingProjectInfo = {}, systemPrompt = SETUP_CALL_SYSTEM_PROMPT) {
   if (!apiKey) return null;
   if (!segments || segments.length < 3) return null;
 
@@ -481,7 +505,7 @@ async function analyzeSetupCallCoaching(apiKey, meetingId, segments, existingPro
   const userPrompt = `Already known about this project from earlier in the call (JSON, may be all-null if nothing confirmed yet):\n${knownContext}\n\nMeeting transcript so far:\n\n${transcriptText}\n\nReturn ONLY the JSON object described in the system prompt.`;
 
   try {
-    const parsed = await callClaude(apiKey, SETUP_CALL_SYSTEM_PROMPT, userPrompt, 700);
+    const parsed = await callClaude(apiKey, systemPrompt, userPrompt, 700);
     if (!parsed) return null;
 
     let urgent = parsed.urgent ?? null;
@@ -516,4 +540,15 @@ export {
   isSetupCallPhoneMeeting,
   analyzeSetupCallCoaching,
   mergeProjectInfo,
+  // Hardcoded prompt constants, exported (2026-08-30,
+  // aria_coaching_settings_prompt_editor_backend) as documented SEED/
+  // fallback defaults for coachingPrompts.js's getPromptText() — used to
+  // seed the coaching_prompts migration and as the safety-net value if a
+  // DB row is ever missing/unreachable. NOT the source of truth anymore;
+  // see coachingPrompts.js's header comment.
+  BANT_SYSTEM_PROMPT,
+  INSIDER_LANGUAGE_SYSTEM_PROMPT,
+  QUESTION_GAPS_SYSTEM_PROMPT,
+  REBUTTAL_SYSTEM_PROMPT,
+  SETUP_CALL_SYSTEM_PROMPT,
 };

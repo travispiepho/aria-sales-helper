@@ -12,8 +12,7 @@ import SchedulePage from './pages/SchedulePage';
 import ScheduleCallPage from './pages/ScheduleCallPage';
 import ScheduleVisitPage from './pages/ScheduleVisitPage';
 import EditScheduledMeetingPage from './pages/EditScheduledMeetingPage';
-import ObjectionsPage from './pages/ObjectionsPage';
-import CoachingStagesPage from './pages/CoachingStagesPage';
+import CoachingSettingsPage from './pages/CoachingSettingsPage';
 import SignupClaimPage from './pages/SignupClaimPage';
 import InRecordingPage from './pages/InRecordingPage';
 import PostRecordingPage from './pages/PostRecordingPage';
@@ -232,32 +231,32 @@ export default function App() {
               </RequireAuth>
             }
           />
-          {/* Objections tab (2026-08-18) — Troy Hacker's request, tracked as
-              "Rebuttal list to objections" in HighPriorityTodos. Standalone
-              reference library, open to all logged-in reps (server enforces
-              only requireAuth, no admin gate — see server.js's route-block
-              comment for the shared-knowledge-base rationale). */}
-          <Route
-            path="/objections"
-            element={
-              <RequireAuth>
-                <ObjectionsPage />
-              </RequireAuth>
-            }
-          />
-          {/* Coaching tab (2026-08-30, aria_coaching_stages_admin_tab) —
-              lists the sales-process stages the live coaching engine
-              tracks. Open to all logged-in users (server enforces only
-              requireAuth on GET /api/coaching-stages); the page itself
-              gates add/remove controls on hasAdminAccess(), and the server
-              separately 403s POST/DELETE for non-admins — see
-              coachingStages.js's route-block comment for the full auth
-              model. */}
+          {/* Objections tab (2026-08-18) was merged INTO the Coaching tab
+              below (2026-08-30, aria_coaching_settings_merge_objections_
+              frontend) per Gabe's ask for one central "coaching settings"
+              home. This redirect exists purely so any old bookmarks/links
+              to the standalone /objections URL still land somewhere useful
+              instead of 404ing — the Objections content itself now lives
+              as a sub-section of CoachingSettingsPage.tsx. */}
+          <Route path="/objections" element={<Navigate to="/coaching" replace />} />
+          {/* Coaching tab (2026-08-30,
+              aria_coaching_settings_merge_objections_frontend) — the
+              central "Coaching Settings" home combining Sales Stages
+              (formerly its own /coaching page, aria_coaching_stages_admin_
+              tab), Objections (formerly its own /objections page), and the
+              new Coaching Prompts editor (backed by
+              aria_coaching_settings_prompt_editor_backend) into one page
+              with an internal segmented sub-nav. Open to all logged-in
+              users; each section internally gates its own admin-only
+              affordances (add/remove stage, edit prompt) on
+              hasAdminAccess(), matching the server's own per-route auth —
+              see CoachingSettingsPage.tsx and its section components for
+              the full model. */}
           <Route
             path="/coaching"
             element={
               <RequireAuth>
-                <CoachingStagesPage />
+                <CoachingSettingsPage />
               </RequireAuth>
             }
           />

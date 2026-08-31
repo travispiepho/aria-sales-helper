@@ -52,9 +52,9 @@ vi.mock('./pages/SchedulePage', () => ({ default: () => null }));
 vi.mock('./pages/ScheduleCallPage', () => ({ default: () => null }));
 vi.mock('./pages/ScheduleVisitPage', () => ({ default: () => null }));
 vi.mock('./pages/EditScheduledMeetingPage', () => ({ default: () => <h1>Edit scheduled meeting page</h1> }));
-vi.mock('./pages/ObjectionsPage', async () => {
+vi.mock('./pages/CoachingSettingsPage', async () => {
   const { default: AppHeader } = await import('./components/AppHeader');
-  return { default: () => <AppHeader title="Objections" /> };
+  return { default: () => <AppHeader title="Coaching" /> };
 });
 vi.mock('./pages/SignupClaimPage', () => ({ default: () => null }));
 
@@ -109,7 +109,7 @@ describe('meeting routes', () => {
     ['/', 'Home page'],
     ['/meetings', 'Meetings index page'],
     ['/meetings/meeting-1/post', 'Post meeting page'],
-    ['/objections', 'Objections'],
+    ['/coaching', 'Coaching'],
     ['/settings', 'Settings'],
     ['/profile', 'Profile'],
   ])('shows shared navigation on %s', async (path, heading) => {
@@ -117,6 +117,13 @@ describe('meeting routes', () => {
     go(path);
     expect(await screen.findByRole('heading', { name: heading })).toBeTruthy();
     expect(screen.getByRole('navigation', { name: 'Authenticated navigation' })).toBeTruthy();
+  });
+
+  it('redirects the legacy /objections route to the merged Coaching page', async () => {
+    auth.user = { id: 'rep-1', name: 'Gabe Rivera' };
+    go('/objections');
+    expect(await screen.findByRole('heading', { name: 'Coaching' })).toBeTruthy();
+    expect(window.location.pathname).toBe('/coaching');
   });
 
   it('resolves the authenticated index and detail routes independently', async () => {

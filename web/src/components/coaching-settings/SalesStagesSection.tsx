@@ -1,41 +1,36 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../lib/auth';
-import { hasAdminAccess } from '../lib/roles';
+import { useAuth } from '../../lib/auth';
+import { hasAdminAccess } from '../../lib/roles';
 import {
   CoachingStageRecord,
   listCoachingStages,
   createCoachingStage,
   deleteCoachingStage,
-} from '../lib/api';
-import AppPageLayout from '../components/AppPageLayout';
+} from '../../lib/api';
 
-// CoachingStagesPage — new "Coaching" tab (2026-08-30,
-// aria_coaching_stages_admin_tab). Displays the full list of sales-process
-// stages the live coaching engine tracks a call's progress through (Setup
-// Call -> Follow Up) -- visible to ALL logged-in users, same spirit as the
-// Objections tab (reps should be able to see what stages exist even though
-// they can't edit them). Admin-only add/remove controls are gated on
-// hasAdminAccess() (role 'admin' or 'owner'), matching the established
-// pattern in AdminUsersPage.tsx / ObjectionsPage.tsx: the server is the
-// real security boundary (POST/DELETE both 403 non-admins), this page's
-// gate is just the matching UX affordance.
+// SalesStagesSection — extracted from the standalone CoachingStagesPage.tsx
+// (2026-08-30, aria_coaching_stages_admin_tab) into the merged Coaching
+// Settings page (aria_coaching_settings_merge_objections_frontend), which
+// combines Sales Stages + Objections + Coaching Prompts under one "Coaching"
+// nav tab per Gabe's ask ("This should be the central location for all
+// coaching settings"). Logic/behavior is unchanged from the original page
+// — only the page-chrome (AppPageLayout/header/back-nav) was stripped out
+// since this now renders as a section inside CoachingSettingsPage.tsx's
+// own single AppPageLayout, selected via its segmented sub-nav.
 //
-// Unlike ObjectionsPage.tsx's shared-for-everyone add/edit/delete model,
-// this list's ORDER is load-bearing (CoachingPanel.tsx's stage-progress
-// percentage is stageIndex / stages.length, sourced from this same table),
-// so edit capability is intentionally admin-only here -- see
-// coachingStages.js's route-block comment in server.js for the full auth
-// rationale. New stages are appended to the end of the order (no reorder
-// UI in this pass -- see the "Reordering" note in the empty-state/footer
-// text below for the explicit follow-up recommendation left for a later
-// pass).
+// Displays the full list of sales-process stages the live coaching engine
+// tracks a call's progress through (Setup Call -> Follow Up) -- visible to
+// ALL logged-in users, same spirit as the Objections section (reps should
+// be able to see what stages exist even though they can't edit them).
+// Admin-only add/remove controls are gated on hasAdminAccess() (role
+// 'admin' or 'owner'); the server is the real security boundary
+// (POST/DELETE both 403 non-admins) — see coachingStages.js's route-block
+// comment in server.js for the full auth rationale.
 
 const KEY_RE = /^[a-z][a-z0-9_]*$/;
 
-export default function CoachingStagesPage() {
+export default function SalesStagesSection() {
   const { user } = useAuth();
-  const navigate = useNavigate();
   const isAdmin = hasAdminAccess(user?.role);
 
   const [stages, setStages] = useState<CoachingStageRecord[]>([]);
@@ -134,12 +129,9 @@ export default function CoachingStagesPage() {
   }
 
   return (
-    <AppPageLayout
-      title="Coaching"
-      subtitle="The sales-process stages ARIA tracks during a live call."
-      onBack={() => navigate('/')}
-      contentClassName="max-w-lg mx-auto"
-    >
+    <div data-coaching-settings-section="stages">
+      <p className="text-sm text-gray-500 mb-4">The sales-process stages ARIA tracks during a live call.</p>
+
       {loading ? (
         <div className="flex items-center justify-center py-12">
           <div className="animate-spin h-6 w-6 border-4 border-brand-600 border-t-transparent rounded-full" />
@@ -262,6 +254,6 @@ export default function CoachingStagesPage() {
           )}
         </>
       )}
-    </AppPageLayout>
+    </div>
   );
 }

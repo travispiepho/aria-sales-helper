@@ -41,7 +41,7 @@ export default function AppHeader({
   const { pathname } = useLocation();
   const navigationVisible = React.useContext(AppNavigationVisibilityContext);
   const current = (path: string) =>
-    path === '/objections' || path === '/meetings' || path === '/coaching'
+    path === '/meetings' || path === '/coaching'
       ? pathname === path || pathname.startsWith(`${path}/`)
       : pathname === path;
 
@@ -88,35 +88,15 @@ export default function AppHeader({
             </svg>
             <span className="text-sm font-semibold">Recorded</span>
           </Link>
-          <Link
-            to="/objections"
-            aria-label="Objections"
-            aria-current={current('/objections') ? 'page' : undefined}
-            className={`${navItemClass} ${current('/objections') ? 'ring-2 ring-white' : ''}`}
-          >
-            <svg
-              data-nav-icon="objections"
-              aria-hidden="true"
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="w-5 h-5"
-            >
-              <path d="M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.6V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4z" />
-              <path d="M8 8h8M8 12h5" />
-            </svg>
-          </Link>
-          {/* Coaching tab (2026-08-30, aria_coaching_stages_admin_tab) —
-              links to the new /coaching page listing the sales-process
-              stages ARIA's live coaching engine tracks. Visible to every
-              logged-in user (reps can view, admins can also add/remove
-              stages on that page — see CoachingStagesPage.tsx). Placed
-              directly after Objections, mirroring that tab's icon-only nav
-              button style (no text label at this width). */}
+          {/* Coaching tab (2026-08-30,
+              aria_coaching_settings_merge_objections_frontend) — links to
+              the merged /coaching page (Sales Stages + Objections +
+              Coaching Prompts, see CoachingSettingsPage.tsx). The
+              standalone Objections nav link that used to sit here was
+              removed as part of this merge — Objections now lives as a
+              sub-section of this same Coaching page. Visible to every
+              logged-in user; each section gates its own admin-only
+              affordances internally. */}
           <Link
             to="/coaching"
             aria-label="Coaching"

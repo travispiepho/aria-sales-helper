@@ -809,3 +809,30 @@ export interface DeleteCoachingStageResult {
 export async function deleteCoachingStage(key: string): Promise<DeleteCoachingStageResult> {
   return request('DELETE', `/api/coaching-stages/${encodeURIComponent(key)}`);
 }
+
+// ─── Coaching prompts (2026-08-30, aria_coaching_settings_prompt_editor) ──
+// The LLM system prompts driving ARIA's coaching engine (real-time
+// in-person + setup-call coaching, BANT, insider-language flagger,
+// question-gap detector, live rebuttal suggestion), now DB-backed and
+// admin-editable instead of hardcoded template-literal constants. GET is
+// open to any authenticated user (reps can see what's currently live,
+// same spirit as Coaching Stages / Objections); PUT is admin-only
+// server-side — see server/coachingPrompts.js's route-block comment for
+// the full auth rationale. Surfaced in the merged Coaching Settings page's
+// "Coaching Prompts" section (CoachingPromptsSection.tsx).
+
+export interface CoachingPromptRecord {
+  key: string;
+  label: string;
+  prompt_text: string;
+  updated_at: string;
+  updated_by?: string | null;
+}
+
+export async function listCoachingPrompts(): Promise<{ prompts: CoachingPromptRecord[] }> {
+  return request('GET', '/api/coaching-prompts');
+}
+
+export async function updateCoachingPrompt(key: string, promptText: string): Promise<CoachingPromptRecord> {
+  return request('PUT', `/api/coaching-prompts/${encodeURIComponent(key)}`, { prompt_text: promptText });
+}

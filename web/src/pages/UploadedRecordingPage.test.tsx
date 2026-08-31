@@ -271,16 +271,43 @@ describe('UploadedRecordingPage', () => {
     expect(input.getAttribute('accept')).toContain('.mp4');
   });
 
-  it('shows file metadata and gates start on authority acknowledgment', async () => {
+  // 2026-08-31 (aria_uploaded_recording_remove_metadata_section): the
+  // Filename/Duration/Type metadata <dl> block this test used to assert on
+  // is fully removed from the page (not merely hidden) per Gabe's ask —
+  // see the dedicated 'never renders the file metadata' test below. This
+  // test now only covers the authority-acknowledgment gating behavior.
+  it('gates start on authority acknowledgment', async () => {
     renderPage();
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', true);
     await selectAudio();
-    expect(screen.getByText('customer-call.wav')).toBeTruthy();
-    expect(screen.getByText('audio/wav')).toBeTruthy();
-    expect(screen.getByText('0:12')).toBeTruthy();
+    expect(screen.getByLabelText('Selected recording playback')).toBeTruthy();
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', true);
     await userEvent.click(screen.getByRole('checkbox'));
     expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', false);
+  });
+
+  // 2026-08-31 (aria_uploaded_recording_remove_metadata_section): per
+  // Gabe's ask, the Filename/Duration/Type metadata block (previously only
+  // hidden during active analysis by 330daac) is now removed outright —
+  // it must never render, in idle, active, or complete states.
+  it('never renders the file metadata block (Filename/Duration/Type) in any state', async () => {
+    renderPage();
+    await selectAudio();
+    // Before analysis starts: no metadata block, but the preview audio and
+    // consent checkbox are still present (untouched by this removal).
+    expect(screen.queryByText('customer-call.wav')).toBeNull();
+    expect(screen.queryByText('audio/wav')).toBeNull();
+    expect(screen.queryByText('0:12')).toBeNull();
+    expect(screen.getByLabelText('Selected recording playback')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('checkbox'));
+    await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+    await screen.findByRole('heading', { name: 'Live transcript' });
+
+    // During analysis: still absent.
+    expect(screen.queryByText('customer-call.wav')).toBeNull();
+    expect(screen.queryByText('audio/wav')).toBeNull();
+    expect(screen.queryByText('0:12')).toBeNull();
   });
 
   // aria_recording_analysis_meeting_type_choice (2026-08-31): the rep must
@@ -391,21 +418,22 @@ describe('UploadedRecordingPage', () => {
     expect(screen.getByRole('button', { name: /End Meeting/ })).toBeTruthy();
   });
 
-  // 2026-08-30 (aria_uploaded_recording_hide_metadata_during_analysis): once
-  // analysis is active, the file-selection metadata chrome (heading,
-  // Filename/Duration/Type dl block, preview <audio> element + its
-  // locked-seeking note, and the consent checkbox) is no longer relevant —
-  // it served its purpose during file selection — so it is unmounted, not
-  // merely disabled/hidden. It reliably reappears once `active` goes back to
-  // false (idle for a fresh pick, or complete/error).
-  it('hides the Playback & analysis controls heading, metadata block, preview audio, and consent checkbox once analysis is active', async () => {
+  // 2026-08-30 (aria_uploaded_recording_hide_metadata_during_analysis) /
+  // 2026-08-31 (aria_uploaded_recording_remove_metadata_section): once
+  // analysis is active, the file-selection chrome (heading, preview <audio>
+  // element + its locked-seeking note, and the consent checkbox) is no
+  // longer relevant — it served its purpose during file selection — so it
+  // is unmounted, not merely disabled/hidden. It reliably reappears once
+  // `active` goes back to false (idle for a fresh pick, or complete/error).
+  // The Filename/Duration/Type metadata dl block once covered by this test
+  // is now removed outright in every state (see the dedicated 'never
+  // renders the file metadata block' test above), so it is no longer
+  // asserted here.
+  it('hides the Playback & analysis controls heading, preview audio, and consent checkbox once analysis is active', async () => {
     renderPage();
     expect(screen.getByRole('heading', { name: 'Playback & analysis controls' })).toBeTruthy();
 
     await selectAudio();
-    expect(screen.getByText('customer-call.wav')).toBeTruthy();
-    expect(screen.getByText('audio/wav')).toBeTruthy();
-    expect(screen.getByText('0:12')).toBeTruthy();
     expect(screen.getByLabelText('Selected recording playback')).toBeTruthy();
     expect(screen.getByRole('checkbox')).toBeTruthy();
 
@@ -413,11 +441,9 @@ describe('UploadedRecordingPage', () => {
     await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
     await screen.findByRole('heading', { name: 'Live transcript' });
 
-    // Now analysis is active: all of the file-selection metadata chrome must
-    // be gone, not merely disabled.
+    // Now analysis is active: all of the file-selection chrome must be gone,
+    // not merely disabled.
     expect(screen.queryByRole('heading', { name: 'Playback & analysis controls' })).toBeNull();
-    expect(screen.queryByText('customer-call.wav')).toBeNull();
-    expect(screen.queryByText('audio/wav')).toBeNull();
     expect(screen.queryByLabelText('Selected recording playback')).toBeNull();
     expect(screen.queryByText(/Seeking and playback-speed changes are locked/)).toBeNull();
     expect(screen.queryByRole('checkbox')).toBeNull();

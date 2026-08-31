@@ -638,13 +638,16 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             <>
               <h2 className="font-semibold text-gray-900">Playback &amp; analysis controls</h2>
 
+              {/* 2026-08-31 (aria_uploaded_recording_remove_metadata_section):
+                  per Gabe's ask, the Filename/Duration/Type metadata <dl>
+                  block that used to render here (and, since 330daac, was
+                  only ever hidden during active analysis rather than
+                  removed outright) is now fully removed — it no longer
+                  renders in any state (before, during, or after analysis).
+                  The wrapping div and the preview <audio> element below are
+                  unrelated to this metadata block and are unaffected. */}
               {objectUrl && file && (
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-3">
-                  <dl className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
-                    <div><dt className="text-gray-500">Filename</dt><dd className="font-medium text-gray-900 break-all">{file.name}</dd></div>
-                    <div><dt className="text-gray-500">Duration</dt><dd className="font-medium text-gray-900">{metadataLoading ? 'Reading…' : formatRecordingDuration(duration)}</dd></div>
-                    <div><dt className="text-gray-500">Type</dt><dd className="font-medium text-gray-900">{file.type || 'Unknown'}</dd></div>
-                  </dl>
                   <audio
                     ref={previewAudioRef}
                     aria-label="Selected recording playback"

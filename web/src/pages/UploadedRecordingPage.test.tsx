@@ -558,6 +558,123 @@ describe('UploadedRecordingPage', () => {
     expect(controls.contains(screen.getByRole('button', { name: /End Meeting/ }))).toBe(true);
   });
 
+  // 2026-08-31 (aria_uploaded_recording_group_controls_container): once
+  // analysis has started, the progress bar, Start Analysis / Pause buttons,
+  // and End Meeting button must all render inside ONE shared visual
+  // container (a single bordered/grouped card), not three separately-
+  // floating elements — verified via actual DOM containment, not just
+  // visual proximity.
+  describe('shared analysis-controls container once started', () => {
+    it('groups the progress bar, Start Analysis, Pause, and End Meeting inside one shared container while playing', async () => {
+      await startAnalysis();
+
+      const group = document.querySelector('[data-analysis-controls-group]');
+      expect(group).toBeTruthy();
+      expect(group!.contains(screen.getByLabelText('Playback progress'))).toBe(true);
+      expect(group!.contains(screen.getByRole('button', { name: /Start Analysis/ }))).toBe(true);
+      expect(group!.contains(screen.getByRole('button', { name: /Pause/ }))).toBe(true);
+      expect(group!.contains(screen.getByRole('button', { name: /End Meeting/ }))).toBe(true);
+      // The End Meeting control's own established DOM hook must still be
+      // nested inside the new shared container, not replaced by it.
+      expect(group!.querySelector('[data-meeting-end-control]')).toBeTruthy();
+    });
+
+    it('keeps the progress bar, Pause (as Resume), and End Meeting grouped together while paused', async () => {
+      await startAnalysis();
+      await userEvent.click(screen.getByRole('button', { name: /Pause/ }));
+
+      const group = document.querySelector('[data-analysis-controls-group]');
+      expect(group).toBeTruthy();
+      expect(group!.contains(screen.getByLabelText('Playback progress'))).toBe(true);
+      expect(group!.contains(screen.getByRole('button', { name: /Resume/ }))).toBe(true);
+      expect(group!.contains(screen.getByRole('button', { name: /End Meeting/ }))).toBe(true);
+    });
+
+    it('keeps the group at the bottom of the type column once started (End Meeting is still the last rendered top-level control)', async () => {
+      await startAnalysis();
+      const typeColumn = document.querySelector('[data-meeting-column="type"]')!;
+      const group = typeColumn.querySelector('[data-analysis-controls-group]')!;
+      expect(group).toBeTruthy();
+      // The group itself is a direct top-level child of the type column, so
+      // .uploaded-type-column's justify-content: space-between still pins it
+      // (as a whole) to the bottom of the column exactly as the standalone
+      // End Meeting div used to be pinned before this task.
+      expect(group.parentElement).toBe(typeColumn);
+      const endControl = group.querySelector('[data-meeting-end-control]')!;
+      expect(endControl).toBeTruthy();
+      expect(endControl.className).toContain('active-meeting-end-control');
+    });
+
+    it('does not render the grouped container before analysis starts (idle), while Start Analysis and End Meeting remain independently present and functional', async () => {
+      renderPage();
+      expect(document.querySelector('[data-analysis-controls-group]')).toBeNull();
+      const startButton = screen.getByRole('button', { name: /Start Analysis/ });
+      const endButton = screen.getByRole('button', { name: /End Meeting/ });
+      expect(startButton).toBeTruthy();
+      expect(endButton).toBeTruthy();
+      expect(startButton).toHaveProperty('disabled', true); // no file selected yet
+      expect(endButton).toHaveProperty('disabled', false);
+
+      await selectAudio();
+      await userEvent.click(screen.getByRole('checkbox'));
+      // Still idle (Start Analysis not yet clicked) — still no group.
+      expect(document.querySelector('[data-analysis-controls-group]')).toBeNull();
+      expect(screen.getByRole('button', { name: /Start Analysis/ })).toHaveProperty('disabled', false);
+    });
+
+    it('groups the progress bar, Start Analysis (as Retry), and End Meeting together after an error (started but not idle)', async () => {
+      mocks.createMeeting.mockRejectedValueOnce(new Error('Network unavailable'));
+      renderPage();
+      await selectAudio();
+      await userEvent.click(screen.getByRole('checkbox'));
+      await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+      await screen.findByRole('alert');
+
+      const group = document.querySelector('[data-analysis-controls-group]');
+      expect(group).toBeTruthy();
+      expect(group!.contains(screen.getByRole('button', { name: /Retry Analysis/ }))).toBe(true);
+      expect(group!.contains(screen.getByRole('button', { name: /End Meeting/ }))).toBe(true);
+    });
+
+    it('includes the View completed meeting analysis button and End Meeting together in the group once complete', async () => {
+      let playbackCallbacks: { onEnded: () => void } | undefined;
+      mocks.play.mockImplementation(async (callbacks: { onEnded: () => void }) => { playbackCallbacks = callbacks; });
+      mocks.waitForCompletion.mockImplementation(() => new Promise(() => {})); // stays in 'stopping' (started, post-idle)
+      renderPage();
+      await selectAudio();
+      await userEvent.click(screen.getByRole('checkbox'));
+      await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+      await waitFor(() => expect(playbackCallbacks).toBeTruthy());
+      playbackCallbacks!.onEnded();
+      await waitFor(() => expect(screen.getByText('Finalizing…')).toBeTruthy());
+
+      const group = document.querySelector('[data-analysis-controls-group]');
+      expect(group).toBeTruthy();
+      expect(group!.contains(screen.getByLabelText('Playback progress'))).toBe(true);
+      // Still disabled mid-finalize, but must still be inside the group.
+      const endButton = screen.getByRole('button', { name: /End Meeting/ });
+      expect(group!.contains(endButton)).toBe(true);
+      expect(endButton).toHaveProperty('disabled', true);
+    });
+
+    it('resets to the ungrouped pre-start layout on a fresh mount back in idle', async () => {
+      const { unmount } = await (async () => {
+        const result = renderPage();
+        await selectAudio();
+        await userEvent.click(screen.getByRole('checkbox'));
+        await userEvent.click(screen.getByRole('button', { name: /Start Analysis/ }));
+        await screen.findByRole('heading', { name: 'Live transcript' });
+        return result;
+      })();
+      expect(document.querySelector('[data-analysis-controls-group]')).toBeTruthy();
+      unmount();
+      renderPage();
+      expect(document.querySelector('[data-analysis-controls-group]')).toBeNull();
+      expect(screen.getByRole('button', { name: /Start Analysis/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /End Meeting/ })).toBeTruthy();
+    });
+  });
+
   it('renders all 11 uploaded-recording coaching checklist items in the shared wrapped grid', async () => {
     const applyLiveMessage = await startAnalysis();
     const waitingPanel = screen.getByRole('region', { name: 'ARIA Coaching' });

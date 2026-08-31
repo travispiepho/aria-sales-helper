@@ -94,6 +94,22 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const active = state === 'preparing' || state === 'playing' || state === 'paused' || state === 'stopping';
+  // 2026-08-31 (aria_uploaded_recording_group_controls_container): reuses
+  // the exact same monotonic "the rep has actually clicked Start Analysis"
+  // signal `state !== 'idle'` already introduced for the Customer Info
+  // gating above (see that block's own comment for why `state` never goes
+  // back to 'idle' once analysis begins — handleStart() sets 'preparing'
+  // synchronously as its first state update and nothing in this file ever
+  // reverts to 'idle' afterward; completion instead navigates away to a
+  // different page/component entirely). `started` is true for
+  // preparing/playing/paused/stopping/complete/error — i.e. every state
+  // reachable only via an actual Start Analysis click, including a failed
+  // attempt (still "started", just started-and-errored) — and false only
+  // in the untouched 'idle' state. This is the flag used below to decide
+  // whether the progress bar / Start+Pause buttons / End Meeting button
+  // render inside one shared grouped container (started) or in their
+  // original pre-grouping, ungrouped layout (idle).
+  const started = state !== 'idle';
 
   function handleTranscriptScroll() {
     const el = transcriptContainerRef.current;
@@ -711,71 +727,120 @@ export default function UploadedRecordingPage({ onMeetingStarted }: { onMeetingS
             </div>
           )}
 
-          {(active || state === 'complete') && (
-            <div aria-live="polite" className="space-y-1">
-              <div className="flex justify-between text-xs text-gray-600">
-                <span>{state === 'paused' ? 'Paused' : state === 'stopping' ? 'Finalizing…' : state === 'complete' ? 'Complete' : 'Analyzing at 1x'}</span>
-                <span>{formatRecordingDuration(progress)} / {formatRecordingDuration(duration)}</span>
+          {/* 2026-08-31 (aria_uploaded_recording_group_controls_container):
+              extracted as local JSX values (not separate components) so the
+              exact same elements/handlers render in both branches below
+              without duplicating markup — only whether they are wrapped
+              inside the shared post-start card differs. */}
+          {(() => {
+            const progressBar = (active || state === 'complete') && (
+              <div aria-live="polite" className="space-y-1">
+                <div className="flex justify-between text-xs text-gray-600">
+                  <span>{state === 'paused' ? 'Paused' : state === 'stopping' ? 'Finalizing…' : state === 'complete' ? 'Complete' : 'Analyzing at 1x'}</span>
+                  <span>{formatRecordingDuration(progress)} / {formatRecordingDuration(duration)}</span>
+                </div>
+                <progress aria-label="Playback progress" max={duration || 1} value={Math.min(progress, duration || 1)} className="w-full h-2" />
               </div>
-              <progress aria-label="Playback progress" max={duration || 1} value={Math.min(progress, duration || 1)} className="w-full h-2" />
-            </div>
-          )}
+            );
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <button
-              onClick={handleStart}
-              disabled={!canStart}
-              className="min-h-11 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold px-4"
-            >
-              {state === 'preparing' ? 'Starting…' : state === 'error' ? 'Retry Analysis' : '▶ Start Analysis'}
-            </button>
-            <button
-              onClick={handlePauseResume}
-              disabled={state !== 'playing' && state !== 'paused'}
-              className="min-h-11 rounded-xl border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50 text-gray-700 font-semibold px-4"
-            >
-              {state === 'paused' ? '▶ Resume' : '⏸ Pause'}
-            </button>
-          </div>
+            const startPauseGrid = (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  onClick={handleStart}
+                  disabled={!canStart}
+                  className="min-h-11 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold px-4"
+                >
+                  {state === 'preparing' ? 'Starting…' : state === 'error' ? 'Retry Analysis' : '▶ Start Analysis'}
+                </button>
+                <button
+                  onClick={handlePauseResume}
+                  disabled={state !== 'playing' && state !== 'paused'}
+                  className="min-h-11 rounded-xl border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50 text-gray-700 font-semibold px-4"
+                >
+                  {state === 'paused' ? '▶ Resume' : '⏸ Pause'}
+                </button>
+              </div>
+            );
 
-          {state === 'complete' && meetingId && (
-            <button
-              onClick={() => navigate(postRecordingPath(meetingId))}
-              className="w-full min-h-11 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4"
-            >
-              View completed meeting analysis
-            </button>
-          )}
+            const viewCompletedButton = state === 'complete' && meetingId && (
+              <button
+                onClick={() => navigate(postRecordingPath(meetingId))}
+                className="w-full min-h-11 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4"
+              >
+                View completed meeting analysis
+              </button>
+            );
 
-          {/* "End Meeting" replaces the former "■ Stop Analysis" control. Same
-              label/icon, placement (bottom of this left/type column, pinned
-              via .active-meeting-end-control's margin-top: auto — the exact
-              mechanism MeetingPage.tsx's in-person End Meeting button uses),
-              and styling as the in-person page (see EndMeetingButton/
-              EndMeetingConfirmModal in ../components/EndMeetingButton,
-              extracted from MeetingPage.tsx for guaranteed parity).
+            // "End Meeting" replaces the former "■ Stop Analysis" control. Same
+            // label/icon and styling as the in-person page (see
+            // EndMeetingButton/EndMeetingConfirmModal in
+            // ../components/EndMeetingButton, extracted from MeetingPage.tsx
+            // for guaranteed parity).
+            //
+            // 2026-08-30 (aria_uploaded_recording_end_always_active): only
+            // disabled during 'stopping' — a finalize() is already in flight
+            // at that point (async round-trip to acknowledge/persist
+            // completion), and a second click mid-finalize has no well-
+            // defined action, so it's momentarily disabled rather than firing
+            // a redundant finalize or an ambiguous home-nav while that
+            // settles. Every OTHER state ('idle', 'preparing', 'playing',
+            // 'paused', 'error', 'complete') now leaves this always
+            // clickable — Troy's ask was that this button always be a
+            // working escape hatch back to home. See
+            // handleEndMeetingButtonClick() above for the per-state
+            // behavior: playing/paused still opens the confirm dialog and
+            // Confirm still calls the same finalize() as before (unchanged);
+            // every other reachable state navigates straight home since
+            // there's nothing live to confirm ending.
+            const endMeetingControl = (
+              <div data-meeting-end-control className="active-meeting-end-control">
+                <EndMeetingButton
+                  onClick={handleEndMeetingButtonClick}
+                  disabled={state === 'stopping'}
+                />
+              </div>
+            );
 
-              2026-08-30 (aria_uploaded_recording_end_always_active): only
-              disabled during 'stopping' — a finalize() is already in flight
-              at that point (async round-trip to acknowledge/persist
-              completion), and a second click mid-finalize has no well-
-              defined action, so it's momentarily disabled rather than firing
-              a redundant finalize or an ambiguous home-nav while that
-              settles. Every OTHER state ('idle', 'preparing', 'playing',
-              'paused', 'error', 'complete') now leaves this always
-              clickable — Troy's ask was that this button always be a
-              working escape hatch back to home. See
-              handleEndMeetingButtonClick() above for the per-state
-              behavior: playing/paused still opens the confirm dialog and
-              Confirm still calls the same finalize() as before (unchanged);
-              every other reachable state navigates straight home since
-              there's nothing live to confirm ending. */}
-          <div data-meeting-end-control className="active-meeting-end-control">
-            <EndMeetingButton
-              onClick={handleEndMeetingButtonClick}
-              disabled={state === 'stopping'}
-            />
-          </div>
+            // 2026-08-31 (aria_uploaded_recording_group_controls_container):
+            // once analysis has started (`started` — see its own comment
+            // above for exactly which state signal this is and why), the
+            // progress bar, Start Analysis / Pause buttons, and End Meeting
+            // button all render together inside ONE shared bordered card
+            // (`data-analysis-controls-group`), matching this file's and
+            // MeetingPage.tsx's existing grouped-container visual pattern
+            // (`bg-white rounded-2xl border border-gray-100 shadow-sm p-4` —
+            // see e.g. the Rename Speakers / Live transcript /
+            // CustomerInfoSection containers above) instead of three
+            // separately-floating elements. This card becomes the last
+            // top-level child of `.uploaded-type-column` while started (in
+            // place of the formerly-separate bottom-pinned End Meeting div),
+            // so `.uploaded-type-column`'s own `justify-content:
+            // space-between` still pins it — as a whole — to the bottom of
+            // the column, and `.active-meeting-end-control`'s `flex: none`
+            // still governs the nested End Meeting div's own sizing inside
+            // this card's flex layout. Before analysis has started (idle —
+            // the only state where `started` is false), the progress bar
+            // never renders anyway (gated on `active || complete`, both
+            // false in idle), so the pre-start branch below is simply the
+            // original ungrouped Start/Pause grid + End Meeting control,
+            // unchanged from before this task.
+            return started ? (
+              <div
+                data-analysis-controls-group
+                className="flex-none flex flex-col gap-3 rounded-2xl border border-gray-100 bg-white shadow-sm p-4"
+              >
+                {progressBar}
+                {startPauseGrid}
+                {viewCompletedButton}
+                {endMeetingControl}
+              </div>
+            ) : (
+              <>
+                {startPauseGrid}
+                {endMeetingControl}
+              </>
+            );
+          })()}
         </section>
       </main>
 

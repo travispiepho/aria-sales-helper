@@ -31,6 +31,8 @@
  *     analysis out" unit that's easy to unit-test without a live DB.
  */
 
+import { resolveDiscProfile } from './discProfiles.js';
+
 const OPENROUTER_MODEL = 'anthropic/claude-haiku-4-5';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const HEADERS_EXTRA = {
@@ -465,12 +467,21 @@ Return ONLY raw JSON, no prose, no markdown, in this exact shape:
   }
 }`;
 
+// aria_disc_style_lock_to_four_bird_profiles (2026-08-31): emoji/label are
+// NEVER taken from the LLM's raw disc.emoji/disc.label fields anymore —
+// they previously passed straight through here with only a typeof check,
+// which let the model invent non-canonical animals (e.g. "turtle"). Both
+// fields are now 100% derived from `detected` via the shared
+// resolveDiscProfile() lookup in discProfiles.js, the same one server.js's
+// live-call path uses, so the two paths can't drift apart again.
 function normalizeSetupCallDisc(disc) {
+  const detected = typeof disc?.detected === 'string' ? disc.detected : null;
+  const { emoji, label } = resolveDiscProfile(detected);
   return {
-    detected: typeof disc?.detected === 'string' ? disc.detected : null,
+    detected,
     confidence: typeof disc?.confidence === 'string' ? disc.confidence : null,
-    emoji: typeof disc?.emoji === 'string' ? disc.emoji : '',
-    label: typeof disc?.label === 'string' ? disc.label : '',
+    emoji,
+    label,
     tip: typeof disc?.tip === 'string' ? disc.tip : '',
   };
 }
@@ -692,6 +703,10 @@ export {
   analyzeSetupCallCoaching,
   extractAppointmentDetails,
   mergeProjectInfo,
+  // Exported directly (aria_disc_style_lock_to_four_bird_profiles,
+  // 2026-08-31) so tests can assert its bad-LLM-input regression case
+  // without needing a full analyzeSetupCallCoaching()/fetch mock round-trip.
+  normalizeSetupCallDisc,
   // Hardcoded prompt constants, exported (2026-08-30,
   // aria_coaching_settings_prompt_editor_backend) as documented SEED/
   // fallback defaults for coachingPrompts.js's getPromptText() — used to

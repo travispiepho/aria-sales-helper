@@ -71,6 +71,7 @@ import { createFirst30SpeakerRepairCoordinator } from './first30SpeakerRepair.js
 import { createReadinessTracker } from './readinessTracker.js';
 import { registerUploadedRecordingRoutes, UPLOADED_RECORDING_CHANNEL } from './uploadedRecording.js';
 import { normalizeMeetingTitle, requireSingleMeetingUpdate } from './meetingTitle.js';
+import { resolveDiscProfile } from './discProfiles.js';
 import { AiGenerationError, createAnthropicPrimaryTextGenerator } from './aiProvider.js';
 import { registerScheduledMeetingRoutes } from './scheduledMeetings.js';
 import { registerCustomerRoutes } from './customers.js';
@@ -2753,6 +2754,24 @@ async function runCoachingAnalysis(meetingId) {
     // Normalize: urgent must be string | null (Claude sometimes returns an object)
     if (coaching.urgent && typeof coaching.urgent === 'object') {
       coaching.urgent = coaching.urgent.message || coaching.urgent.flag || JSON.stringify(coaching.urgent);
+    }
+
+    // aria_disc_style_lock_to_four_bird_profiles (2026-08-31): emoji/label
+    // are NEVER trusted from Claude's raw disc.emoji/disc.label output —
+    // the system prompt only tells the model the D/Eagle, I/Parrot, S/Dove,
+    // C/Owl mapping as GUIDANCE TEXT, nothing previously validated the
+    // model's actual JSON output against it, so it could (and did per
+    // Gabe's report) drift and invent a non-canonical animal (e.g.
+    // "turtle"). Both fields are now 100% derived from disc.detected via
+    // the shared resolveDiscProfile() lookup in discProfiles.js — the same
+    // one coachingAnalysis.js's setup-call path uses, so the two paths
+    // cannot drift apart from each other again.
+    if (coaching.disc && typeof coaching.disc === 'object') {
+      const detected = typeof coaching.disc.detected === 'string' ? coaching.disc.detected : null;
+      const { emoji, label } = resolveDiscProfile(detected);
+      coaching.disc.detected = detected;
+      coaching.disc.emoji = emoji;
+      coaching.disc.label = label;
     }
 
     // Persist snapshot

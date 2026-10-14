@@ -1,0 +1,128 @@
+{
+  "products": [
+    {
+      "product_line": "Madera Trace",
+      "line_code": "WEK60",
+      "type": "Engineered Wood",
+      "species": "European White Oak",
+      "plank_width_inches": 8.5,
+      "plank_length_max_inches": 86,
+      "thickness_inches": 0.5,
+      "shade_variation": "Medium",
+      "colorways": [
+        {
+          "sku": "32700-127",
+          "color_code": "127",
+          "color_name": "Natural Stone Oak",
+          "texture_file": "WEK60-127-natural-stone-oak.png",
+          "texture_px": [
+            544,
+            515
+          ]
+        },
+        {
+          "sku": "32700-137",
+          "color_code": "137",
+          "color_name": "Antiqued Plaster Oak",
+          "texture_file": "WEK60-137-antiqued-plaster-oak.png",
+          "texture_px": [
+            544,
+            515
+          ]
+        },
+        {
+          "sku": "32700-147",
+          "color_code": "147",
+          "color_name": "Papyrus Oak",
+          "texture_file": "WEK60-147-papyrus-oak.png",
+          "texture_px": [
+            544,
+            515
+          ]
+        },
+        {
+          "sku": "32700-841",
+          "color_code": "841",
+          "color_name": "Sepia Oak",
+          "texture_file": "WEK60-841-sepia-oak.png",
+          "texture_px": [
+            543,
+            515
+          ]
+        },
+        {
+          "sku": "32700-859",
+          "color_code": "859",
+          "color_name": "Topeka Taupe Oak",
+          "texture_file": "WEK60-859-topeka-taupe-oak.png",
+          "texture_px": [
+            543,
+            493
+          ]
+        }
+      ]
+    }
+  ],
+  "sku_index": {
+    "32700-127": {
+      "line_code": "WEK60",
+      "product_line": "Madera Trace",
+      "sku": "32700-127",
+      "color_code": "127",
+      "color_name": "Natural Stone Oak",
+      "texture_file": "WEK60-127-natural-stone-oak.png",
+      "texture_px": [
+        544,
+        515
+      ]
+    },
+    "32700-137": {
+      "line_code": "WEK60",
+      "product_line": "Madera Trace",
+      "sku": "32700-137",
+      "color_code": "137",
+      "color_name": "Antiqued Plaster Oak",
+      "texture_file": "WEK60-137-antiqued-plaster-oak.png",
+      "texture_px": [
+        544,
+        515
+      ]
+    },
+    "32700-147": {
+      "line_code": "WEK60",
+      "product_line": "Madera Trace",
+      "sku": "32700-147",
+      "color_code": "147",
+      "color_name": "Papyrus Oak",
+      "texture_file": "WEK60-147-papyrus-oak.png",
+      "texture_px": [
+        544,
+        515
+      ]
+    },
+    "32700-841": {
+      "line_code": "WEK60",
+      "product_line": "Madera Trace",
+      "sku": "32700-841",
+      "color_code": "841",
+      "color_name": "Sepia Oak",
+      "texture_file": "WEK60-841-sepia-oak.png",
+      "texture_px": [
+        543,
+        515
+      ]
+    },
+    "32700-859": {
+      "line_code": "WEK60",
+      "product_line": "Madera Trace",
+      "sku": "32700-859",
+      "color_code": "859",
+      "color_name": "Topeka Taupe Oak",
+      "texture_file": "WEK60-859-topeka-taupe-oak.png",
+      "texture_px": [
+        543,
+        493
+      ]
+    }
+  }
+}

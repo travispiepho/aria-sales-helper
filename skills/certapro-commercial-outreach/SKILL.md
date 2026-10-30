@@ -127,14 +127,130 @@ Access verified 2026-10-30.
 - Stop sequence on any reply, meeting booked, opt-out, or duplicate.
 - Two failures at the same step → stop and diagnose. Do not retry blind.
 
+## Brand Constraints
+
+> Source: CertaPro Brand Standard doc (1eFTtN4NpqSlcSuxl2Ra-3w-zWru_rEGzZHr-8J_DKj0). Load that skill before drafting any outreach copy.
+
+### Core Voice Rules
+- **The word is "certainty."** Every draft must touch certainty, extraordinary experience, or promise delivered. Copy that never lands on one of these three is off-voice.
+- **Brand Promise (verbatim):** "In a world of increasingly little or no certainty, CertaPro Painters® delivers certainty one job and one extraordinary customer experience at a time."
+- **Brand Vision:** "To consistently deliver extraordinary experiences®."
+- **Brand Values:** Deliver what you promise. Respect the individual. Have pride in what you do. Practice continuous improvement. Embrace Possibilities.
+- **Tone:** Professional, warm, confident — not pushy or salesy. CertaPro is the trusted expert, not the hungry vendor.
+- **Shelter/protection framing** is on-brand for commercial: facilities protect the people and assets inside them. Connect painting to that.
+
+### Trademark Phrases
+These require ® on first use in any document — do not paraphrase into new taglines:
+`CertaPro Painters®`, `North America's Most Referred Painting Company®`, `Certainty Service System®`, `Consistently Delivering Extraordinary Experiences®`, `Certainty Pledge®`, `The Color of Certainty®`, `Painting with Certainty®`
+
+### Prohibited in Copy
+- Do not invent taglines or slogans that aren't in the trademark list without explicit approval
+- Do not use jargon that doesn't tie back to certainty / trust / extraordinary experience
+- Do not use the wrong logo variant (Commercial logo for B2B outreach: use CP_Logo_Commercial)
+- Do not use fonts other than Gilroy (fallback: Avenir)
+- Phone numbers and website URLs always set in Gilroy Bold
+- Do not reference paint color codes, apparel, or consumer-residential framing in commercial copy
+
+### Approved in Commercial Email Copy
+- Reference certainty, expertise, and track record
+- Name specific scope and amount from the estimate record (never invent details)
+- One direct question per email
+- Sign as: Dominic Dault, CertaPro Painters of Grand Haven, 616-414-2543
+- Vary opening line on 2nd/3rd/4th touch (per 7-day follow-up templates)
+
+---
+
+## Pipeline Coaching Framework (FastTrack30 — Jarold Martin)
+
+> **Status: NOT YET DOCUMENTED IN DRIVE.** No FastTrack30, Jarold Martin, or WHY/HOW/NEXT documents found in any Drive folder accessible to aria-docs-bot as of 2026-10-30. Troy told Travis (Oct 30) that "Jarold shared several documents" — these are not yet uploaded.
+
+### What Is Known (from SKILL.md context and Troy's Sep 21 directive)
+
+- **Source:** Jarold Martin (jaroldmartin@certapro.com / 347-659-0143), CertaPro Franchise Business Coach meeting with Dominic Sep 14, 2026
+- **Key stat:** 69% of CertaPro GH pipeline = previous customers. Jarold's FastTrack30 target: $2M booked by Thanksgiving.
+- **Troy's vision:** Chief of Staff acts as Dominic's virtual Franchise Business Coach — daily pipeline review, auto-draft follow-up emails, coaching Dominic on next actions.
+
+### WHY / HOW / NEXT Framework (known structure — full docs pending)
+| Element | Meaning |
+|---------|----------|
+| WHY | Why this account / why now — context that justifies the outreach |
+| HOW | How CertaPro will deliver / what the solution looks like |
+| NEXT | The single next action Dominic must take today |
+
+### ACT / DISCOVER / WAIT / RE-ENGAGE / CLOSE Action Taxonomy (known structure — full docs pending)
+| Status | Meaning | Dominic's action |
+|--------|---------|------------------|
+| ACT | Hot — respond or advance today | Call within 24h |
+| DISCOVER | Needs more research / context | Research + personalize |
+| WAIT | Right account, wrong timing | Scheduled re-touch |
+| RE-ENGAGE | Had contact, went cold | Re-engagement sequence |
+| CLOSE | Estimate out, awaiting decision | Follow-up draft |
+
+### Gap / Blocker
+The full Jarold framework documents (presumably PDFs or Google Docs shared by Jarold with Troy after the Sep 14 meeting) are NOT in Drive. Troy referenced them in the Oct 30 email to Travis. **Action required: Travis or Troy must upload to the Troy Shared Skills Drive folder (1Ri52FjYZTph54m2AxE5rR262iu6h_Z3R) so they can be read by aria-docs-bot.**
+
+---
+
+## Cross-Dependencies
+
+### This skill depends on (upstream blockers)
+| Dependency | Required For | Status | Owner |
+|------------|-------------|--------|-------|
+| Dominic's Outlook on Always-On Mac | Draft placement (all tracks) | BLOCKED | Travis |
+| Dominic Outlook Draft-Injection Skill | Creating drafts programmatically | BLOCKED | Travis |
+| CertaOne (Certa1 / Dynamics) auth | Track 1 list building, estimate pull | BLOCKED (no Mac Studio CDP) | Travis |
+| CoStar export file (TH CostarExport-405.xlsx) | Track 2 list building | NOT FOUND in workspace — needs upload | Seth/Troy |
+| Bright Data / ZoomInfo enrichment access | Contact enrichment | UNVERIFIED | Travis |
+| Jarold FastTrack30 framework docs | Coaching logic, pipeline taxonomy | NOT IN DRIVE | Troy/Travis |
+| Suppression / opt-out list for MI commercial | Compliance gating | NOT CONFIRMED | Seth/Troy |
+
+### The 7-Day Follow-Up skill depends on THIS skill (downstream consumers)
+Doc: `1XfRfA9OiyRVthg1kkQpW8x0IsXJmpk2irKqWaQ1BOI0` | Schedule: weekday 07:30 ET
+
+| What the 7-Day Skill Needs From This Skill | Notes |
+|---------------------------------------------|-------|
+| Initial prospect list / contact format | Must match Certa1 estimate record format |
+| Ledger schema: `prospectr_bi.cos.estimate_followups` | Shared write target; avoid duplicate drafts |
+| Suppression list | Shared; both skills must check same list |
+| Dominic's Outlook Draft-Injection Skill | Same dependency — must be set up once for both |
+| Certa1 open-estimate stage names | Must be confirmed on first Certa1 run; record in Part 2 |
+
+**Cadence rule:** 7-day follow-up cadence (touches: days 7, 14, 21, 28, max 4) begins AFTER this skill creates an initial outreach draft. Both skills share the ledger to prevent duplicate draft creation.
+
+### MotherDuck Revenue Context (2026-10-30 query)
+Data from `prospectr_bi.bi.lead_profit` — all in_report YTD:
+
+| Class | Leads | Won | QBO Revenue | QBO GP | GP% |
+|-------|-------|-----|-------------|--------|-----|
+| Residential | 924 | 360 | $1,603,125 | $859,054 | 53.6% |
+| Commercial | 262 | 143 | $1,431,094 | $722,930 | 50.5% |
+
+**Commercial is 47% of revenue and 46% of GP.** Primary commercial channel: In-House Commercial Team ($1.12M revenue, $546K GP from 213 leads). Prospectr Cold Calling resurfaced 1 commercial job (Eaton, $163K, 73.9% GP margin).
+
+**Top commercial accounts (>$20K):** Eaton ($163K), Schupan ($112K), Covenant Developments ($71K+$42K), Solrace Properties ($61K+$32K), 5/3 Bank ($60K+$45K), Shoreline Container ($59K), Pioneer Construction ($51K+$39K+$24K), Servpro (multiple jobs).
+
+---
+
 ## Changelog
 
-### 2026-10-30
+### 2026-10-30 (Session 2 — Solo Dev by Chief of Staff)
 - Full skill overview documented from Gabe/Bot handoff email (Seth Blake taking ownership)
 - Master Google Doc read successfully: 62,755 chars, all 16 SOP sections + Part 2 + Part 3 confirmed
 - Correct access path documented: `aria-docs-bot` SA key via `GOOGLE_SERVICE_ACCOUNT_JSON` in `.env.secrets` (base64)
 - Open blockers 1–16 documented; none cleared as of last changelog entry (2026-10-14)
 - Seth already listed as Co-operator since 2026-10-01 (Part 3 of canonical doc)
+
+**Solo dev session additions (2026-10-30 Session 2):**
+- Brand Constraints section written from Brand Standard doc (1eFTtN4NpqSlcSuxl2Ra-3w-zWru_rEGzZHr-8J_DKj0) — voice/tone rules, trademark phrases, prohibited/approved copy patterns
+- Pipeline Coaching Framework (FastTrack30) section written — WHY/HOW/NEXT and ACT/DISCOVER/WAIT/RE-ENGAGE/CLOSE documented from context; full Jarold docs NOT FOUND in Drive (gap documented)
+- Cross-Dependencies section written — upstream blockers and downstream 7-day follow-up skill dependencies mapped
+- MotherDuck revenue context queried: Commercial = $1.43M revenue / $722K GP (47% of total); 262 leads, 143 won
+- Drive folder audit: No "CertaPro Shared Skills" folder found; Troy Shared Skills folder (1Ri52FjYZTph54m2AxE5rR262iu6h_Z3R) has 25 items; canonical doc 404 for aria-docs-bot (needs share)
+- Pilot artifacts: No /artifacts/ directory found — pilot records from Aug 26 not persisted locally
+- CoStar file: TH CostarExport-405.xlsx not found in workspace or /tmp — needs upload from Troy/Seth
+- dependency-register.md written at skills/certapro-commercial-outreach/dependency-register.md
+- go-live-brief.md written at skills/certapro-commercial-outreach/go-live-brief.md
+- Canonical Google Doc update BLOCKED (404 for aria-docs-bot) — doc must be re-shared with aria-docs-bot@aria-sales-helper.iam.gserviceaccount.com
 
 ### 2026-10-14
 - No functional advances today. No changes.

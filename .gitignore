@@ -12,3 +12,34 @@ server/knowledge/ARIA_SALES_HELPER.md
 # server/scripts/ for the reference test scripts that ARE committed.
 server/model-compare.scratch.mjs
 server/results/
+
+# OpenClaw workspace files — not part of the aria-sales-helper app
+memory/
+MEMORY.md
+*.jsonl
+reports/
+skills/
+skills.bak/
+backups/
+SKILLS_MANIFEST.json
+DREAMS.md
+HEARTBEAT.md
+TOOLS.md
+IDENTITY.md
+USER.md
+SOUL.md
+AGENTS.md
+__pycache__/
+.venv-cdp/
+.venv-motherduck/
+.secrets/
+
+# Bot workspace files — never commit these (added 2026-11-02 per Travis/Gabe PR #48)
+memory/
+MEMORY.md
+projects/
+reports/
+backups/
+skills/
+.openclaw/
+*.jsonl
